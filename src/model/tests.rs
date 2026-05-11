@@ -1,8 +1,16 @@
 use super::{
-    ActorKind, Event, EventPayload, EventType, HeartbeatReq, ObjectType, SessionHandle,
-    SessionRole, bd_import_v1_subtask_id, make_id, parse_generated_members,
+    AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimResult,
+    ConflictResolutionState, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, Event,
+    EventPayload, EventType, ExitSessionReq, ExpiredCountPayload, HeartbeatReq,
+    ImportOpenSpecAction, ImportOpenSpecEvent, MarkAppliedReq, ObjectType,
+    OpenSpecImportProvenance, OpenSpecSourceDigest, PublishArtifactReq, ReadyQueueClaim,
+    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, Reservation, ReservationState,
+    ResolveConflictReq, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SettlementTarget,
+    StaleSessionsPayload, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SupersedeQueueItemReq,
+    bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::CoveyError;
+use serde::Serialize;
 
 #[test]
 fn make_id_uses_prefix_and_uuid_suffix() {
@@ -127,4 +135,323 @@ fn event_typed_propagates_payload_decode_failures() {
         .expect_err("malformed payload must fail to decode");
 
     assert!(matches!(err, CoveyError::SerializationError(_)));
+}
+
+fn payload_json<T: Serialize>(payload: &T) -> String {
+    serde_json::to_string(payload).expect("payload fixture should serialize")
+}
+
+fn sample_reservation() -> Reservation {
+    Reservation {
+        reservation_id: "reservation-1".to_owned(),
+        owner_subtask_id: "subtask-1".to_owned(),
+        scope_class: ScopeClass::ExactPath,
+        scope_key: "src/lib.rs".to_owned(),
+        generated_members: vec![],
+        lease_deadline: 200,
+        state: ReservationState::Active,
+        created_at: 10,
+        updated_at: 11,
+    }
+}
+
+fn sample_openspec_event() -> ImportOpenSpecEvent {
+    ImportOpenSpecEvent {
+        change_id: "change-1".to_owned(),
+        object_type: ObjectType::Subtask,
+        object_id: "subtask-1".to_owned(),
+        openspec_task_id: Some("1.1".to_owned()),
+        action: ImportOpenSpecAction::Created,
+        provenance: OpenSpecImportProvenance {
+            object_type: ObjectType::Subtask,
+            object_id: "subtask-1".to_owned(),
+            planning_format: "openspec".to_owned(),
+            openspec_change_id: "change-1".to_owned(),
+            openspec_change_path: "openspec/changes/change-1".to_owned(),
+            openspec_task_id: Some("1.1".to_owned()),
+            proposal_digest: Some("sha256:proposal".to_owned()),
+            design_digest: Some("sha256:design".to_owned()),
+            tasks_digest: "sha256:tasks".to_owned(),
+            spec_digests: vec![OpenSpecSourceDigest::new(
+                "specs/example/spec.md".to_owned(),
+                "sha256:spec".to_owned(),
+            )],
+            source_digests: vec![OpenSpecSourceDigest::new(
+                "tasks.md".to_owned(),
+                "sha256:tasks".to_owned(),
+            )],
+            mission_artifact_digests: vec![],
+            mission_artifacts: vec![],
+            task_digest: Some("sha256:task".to_owned()),
+            updated_at: 123,
+        },
+    }
+}
+
+#[test]
+fn event_payload_from_json_decodes_every_event_type_variant() {
+    let session = SessionHandle::new(
+        "session-1".to_owned(),
+        "principal-1".to_owned(),
+        "instance-1".to_owned(),
+        SessionRole::Executor,
+    );
+    let heartbeat = HeartbeatReq {
+        session_token: "session-1".to_owned(),
+        idempotency_key: "idem-heartbeat".to_owned(),
+    };
+    let exit = ExitSessionReq {
+        session_token: "session-1".to_owned(),
+        idempotency_key: "idem-exit".to_owned(),
+    };
+    let submit = SubmitMetaTaskReq {
+        session_token: "session-1".to_owned(),
+        prompt_text: "do work".to_owned(),
+        idempotency_key: "idem-submit".to_owned(),
+    };
+    let cancel = CancelMetaTaskReq {
+        session_token: "session-1".to_owned(),
+        meta_task_id: "meta-1".to_owned(),
+        idempotency_key: "idem-cancel".to_owned(),
+    };
+    let create = CreateSubtaskReq {
+        session_token: "session-1".to_owned(),
+        meta_task_id: "meta-1".to_owned(),
+        subtask_id: Some("subtask-1".to_owned()),
+        title: "implement".to_owned(),
+        kind: SubtaskKind::Work,
+        review_target_subtask_id: None,
+        review_target_artifact_digest: None,
+        priority: 10,
+        idempotency_key: "idem-create".to_owned(),
+    };
+    let claim = ClaimResult::new("claim-1".to_owned(), "subtask-1".to_owned(), 1, 500);
+    let start = StartSubtaskReq {
+        session_token: "session-1".to_owned(),
+        claim_id: "claim-1".to_owned(),
+        fence_seq: 1,
+        idempotency_key: "idem-start".to_owned(),
+    };
+    let release = ReleaseClaimReq {
+        session_token: "session-1".to_owned(),
+        claim_id: "claim-1".to_owned(),
+        fence_seq: 1,
+        idempotency_key: "idem-release".to_owned(),
+    };
+    let artifact = PublishArtifactReq {
+        session_token: "session-1".to_owned(),
+        claim_id: "claim-1".to_owned(),
+        fence_seq: 1,
+        artifact_digest: "sha256:artifact".to_owned(),
+        artifact_kind: ArtifactKind::PatchBundle,
+        base_rev: "base".to_owned(),
+        manifest_path: "manifest.json".to_owned(),
+        changed_paths_digest: "sha256:paths".to_owned(),
+        idempotency_key: "idem-artifact".to_owned(),
+    };
+    let review_request = RequestReviewReq {
+        session_token: "session-1".to_owned(),
+        subtask_id: "subtask-1".to_owned(),
+        artifact_digest: "sha256:artifact".to_owned(),
+        review_subtask_id: Some("review-subtask-1".to_owned()),
+        priority: 5,
+        idempotency_key: "idem-review".to_owned(),
+    };
+    let review_decision = DecideReviewReq {
+        session_token: "session-reviewer".to_owned(),
+        review_id: "review-1".to_owned(),
+        claim_id: "claim-review".to_owned(),
+        fence_seq: 1,
+        verdict: ReviewVerdict::Approve,
+        findings_digest: "sha256:findings".to_owned(),
+        idempotency_key: "idem-decision".to_owned(),
+    };
+    let enqueue = EnqueueForApplyReq {
+        session_token: "session-1".to_owned(),
+        artifact_digest: "sha256:artifact".to_owned(),
+        subtask_id: "subtask-1".to_owned(),
+        settlement_target: SettlementTarget::Canonical,
+        idempotency_key: "idem-enqueue".to_owned(),
+    };
+    let queue_claim = ReadyQueueClaim::new(
+        "queue-1".to_owned(),
+        "sha256:artifact".to_owned(),
+        "subtask-1".to_owned(),
+        SettlementTarget::Canonical,
+        1,
+        900,
+    );
+    let mark_applied = MarkAppliedReq {
+        session_token: "session-1".to_owned(),
+        queue_id: "queue-1".to_owned(),
+        claim_fence_seq: 1,
+        idempotency_key: "idem-applied".to_owned(),
+    };
+    let reservation_request = RequestReservationReq {
+        session_token: "session-1".to_owned(),
+        owner_subtask_id: "subtask-1".to_owned(),
+        scope_class: ScopeClass::ExactPath,
+        scope_key: "src/lib.rs".to_owned(),
+        generated_members: vec![],
+        lease_duration_ms: 60_000,
+        idempotency_key: "idem-reservation".to_owned(),
+    };
+    let reservation = sample_reservation();
+    let resolve = ResolveConflictReq {
+        session_token: "session-1".to_owned(),
+        conflict_id: "conflict-1".to_owned(),
+        resolution_state: ConflictResolutionState::Resolved,
+        idempotency_key: "idem-resolve".to_owned(),
+    };
+    let stale_sessions = StaleSessionsPayload::new(2);
+    let expired = ExpiredCountPayload::new(3);
+    let openspec = sample_openspec_event();
+
+    let cases = vec![
+        (
+            EventType::SessionRegistered,
+            payload_json(&session),
+            EventPayload::SessionRegistered(session),
+        ),
+        (
+            EventType::SessionHeartbeat,
+            payload_json(&heartbeat),
+            EventPayload::SessionHeartbeat(heartbeat),
+        ),
+        (
+            EventType::SessionExited,
+            payload_json(&exit),
+            EventPayload::SessionExited(exit),
+        ),
+        (
+            EventType::MetaTaskSubmitted,
+            payload_json(&submit),
+            EventPayload::MetaTaskSubmitted(submit.clone()),
+        ),
+        (
+            EventType::MetaTaskCancelled,
+            payload_json(&cancel),
+            EventPayload::MetaTaskCancelled(cancel),
+        ),
+        (
+            EventType::SubtaskCreated,
+            payload_json(&create),
+            EventPayload::SubtaskCreated(create),
+        ),
+        (
+            EventType::SubtaskClaimed,
+            payload_json(&claim),
+            EventPayload::SubtaskClaimed(claim.clone()),
+        ),
+        (
+            EventType::SubtaskStarted,
+            payload_json(&start),
+            EventPayload::SubtaskStarted(start.clone()),
+        ),
+        (
+            EventType::SubtaskAbandoned,
+            payload_json(&start),
+            EventPayload::SubtaskAbandoned(AbandonSubtaskReq {
+                session_token: start.session_token.clone(),
+                claim_id: start.claim_id.clone(),
+                fence_seq: start.fence_seq,
+                idempotency_key: start.idempotency_key.clone(),
+            }),
+        ),
+        (
+            EventType::ClaimReleased,
+            payload_json(&release),
+            EventPayload::ClaimReleased(release),
+        ),
+        (
+            EventType::ClaimRenewed,
+            payload_json(&claim),
+            EventPayload::ClaimRenewed(claim),
+        ),
+        (
+            EventType::ArtifactPublished,
+            payload_json(&artifact),
+            EventPayload::ArtifactPublished(artifact),
+        ),
+        (
+            EventType::ReviewRequested,
+            payload_json(&review_request),
+            EventPayload::ReviewRequested(review_request),
+        ),
+        (
+            EventType::ReviewDecided,
+            payload_json(&review_decision),
+            EventPayload::ReviewDecided(review_decision),
+        ),
+        (
+            EventType::ReadyQueueEnqueued,
+            payload_json(&enqueue),
+            EventPayload::ReadyQueueEnqueued(enqueue),
+        ),
+        (
+            EventType::ReadyQueueInFlight,
+            payload_json(&queue_claim),
+            EventPayload::ReadyQueueInFlight(queue_claim),
+        ),
+        (
+            EventType::ReadyQueueApplied,
+            payload_json(&mark_applied),
+            EventPayload::ReadyQueueApplied(mark_applied.clone()),
+        ),
+        (
+            EventType::ReadyQueueSuperseded,
+            payload_json(&mark_applied),
+            EventPayload::ReadyQueueSuperseded(SupersedeQueueItemReq {
+                session_token: mark_applied.session_token.clone(),
+                queue_id: mark_applied.queue_id.clone(),
+                idempotency_key: mark_applied.idempotency_key.clone(),
+            }),
+        ),
+        (
+            EventType::ReservationRequested,
+            payload_json(&reservation_request),
+            EventPayload::ReservationRequested(reservation_request),
+        ),
+        (
+            EventType::ReservationReleased,
+            payload_json(&reservation),
+            EventPayload::ReservationReleased(reservation.clone()),
+        ),
+        (
+            EventType::ReservationRenewed,
+            payload_json(&reservation),
+            EventPayload::ReservationRenewed(reservation),
+        ),
+        (
+            EventType::ConflictResolved,
+            payload_json(&resolve),
+            EventPayload::ConflictResolved(resolve),
+        ),
+        (
+            EventType::SessionsReaped,
+            payload_json(&stale_sessions),
+            EventPayload::SessionsReaped(stale_sessions),
+        ),
+        (
+            EventType::ClaimsExpired,
+            payload_json(&expired),
+            EventPayload::ClaimsExpired(expired.clone()),
+        ),
+        (
+            EventType::ReservationsExpired,
+            payload_json(&expired),
+            EventPayload::ReservationsExpired(expired),
+        ),
+        (
+            EventType::OpenSpecImported,
+            payload_json(&openspec),
+            EventPayload::OpenSpecImported(Box::new(openspec)),
+        ),
+    ];
+
+    for (event_type, payload_json, expected) in cases {
+        let decoded =
+            EventPayload::from_json(event_type, &payload_json).expect("payload should decode");
+        assert_eq!(decoded, expected, "{event_type:?}");
+    }
 }

@@ -17,11 +17,17 @@ const REQUIRED_TASK_FIELDS: &[&str] = &[
     "Traceability Refs",
     "Stale If",
 ];
-const PROTECTED_FORBIDDEN_PATHS: &[&str] = &[
-    "mutai-rs/**",
+const CANONICAL_PROTECTED_FORBIDDEN_PATHS: &[&str] = &[
+    "authority/**",
     "go/controlplane/**",
     "vendored/cliproxyapiplus/**",
     ".git/**",
+];
+const PROTECTED_FORBIDDEN_PATH_GROUPS: &[&[&str]] = &[
+    &["authority/**", "mutai-rs/**"],
+    &["go/controlplane/**"],
+    &["vendored/cliproxyapiplus/**"],
+    &[".git/**"],
 ];
 const ARTIFACT_NAMES: &[&str] = &[
     "mission.json",
@@ -749,12 +755,20 @@ fn path_policy_blockers(task: &SourceTask) -> Vec<String> {
     }
 
     let forbidden = task_field(task, "Forbidden Paths").unwrap_or_default();
-    for protected in PROTECTED_FORBIDDEN_PATHS {
-        if !forbidden.contains(protected) && !allowed.contains(protected) {
-            blockers.push(format!("missing protected forbidden path {protected}"));
+    for protected_group in PROTECTED_FORBIDDEN_PATH_GROUPS {
+        if !protected_group
+            .iter()
+            .any(|protected| forbidden.contains(protected) || allowed.contains(protected))
+        {
+            blockers.push(format!(
+                "missing protected forbidden path {}",
+                protected_group.join(" or ")
+            ));
         }
-        if allowed.contains(protected) {
-            blockers.push(format!("protected path {protected} cannot be allowed"));
+        for protected in *protected_group {
+            if allowed.contains(protected) {
+                blockers.push(format!("protected path {protected} cannot be allowed"));
+            }
         }
     }
 
@@ -1000,7 +1014,7 @@ fn build_artifacts(source: &SourceSnapshot, lint: &LintState) -> BTreeMap<&'stat
             "default_policy": "deny-write-unless-allowed",
             "allowed_read_paths": ["openspec/changes/**", "openspec/config.yaml", "openspec/schemas/better-droid/**"],
             "allowed_write_paths": [format!("{}/mission/*.json", source.relative_change_path)],
-            "forbidden_write_paths": PROTECTED_FORBIDDEN_PATHS,
+            "forbidden_write_paths": CANONICAL_PROTECTED_FORBIDDEN_PATHS,
             "generated_paths": [format!("{}/mission/*.json", source.relative_change_path)],
             "task_overrides": [],
             "reservation_policy": {

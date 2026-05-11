@@ -113,6 +113,7 @@ pub struct RepoopsAuthorityGitContextFact {
 }
 
 /// Covey lifecycle fact snapshot for mutAI repoops preflight.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct RepoopsAuthoritySnapshot {

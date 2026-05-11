@@ -453,7 +453,10 @@ pub type Result<T> = std::result::Result<T, CoveyError>;
 #[cfg(test)]
 mod tests {
     use super::CoveyError;
-    use crate::model::{ObjectType, SessionState, StateValue, SubtaskState};
+    use crate::model::{
+        ClaimState, MetaTaskState, ObjectType, SessionRole, SessionState, StateValue, SubtaskState,
+    };
+    use rstest::rstest;
 
     #[test]
     fn partial_eq_matches_structured_error_payloads() {
@@ -498,6 +501,176 @@ mod tests {
         );
 
         assert_eq!(left, right);
+        assert_ne!(left, different);
+    }
+
+    #[rstest]
+    #[case::session_not_found(
+        CoveyError::SessionNotFound,
+        CoveyError::SessionNotFound,
+        CoveyError::SubtaskNotFound
+    )]
+    #[case::artifact_not_found(
+        CoveyError::ArtifactNotFound,
+        CoveyError::ArtifactNotFound,
+        CoveyError::ReviewNotFound
+    )]
+    #[case::meta_task_not_found(
+        CoveyError::MetaTaskNotFound,
+        CoveyError::MetaTaskNotFound,
+        CoveyError::ReservationNotFound
+    )]
+    #[case::claim_not_found(
+        CoveyError::ClaimNotFound,
+        CoveyError::ClaimNotFound,
+        CoveyError::QueueItemNotFound
+    )]
+    #[case::conflict_not_found(
+        CoveyError::ConflictNotFound,
+        CoveyError::ConflictNotFound,
+        CoveyError::FenceTokenMismatch
+    )]
+    #[case::review_kind_mismatch(
+        CoveyError::ReviewKindMismatch,
+        CoveyError::ReviewKindMismatch,
+        CoveyError::SessionNotFound
+    )]
+    #[case::subtask_claimed(
+        CoveyError::SubtaskAlreadyClaimed { subtask_id: "subtask-1".into(), held_by: "session-1".into() },
+        CoveyError::SubtaskAlreadyClaimed { subtask_id: "subtask-1".into(), held_by: "session-1".into() },
+        CoveyError::SubtaskAlreadyClaimed { subtask_id: "subtask-2".into(), held_by: "session-1".into() }
+    )]
+    #[case::session_already_active(
+        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into() },
+        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into() },
+        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-2".into() }
+    )]
+    #[case::session_has_active_subtask(
+        CoveyError::SessionAlreadyHasActiveSubtask { session_token: "session-1".into(), active_subtask_id: "subtask-1".into() },
+        CoveyError::SessionAlreadyHasActiveSubtask { session_token: "session-1".into(), active_subtask_id: "subtask-1".into() },
+        CoveyError::SessionAlreadyHasActiveSubtask { session_token: "session-1".into(), active_subtask_id: "subtask-2".into() }
+    )]
+    #[case::invalid_session_token(
+        CoveyError::InvalidSessionToken { session_token: "session-1".into() },
+        CoveyError::InvalidSessionToken { session_token: "session-1".into() },
+        CoveyError::InvalidSessionToken { session_token: "session-2".into() }
+    )]
+    #[case::invalid_idempotency_key(
+        CoveyError::InvalidIdempotencyKey { idempotency_key: "idem-1".into() },
+        CoveyError::InvalidIdempotencyKey { idempotency_key: "idem-1".into() },
+        CoveyError::InvalidIdempotencyKey { idempotency_key: "idem-2".into() }
+    )]
+    #[case::idempotency_conflict(
+        CoveyError::IdempotencyConflict { actor_key: "actor-1".into(), operation: "claim".into(), idempotency_key: "idem-1".into() },
+        CoveyError::IdempotencyConflict { actor_key: "actor-1".into(), operation: "claim".into(), idempotency_key: "idem-1".into() },
+        CoveyError::IdempotencyConflict { actor_key: "actor-2".into(), operation: "claim".into(), idempotency_key: "idem-1".into() }
+    )]
+    #[case::stale_fence_token(
+        CoveyError::StaleFenceToken { expected: 2, provided: 1 },
+        CoveyError::StaleFenceToken { expected: 2, provided: 1 },
+        CoveyError::StaleFenceToken { expected: 3, provided: 1 }
+    )]
+    #[case::claim_not_held(
+        CoveyError::ClaimNotHeld { claim_id: "claim-1".into(), state: ClaimState::Released },
+        CoveyError::ClaimNotHeld { claim_id: "claim-1".into(), state: ClaimState::Released },
+        CoveyError::ClaimNotHeld { claim_id: "claim-1".into(), state: ClaimState::Expired }
+    )]
+    #[case::not_claim_owner(
+        CoveyError::NotClaimOwner { session_token: "session-1".into(), claim_owner: "session-2".into() },
+        CoveyError::NotClaimOwner { session_token: "session-1".into(), claim_owner: "session-2".into() },
+        CoveyError::NotClaimOwner { session_token: "session-1".into(), claim_owner: "session-3".into() }
+    )]
+    #[case::not_queue_claim_owner(
+        CoveyError::NotQueueClaimOwner { session_token: "session-1".into(), queue_owner: "session-2".into() },
+        CoveyError::NotQueueClaimOwner { session_token: "session-1".into(), queue_owner: "session-2".into() },
+        CoveyError::NotQueueClaimOwner { session_token: "session-1".into(), queue_owner: "session-3".into() }
+    )]
+    #[case::wrong_role(
+        CoveyError::WrongRole { expected: vec![SessionRole::Executor, SessionRole::Reviewer], actual: SessionRole::Orchestrator },
+        CoveyError::WrongRole { expected: vec![SessionRole::Executor, SessionRole::Reviewer], actual: SessionRole::Orchestrator },
+        CoveyError::WrongRole { expected: vec![SessionRole::Executor], actual: SessionRole::Orchestrator }
+    )]
+    #[case::artifact_digest_collision(
+        CoveyError::ArtifactDigestCollision { digest: "digest-1".into() },
+        CoveyError::ArtifactDigestCollision { digest: "digest-1".into() },
+        CoveyError::ArtifactDigestCollision { digest: "digest-2".into() }
+    )]
+    #[case::unknown_artifact_digest(
+        CoveyError::UnknownArtifactDigest { digest: "digest-1".into() },
+        CoveyError::UnknownArtifactDigest { digest: "digest-1".into() },
+        CoveyError::UnknownArtifactDigest { digest: "digest-2".into() }
+    )]
+    #[case::duplicate_subtask_id(
+        CoveyError::DuplicateSubtaskId { subtask_id: "subtask-1".into() },
+        CoveyError::DuplicateSubtaskId { subtask_id: "subtask-1".into() },
+        CoveyError::DuplicateSubtaskId { subtask_id: "subtask-2".into() }
+    )]
+    #[case::review_already_open(
+        CoveyError::ReviewAlreadyOpen { subtask_id: "subtask-1".into(), artifact_digest: "digest-1".into() },
+        CoveyError::ReviewAlreadyOpen { subtask_id: "subtask-1".into(), artifact_digest: "digest-1".into() },
+        CoveyError::ReviewAlreadyOpen { subtask_id: "subtask-1".into(), artifact_digest: "digest-2".into() }
+    )]
+    #[case::separation_of_duties(
+        CoveyError::SeparationOfDutiesViolation { reviewer_principal_id: "principal-1".into(), producer_principal_id: "principal-1".into() },
+        CoveyError::SeparationOfDutiesViolation { reviewer_principal_id: "principal-1".into(), producer_principal_id: "principal-1".into() },
+        CoveyError::SeparationOfDutiesViolation { reviewer_principal_id: "principal-1".into(), producer_principal_id: "principal-2".into() }
+    )]
+    #[case::meta_task_unavailable(
+        CoveyError::MetaTaskUnavailable { meta_task_id: "meta-1".into(), state: MetaTaskState::Cancelled },
+        CoveyError::MetaTaskUnavailable { meta_task_id: "meta-1".into(), state: MetaTaskState::Cancelled },
+        CoveyError::MetaTaskUnavailable { meta_task_id: "meta-1".into(), state: MetaTaskState::Completed }
+    )]
+    #[case::lease_expired(
+        CoveyError::LeaseExpired { object_id: "claim-1".into() },
+        CoveyError::LeaseExpired { object_id: "claim-1".into() },
+        CoveyError::LeaseExpired { object_id: "claim-2".into() }
+    )]
+    #[case::invalid_lease_duration(
+        CoveyError::InvalidLeaseDuration { field: "lease_duration_ms".into(), provided: 0 },
+        CoveyError::InvalidLeaseDuration { field: "lease_duration_ms".into(), provided: 0 },
+        CoveyError::InvalidLeaseDuration { field: "lease_duration_ms".into(), provided: -1 }
+    )]
+    #[case::invalid_path(
+        CoveyError::InvalidPath { path: "../escape".into() },
+        CoveyError::InvalidPath { path: "../escape".into() },
+        CoveyError::InvalidPath { path: "safe".into() }
+    )]
+    #[case::input_too_large(
+        CoveyError::InputTooLarge { field: "title".into(), actual: 257, max: 256 },
+        CoveyError::InputTooLarge { field: "title".into(), actual: 257, max: 256 },
+        CoveyError::InputTooLarge { field: "title".into(), actual: 258, max: 256 }
+    )]
+    #[case::import_source_not_found(
+        CoveyError::ImportSourceNotFound { path: "missing.db".into() },
+        CoveyError::ImportSourceNotFound { path: "missing.db".into() },
+        CoveyError::ImportSourceNotFound { path: "other.db".into() }
+    )]
+    #[case::invalid_source_schema(
+        CoveyError::InvalidSourceSchema { path: "source.db".into(), detail: "missing table".into() },
+        CoveyError::InvalidSourceSchema { path: "source.db".into(), detail: "missing table".into() },
+        CoveyError::InvalidSourceSchema { path: "source.db".into(), detail: "bad column".into() }
+    )]
+    #[case::invalid_import_destination(
+        CoveyError::InvalidImportDestination { reason: "ambiguous".into() },
+        CoveyError::InvalidImportDestination { reason: "ambiguous".into() },
+        CoveyError::InvalidImportDestination { reason: "missing".into() }
+    )]
+    #[case::invalid_import_row(
+        CoveyError::InvalidImportRow { source_issue_id: "42".into(), reason: "empty title".into() },
+        CoveyError::InvalidImportRow { source_issue_id: "42".into(), reason: "empty title".into() },
+        CoveyError::InvalidImportRow { source_issue_id: "43".into(), reason: "empty title".into() }
+    )]
+    #[case::import_duplicate(
+        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: "subtask-1".into() },
+        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: "subtask-1".into() },
+        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: "subtask-2".into() }
+    )]
+    fn partial_eq_covers_structured_error_variants(
+        #[case] left: CoveyError,
+        #[case] same: CoveyError,
+        #[case] different: CoveyError,
+    ) {
+        assert_eq!(left, same);
         assert_ne!(left, different);
     }
 }
