@@ -158,6 +158,7 @@ struct SourceSnapshot {
     change_path: PathBuf,
     relative_change_path: String,
     schema_name: String,
+    change_status: Option<String>,
     openspec_yaml: SourceFile,
     proposal: SourceFile,
     design: SourceFile,
@@ -354,6 +355,7 @@ fn load_source(project_root: &Path, change_id: &str) -> Result<SourceSnapshot> {
         ),
         change_path,
         schema_name: "better-droid".to_owned(),
+        change_status: parse_yaml_scalar(&openspec_yaml.text, "status"),
         openspec_yaml,
         proposal,
         design,
@@ -366,9 +368,14 @@ fn load_source(project_root: &Path, change_id: &str) -> Result<SourceSnapshot> {
 }
 
 fn parse_schema_name(text: &str) -> Option<String> {
+    parse_yaml_scalar(text, "schema")
+}
+
+fn parse_yaml_scalar(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
     text.lines()
-        .find_map(|line| line.trim().strip_prefix("schema:").map(str::trim))
-        .map(|schema| schema.trim_matches('"').to_owned())
+        .find_map(|line| line.trim().strip_prefix(prefix.as_str()).map(str::trim))
+        .map(|value| value.trim_matches('"').to_owned())
 }
 
 fn read_required_file(project_root: &Path, path: &Path) -> Result<SourceFile> {
@@ -552,6 +559,20 @@ fn lint_source(source: &SourceSnapshot) -> LintState {
     let mut warnings = Vec::new();
     let mut classifications = Vec::with_capacity(source.tasks_parsed.len());
     let mut covered_scenarios = BTreeSet::new();
+
+    if source
+        .change_status
+        .as_deref()
+        .is_some_and(|status| status.starts_with("stale"))
+    {
+        blockers.push(Blocker {
+            id: "stale_openspec_change".to_owned(),
+            source_path: source.openspec_yaml.relative_path.clone(),
+            task_id: None,
+            scenario_id: None,
+            detail: "change is marked stale; reauthor against the current Covey/mutai-rs authority split before compile or import".to_owned(),
+        });
+    }
 
     if source.tasks_parsed.is_empty() {
         blockers.push(Blocker {
@@ -1452,6 +1473,7 @@ mod tests {
             relative_change_path: "openspec/changes/better-droid-unit".into(),
             schema_name: "better-droid".into(),
             openspec_yaml: source_file("openspec/changes/better-droid-unit/openspec.yaml", ""),
+            change_status: None,
             proposal: source_file("openspec/changes/better-droid-unit/proposal.md", ""),
             design: source_file("openspec/changes/better-droid-unit/design.md", ""),
             tasks: source_file("openspec/changes/better-droid-unit/tasks.md", ""),

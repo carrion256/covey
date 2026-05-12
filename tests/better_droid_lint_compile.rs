@@ -138,6 +138,69 @@ fn better_droid_compile_rejects_blocked_source() {
 }
 
 #[test]
+fn better_droid_lint_blocks_stale_marked_change() {
+    let fixture = Fixture::passing();
+    let change_dir = fixture
+        .root()
+        .join("openspec")
+        .join("changes")
+        .join("passing-fixture");
+    fs::write(
+        change_dir.join(".openspec.yaml"),
+        "schema: better-droid\nstatus: stale_reauthor_required\n",
+    )
+    .expect("mark fixture stale");
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_path_buf(),
+        change_id: "passing-fixture".to_owned(),
+    })
+    .expect("lint stale fixture");
+
+    assert_eq!(report.status, ReportStatus::Blocked);
+    assert!(!report.import_ready);
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.id == "stale_openspec_change")
+    );
+}
+
+#[test]
+fn better_droid_compile_blocks_stale_marked_change_without_writes() {
+    let fixture = Fixture::passing();
+    let change_dir = fixture
+        .root()
+        .join("openspec")
+        .join("changes")
+        .join("passing-fixture");
+    fs::write(
+        change_dir.join(".openspec.yaml"),
+        "schema: better-droid\nstatus: stale_reauthor_required\nstale_reason: boundary drift\n",
+    )
+    .expect("mark fixture stale");
+
+    let report = compile_change(&CompileOptions {
+        project_root: fixture.root().to_path_buf(),
+        change_id: "passing-fixture".to_owned(),
+        output_dir: None,
+    })
+    .expect("compile stale fixture returns blocked report");
+
+    assert_eq!(report.status, ReportStatus::Blocked);
+    assert!(!report.import_ready);
+    assert!(report.created_artifacts.is_empty());
+    assert!(!fixture.mission_dir("passing-fixture").exists());
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.id == "stale_openspec_change")
+    );
+}
+
+#[test]
 fn better_droid_valid_source_compiles_canonical_json_packet() {
     let fixture = Fixture::passing();
 
