@@ -10,6 +10,8 @@ use std::{
     thread,
 };
 
+mod support;
+
 use covey::{
     AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimNextReq,
     ClaimReadyQueueReq, ClaimResult, ClaimSubtaskReq, Covey, CoveyError, CreateSubtaskReq,
@@ -45,6 +47,7 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        support::enable_info_logging();
         let dir = TempDir::new().expect("tempdir");
         let db_path = dir.path().join("covey.db");
         Self {

@@ -1,3 +1,6 @@
+#![allow(unexpected_cfgs)]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! Covey is a correctness-critical coordination substrate for agent cohorts.
 //!
 //! v0.1 intentionally targets a single-node embedded deployment over one

@@ -393,6 +393,212 @@ fn better_droid_compile_rejects_output_path_escape() {
     assert!(!fixture.root().join("../../outside").exists());
 }
 
+#[test]
+fn better_droid_rejects_schema_mismatch_and_missing_specs() {
+    let schema_fixture = Fixture::passing();
+    fs::write(
+        schema_fixture
+            .root()
+            .join("openspec/changes/passing-fixture/.openspec.yaml"),
+        "schema: other\n",
+    )
+    .expect("rewrite schema");
+    let schema_error = lint_change(&LintOptions {
+        project_root: schema_fixture.root().to_owned(),
+        change_id: "passing-fixture".to_owned(),
+    })
+    .expect_err("schema mismatch should fail source loading");
+    assert!(
+        schema_error
+            .to_string()
+            .contains("schema must be better-droid")
+    );
+
+    let missing_specs = Fixture::new();
+    let change_dir = missing_specs
+        .root()
+        .join("openspec/changes/missing-specs-fixture");
+    fs::create_dir_all(&change_dir).expect("create change dir");
+    fs::write(change_dir.join(".openspec.yaml"), "schema: better-droid\n").expect("write yaml");
+    fs::write(change_dir.join("proposal.md"), PROPOSAL).expect("write proposal");
+    fs::write(change_dir.join("design.md"), DESIGN).expect("write design");
+    fs::write(change_dir.join("tasks.md"), PASSING_TASK).expect("write tasks");
+    let specs_error = lint_change(&LintOptions {
+        project_root: missing_specs.root().to_owned(),
+        change_id: "missing-specs-fixture".to_owned(),
+    })
+    .expect_err("missing specs should fail source loading");
+    assert!(
+        specs_error
+            .to_string()
+            .contains("missing_required_source: specs")
+    );
+}
+
+#[test]
+fn better_droid_empty_task_file_blocks_readiness() {
+    let fixture = Fixture::new();
+    fixture.write_change("empty-tasks-fixture", "", PASSING_SPEC);
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "empty-tasks-fixture".to_owned(),
+    })
+    .expect("lint empty task fixture");
+
+    assert_eq!(report.status, ReportStatus::Blocked);
+    assert!(report.blockers.iter().any(|blocker| {
+        blocker.id == "missing_required_source"
+            && blocker.detail.contains("no stable task checklist entries")
+    }));
+}
+
+#[test]
+fn better_droid_counts_rejected_deferred_and_high_risk_blocked_tasks() {
+    let fixture = Fixture::new();
+    fixture.write_change("classification-fixture", CLASSIFICATION_TASKS, PASSING_SPEC);
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "classification-fixture".to_owned(),
+    })
+    .expect("lint classification fixture");
+
+    assert_eq!(report.status, ReportStatus::Blocked);
+    assert_eq!(report.task_counts.total, 3);
+    assert_eq!(report.task_counts.rejected, 1);
+    assert_eq!(report.task_counts.deferred, 1);
+    assert_eq!(report.task_counts.blocked, 1);
+    assert!(report.blockers.iter().any(|blocker| {
+        blocker
+            .detail
+            .contains("unresolved high or critical assumption approval")
+    }));
+}
+
+#[test]
+fn better_droid_large_task_sets_warn_without_blocking_on_size_alone() {
+    let fixture = Fixture::new();
+    let mut tasks = String::new();
+    for index in 1..=31 {
+        tasks.push_str(&format!(
+            "- [ ] 1.{index} Document large fixture task {index}\n  - **Type:** note\n  - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture\n\n"
+        ));
+    }
+    fixture.write_change("large-task-fixture", &tasks, PASSING_SPEC);
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "large-task-fixture".to_owned(),
+    })
+    .expect("lint large task fixture");
+
+    assert_eq!(report.status, ReportStatus::Ready);
+    assert_eq!(report.task_counts.importable, 31);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.id == "large_task_set")
+    );
+}
+
+#[test]
+fn better_droid_path_policy_reports_escape_protected_and_overlap_blockers() {
+    let fixture = Fixture::new();
+    fixture.write_change("path-policy-fixture", PATH_POLICY_EDGE_TASK, PASSING_SPEC);
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "path-policy-fixture".to_owned(),
+    })
+    .expect("lint path policy fixture");
+
+    let details = report
+        .blockers
+        .iter()
+        .map(|blocker| blocker.detail.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("repo-global write scope"))
+    );
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("out-of-root write scope"))
+    );
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("protected path authority/**"))
+    );
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("allowed and forbidden paths overlap"))
+    );
+}
+
+#[test]
+fn better_droid_compile_accepts_custom_output_inside_mission_dir() {
+    let fixture = Fixture::passing();
+    let output = fixture
+        .root()
+        .join("openspec/changes/passing-fixture/mission/custom");
+
+    let report = compile_change(&CompileOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "passing-fixture".to_owned(),
+        output_dir: Some(output.clone()),
+    })
+    .expect("compile to custom mission output");
+
+    assert_eq!(report.status, ReportStatus::Ready);
+    assert!(output.join("mission.json").is_file());
+    assert!(
+        report
+            .created_artifacts
+            .iter()
+            .all(|path| { path.starts_with("openspec/changes/passing-fixture/mission/custom/") })
+    );
+}
+
+#[test]
+fn better_droid_compile_uses_default_objective_and_default_allowed_packet_path() {
+    let fixture = Fixture::new();
+    fixture.write_change("default-packet-fixture", NON_EXECUTABLE_TASK, PASSING_SPEC);
+    fs::write(
+        fixture
+            .root()
+            .join("openspec/changes/default-packet-fixture/proposal.md"),
+        "## Proposal\n\nNo explicit objective line here.\n",
+    )
+    .expect("rewrite proposal without objective");
+
+    compile_change(&CompileOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "default-packet-fixture".to_owned(),
+        output_dir: None,
+    })
+    .expect("compile default packet fixture");
+
+    let packet = read_json(
+        &fixture
+            .mission_dir("default-packet-fixture")
+            .join("mission-packet.json"),
+    );
+    assert_eq!(
+        packet["mission"]["title"],
+        "compile Better Droid OpenSpec source into canonical mission JSON"
+    );
+    assert_eq!(
+        packet["path_policy"]["allowed_paths"],
+        serde_json::json!(["openspec/changes/**"])
+    );
+}
+
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).expect("read json")).expect("parse json")
 }
@@ -562,5 +768,51 @@ const UNSAFE_PATH_TASK: &str = r#"- [ ] 1.1 Implement unsafe path fixture
   - **Expected Artifact Kind:** patch-bundle
   - **Review Checklist:** no live state
   - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture, VAL-BDLCF-fixture
+	  - **Stale If:** fixture source changes
+	"#;
+
+const CLASSIFICATION_TASKS: &str = r#"- [ ] task-rejected Rejected malformed task
+  - **Type:** rejected implementation
+  - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
+
+- [ ] task-deferred Deferred malformed task
+  - **Type:** deferred implementation
+  - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
+
+- [ ] 1.3 Implement high risk task
+  - **Type:** implementation
+  - **Purpose:** Exercise high-risk approval blocking.
+  - **Allowed Write Paths:** `covey/src/ops/better_droid/mod.rs`
+  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`
+  - **Acceptance Criteria:**
+    - High risk task is blocked.
+  - **Validation / Evidence:**
+    - **Command / Action:** `cargo test better_droid_counts_rejected_deferred_and_high_risk_blocked_tasks --all-targets`
+    - **Expected Exit Code / Observation:** exits 0
+    - **Covers:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
+  - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
   - **Stale If:** fixture source changes
+  - **Risk Level:** high
+  - **Human Approval Required:** pending
+"#;
+
+const PATH_POLICY_EDGE_TASK: &str = r#"- [ ] 1.1 Implement path policy edge fixture
+  - **Type:** implementation
+  - **Purpose:** Exercise path policy edge blockers.
+  - **Allowed Write Paths:** ., ../escape, authority/**, covey/src/ops/better_droid/mod.rs
+  - **Forbidden Paths:** authority/**, mutai-rs/**, go/controlplane/**, vendored/cliproxyapiplus/**, .git/**, covey/src/ops/better_droid/mod.rs
+  - **Acceptance Criteria:**
+    - Path policy is blocked.
+  - **Validation / Evidence:**
+    - **Command / Action:** `cargo test better_droid_path_policy_reports_escape_protected_and_overlap_blockers --all-targets`
+    - **Expected Exit Code / Observation:** exits 0
+    - **Covers:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
+  - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
+  - **Stale If:** fixture source changes
+"#;
+
+const NON_EXECUTABLE_TASK: &str = r#"- [ ] 1.1 Research default packet fixture
+  - **Type:** note
+  - **Purpose:** Exercise default packet path behavior.
+  - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
 "#;

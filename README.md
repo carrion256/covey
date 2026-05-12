@@ -142,9 +142,17 @@ The current internal module map and dependency boundaries are documented in [`do
 
 ## Codex Integration
 
-Codex lifecycle hooks for Covey have been migrated to the repo-root `codex-hooks/` template. Install them into a target repository with the installer script located there.
+Codex lifecycle hooks for Covey live under `../integrations/codex-hooks/`.
+Install them into a target repository with that template's installer script.
 
-Covey and its CLI remain transport-thin by design. The `codex-hooks/` template is a separate, higher-level execution wrapper that drives approved claim, renew, reservation, and handoff workflows through the existing Covey CLI commands. Policy and orchestration decisions live in the hook layer, not in Covey itself.
+Covey and its CLI remain transport-thin by design. The
+`integrations/codex-hooks/` template is a separate local execution wrapper that
+adapts Codex lifecycle and tool events into existing Covey CLI commands plus
+`mutai-rs` evidence contracts. Hooks may enforce before local Codex side
+effects, but they must not become scheduler, settlement, landing, or repoops
+authority. Covey remains the owner of `claim-next`, queue claiming, claims,
+leases, fences, sessions, reservations, artifacts, reviews, review/apply queue
+state, events, conflicts, and lifecycle transitions.
 
 ## Verification
 

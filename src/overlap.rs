@@ -389,8 +389,18 @@ fn to_sql_err<E: std::fmt::Display>(err: E) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_generated_members, normalize_scope_key};
-    use crate::{CoveyError, model::ScopeClass};
+    use super::{
+        find_overlapping_reservations_conn, normalize_generated_members, normalize_scope_key,
+        record_reservation_overlap_conflicts, resolve_reservation_overlap_conflicts,
+    };
+    use crate::{
+        CoveyError,
+        model::{
+            OverlapCandidate, RequestReservationReq, Reservation, ReservationState, ScopeClass,
+        },
+        schema::{apply_migrations, apply_pragmas},
+    };
+    use rusqlite::{Connection, params};
 
     #[test]
     fn normalize_scope_key_canonicalizes_repo_paths() {
@@ -458,5 +468,211 @@ mod tests {
                 path: "../secret.txt".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn overlap_queries_cover_scope_classes_and_active_lease_filtering() {
+        let conn = overlap_conn();
+        insert_reservation(&conn, "repo", ScopeClass::RepoGlobal, "repo", &[], 10, 1);
+        insert_reservation(
+            &conn,
+            "exact",
+            ScopeClass::ExactPath,
+            "src/lib.rs",
+            &[],
+            10,
+            2,
+        );
+        insert_reservation(&conn, "tree", ScopeClass::Subtree, "src", &[], 10, 3);
+        insert_reservation(
+            &conn,
+            "generated",
+            ScopeClass::GeneratedSet,
+            "generated-key",
+            &["src/generated.rs", "docs/generated.md"],
+            10,
+            4,
+        );
+        insert_reservation(
+            &conn,
+            "expired",
+            ScopeClass::ExactPath,
+            "src/lib.rs",
+            &[],
+            0,
+            5,
+        );
+
+        let exact = find_overlapping_reservations_conn(
+            &conn,
+            &OverlapCandidate::new(
+                ScopeClass::ExactPath,
+                "src/lib.rs".to_owned(),
+                Vec::<String>::new(),
+            ),
+        )
+        .expect("exact overlap query should succeed");
+        assert_eq!(reservation_ids(&exact), vec!["repo", "exact", "tree"]);
+
+        let subtree = find_overlapping_reservations_conn(
+            &conn,
+            &OverlapCandidate::new(ScopeClass::Subtree, "src".to_owned(), Vec::<String>::new()),
+        )
+        .expect("subtree overlap query should succeed");
+        assert_eq!(
+            reservation_ids(&subtree),
+            vec!["repo", "exact", "tree", "generated"]
+        );
+
+        let generated = find_overlapping_reservations_conn(
+            &conn,
+            &OverlapCandidate::new(
+                ScopeClass::GeneratedSet,
+                "generated-key".to_owned(),
+                vec!["docs/generated.md".to_owned()],
+            ),
+        )
+        .expect("generated overlap query should succeed");
+        assert_eq!(reservation_ids(&generated), vec!["repo", "generated"]);
+
+        let empty_generated = find_overlapping_reservations_conn(
+            &conn,
+            &OverlapCandidate::new(
+                ScopeClass::GeneratedSet,
+                "generated-key".to_owned(),
+                Vec::<String>::new(),
+            ),
+        )
+        .expect("empty generated set still checks repo-global reservations");
+        assert_eq!(reservation_ids(&empty_generated), vec!["repo"]);
+    }
+
+    #[test]
+    fn overlap_conflict_records_are_upserted_and_resolved_for_either_side() {
+        let mut conn = overlap_conn();
+        insert_reservation(
+            &conn,
+            "left",
+            ScopeClass::ExactPath,
+            "src/lib.rs",
+            &[],
+            10,
+            1,
+        );
+        insert_reservation(&conn, "right", ScopeClass::Subtree, "src", &[], 10, 2);
+        let overlaps = find_overlapping_reservations_conn(
+            &conn,
+            &OverlapCandidate::new(
+                ScopeClass::ExactPath,
+                "src/lib.rs".to_owned(),
+                Vec::<String>::new(),
+            ),
+        )
+        .expect("overlaps should load");
+        let right = overlaps
+            .into_iter()
+            .find(|reservation| reservation.reservation_id == "right")
+            .expect("right reservation should overlap");
+
+        let req = RequestReservationReq {
+            session_token: "session-orchestrator".to_owned(),
+            owner_subtask_id: "subtask-owner".to_owned(),
+            scope_class: ScopeClass::ExactPath,
+            scope_key: "src/lib.rs".to_owned(),
+            generated_members: Vec::new(),
+            lease_duration_ms: 10,
+            idempotency_key: "reservation-idempotency".to_owned(),
+        };
+
+        let tx = conn.transaction().expect("begin write transaction");
+        record_reservation_overlap_conflicts(&tx, "left", &req, &[right], 100)
+            .expect("record conflict");
+        record_reservation_overlap_conflicts(&tx, "left", &req, &[], 101)
+            .expect("empty conflict list is accepted");
+        resolve_reservation_overlap_conflicts(&tx, "right", 102).expect("resolve conflict");
+        tx.commit().expect("commit conflict writes");
+
+        let (object_id, state): (String, String) = conn
+            .query_row(
+                "SELECT object_id, resolution_state FROM conflicts WHERE conflict_kind = 'reservation_overlap'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("conflict row should exist");
+        assert_eq!(object_id, "left");
+        assert_eq!(state, "resolved");
+    }
+
+    fn overlap_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        apply_pragmas(&conn).expect("apply pragmas");
+        apply_migrations(&mut conn).expect("apply schema");
+        conn.execute(
+            "INSERT INTO sessions (
+                session_token, agent_principal_id, agent_instance_id, role, state,
+                active_subtask_id, last_heartbeat_at, created_at, updated_at
+            ) VALUES ('session-orchestrator', 'principal', 'instance', 'orchestrator', 'active',
+                NULL, 1, 1, 1)",
+            [],
+        )
+        .expect("insert session");
+        conn.execute(
+            "INSERT INTO meta_tasks (
+                meta_task_id, prompt_text, state, created_by, created_at, updated_at
+            ) VALUES ('meta-task', 'prompt', 'active', 'session-orchestrator', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (
+                subtask_id, meta_task_id, title, kind, review_target_subtask_id,
+                review_target_artifact_digest, state, current_claim_id, artifact_digest,
+                priority, created_at, updated_at
+            ) VALUES ('subtask-owner', 'meta-task', 'work', 'work', NULL, NULL, 'available',
+                NULL, NULL, 100, 1, 1)",
+            [],
+        )
+        .expect("insert subtask");
+        conn
+    }
+
+    fn insert_reservation(
+        conn: &Connection,
+        reservation_id: &str,
+        scope_class: ScopeClass,
+        scope_key: &str,
+        members: &[&str],
+        lease_deadline: i64,
+        created_at: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO reservations (
+                reservation_id, owner_subtask_id, scope_class, scope_key, lease_deadline,
+                state, created_at, updated_at
+            ) VALUES (?1, 'subtask-owner', ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                reservation_id,
+                scope_class.to_string(),
+                scope_key,
+                lease_deadline,
+                ReservationState::Active.to_string(),
+                created_at
+            ],
+        )
+        .expect("insert reservation");
+        for member in members {
+            conn.execute(
+                "INSERT INTO reservation_generated_members (reservation_id, member_path) VALUES (?1, ?2)",
+                params![reservation_id, member],
+            )
+            .expect("insert generated member");
+        }
+    }
+
+    fn reservation_ids(reservations: &[Reservation]) -> Vec<&str> {
+        reservations
+            .iter()
+            .map(|reservation| reservation.reservation_id.as_str())
+            .collect()
     }
 }

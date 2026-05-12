@@ -1,4 +1,5 @@
 use super::{
+    mission::load_mission_packet,
     parse::parse_openspec_tasks,
     source::load_openspec_source_snapshot,
     util::{normalize_relative_path, sha256_digest},
@@ -320,6 +321,222 @@ fn openspec_mission_packet_loader_rejects_stale_source_digest() {
     ));
 }
 
+#[test]
+fn openspec_mission_packet_loader_rejects_corrupt_compiled_artifact_shapes() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    let invalid_json_dir = compiled_mission_dir(tmp.path(), "invalid-json-packet");
+    fs::write(invalid_json_dir.join("traceability.json"), "{not-json").expect("tamper json");
+    let invalid_json = load_openspec_source_snapshot(
+        tmp.path().to_str().expect("root path"),
+        "invalid-json-packet",
+    );
+    assert!(matches!(
+        invalid_json,
+        Err(CoveyError::InvalidSourceSchema { detail, .. })
+            if detail.contains("invalid Better Droid mission JSON")
+    ));
+
+    let blockers_dir = compiled_mission_dir(tmp.path(), "blocker-packet");
+    mutate_compile_report(&blockers_dir, |report| {
+        report["blockers"] = serde_json::json!([{"id": "blocked"}]);
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "blocker-packet",
+        "compile-report contains blockers",
+    );
+
+    let missing_created_dir = compiled_mission_dir(tmp.path(), "missing-created-packet");
+    mutate_compile_report(&missing_created_dir, |report| {
+        report["created_artifacts"] = serde_json::json!([]);
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "missing-created-packet",
+        "created_artifacts missing",
+    );
+
+    let missing_digest_dir = compiled_mission_dir(tmp.path(), "missing-digest-packet");
+    mutate_compile_report_without_refresh(&missing_digest_dir, |report| {
+        report["artifact_digests"]
+            .as_object_mut()
+            .expect("artifact digests object")
+            .remove("openspec/changes/missing-digest-packet/mission/mission.json");
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "missing-digest-packet",
+        "artifact_digests missing",
+    );
+
+    let pending_assumptions_dir = compiled_mission_dir(tmp.path(), "pending-assumptions-packet");
+    mutate_artifact(
+        &pending_assumptions_dir,
+        "assumptions.json",
+        |assumptions| {
+            assumptions["approval_summary"]["high_or_critical_pending"] = Value::from(1);
+        },
+    );
+    assert_invalid_source_detail(
+        tmp.path(),
+        "pending-assumptions-packet",
+        "unapproved high or critical assumptions block import",
+    );
+
+    let broad_path_dir = compiled_mission_dir(tmp.path(), "broad-path-packet");
+    mutate_artifact(&broad_path_dir, "path-policy.json", |path_policy| {
+        path_policy["allowed_write_paths"] = serde_json::json!(["repo"]);
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "broad-path-packet",
+        "broad path policy is not importable",
+    );
+
+    let missing_tasks_dir = compiled_mission_dir(tmp.path(), "missing-tasks-array-packet");
+    mutate_mission(&missing_tasks_dir, |mission| {
+        mission
+            .as_object_mut()
+            .expect("mission object")
+            .remove("tasks");
+    });
+    refresh_artifact_digests(&missing_tasks_dir);
+    assert_invalid_source_detail(
+        tmp.path(),
+        "missing-tasks-array-packet",
+        "missing tasks array",
+    );
+
+    let missing_classifications_dir =
+        compiled_mission_dir(tmp.path(), "missing-classifications-packet");
+    mutate_compile_report(&missing_classifications_dir, |report| {
+        report
+            .as_object_mut()
+            .expect("report object")
+            .remove("task_classifications");
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "missing-classifications-packet",
+        "missing task_classifications array",
+    );
+
+    let duplicate_classification_dir =
+        compiled_mission_dir(tmp.path(), "duplicate-classification-packet");
+    mutate_compile_report(&duplicate_classification_dir, |report| {
+        let duplicate = report["task_classifications"][0].clone();
+        report["task_classifications"]
+            .as_array_mut()
+            .expect("classification array")
+            .push(duplicate);
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "duplicate-classification-packet",
+        "duplicate task id",
+    );
+
+    let invalid_task_id_dir = compiled_mission_dir(tmp.path(), "invalid-task-id-packet");
+    mutate_mission(&invalid_task_id_dir, |mission| {
+        mission["tasks"][0]["task_id"] = Value::String("task-one".to_owned());
+    });
+    refresh_artifact_digests(&invalid_task_id_dir);
+    assert_invalid_source_detail(
+        tmp.path(),
+        "invalid-task-id-packet",
+        "invalid stable task id",
+    );
+
+    let empty_title_dir = compiled_mission_dir(tmp.path(), "empty-title-packet");
+    mutate_mission(&empty_title_dir, |mission| {
+        mission["tasks"][0]["title"] = Value::String("   ".to_owned());
+    });
+    refresh_artifact_digests(&empty_title_dir);
+    assert_invalid_source_detail(tmp.path(), "empty-title-packet", "missing title for task");
+
+    let missing_classification_dir =
+        compiled_mission_dir(tmp.path(), "missing-classification-packet");
+    mutate_mission(&missing_classification_dir, |mission| {
+        mission["tasks"][0]["task_id"] = Value::String("1.2".to_owned());
+    });
+    refresh_artifact_digests(&missing_classification_dir);
+    assert_invalid_source_detail(
+        tmp.path(),
+        "missing-classification-packet",
+        "missing classification for task 1.2",
+    );
+
+    let blocked_classification_dir =
+        compiled_mission_dir(tmp.path(), "blocked-classification-packet");
+    mutate_compile_report(&blocked_classification_dir, |report| {
+        report["task_classifications"][0]["import_status"] = Value::String("blocked".to_owned());
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "blocked-classification-packet",
+        "import_status must be importable",
+    );
+
+    let invalid_task_digest_dir = compiled_mission_dir(tmp.path(), "invalid-task-digest-packet");
+    mutate_compile_report(&invalid_task_digest_dir, |report| {
+        report["task_classifications"][0]["task_digest"] = Value::String("sha256:ABC".to_owned());
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "invalid-task-digest-packet",
+        "digest must be lowercase sha256 plus 64 hex characters",
+    );
+
+    let title_mismatch_dir = compiled_mission_dir(tmp.path(), "title-mismatch-packet");
+    mutate_compile_report(&title_mismatch_dir, |report| {
+        report["task_classifications"][0]["title"] = Value::String("Different title".to_owned());
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "title-mismatch-packet",
+        "classification title mismatch",
+    );
+
+    let no_tasks_dir = compiled_mission_dir(tmp.path(), "no-importable-tasks-packet");
+    mutate_mission(&no_tasks_dir, |mission| {
+        mission["tasks"] = Value::Array(Vec::new());
+    });
+    refresh_artifact_digests(&no_tasks_dir);
+    assert_invalid_source_detail(
+        tmp.path(),
+        "no-importable-tasks-packet",
+        "no importable compiled tasks",
+    );
+}
+
+#[test]
+fn openspec_mission_packet_private_loader_returns_sorted_digest_vectors() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mission_dir = compiled_mission_dir(tmp.path(), "private-loader-packet");
+    let packet = load_mission_packet(
+        tmp.path(),
+        "private-loader-packet",
+        Path::new("openspec/changes/private-loader-packet"),
+    )
+    .expect("load private mission packet");
+
+    assert_eq!(packet.tasks.len(), 1);
+    assert!(mission_dir.join("mission.json").is_file());
+    assert!(
+        packet
+            .source_digests
+            .windows(2)
+            .all(|window| window[0].path <= window[1].path)
+    );
+    assert!(
+        packet
+            .artifact_digests
+            .windows(2)
+            .all(|window| window[0].path <= window[1].path)
+    );
+}
+
 fn seed_better_droid_change(root: &Path, change_id: &str) {
     let change_dir = root.join("openspec").join("changes").join(change_id);
     fs::create_dir_all(change_dir.join("specs").join("example")).expect("create dirs");
@@ -366,11 +583,40 @@ fn compile_better_droid_change(root: &Path, change_id: &str) {
     .expect("compile better droid change");
 }
 
+fn compiled_mission_dir(root: &Path, change_id: &str) -> std::path::PathBuf {
+    seed_better_droid_change(root, change_id);
+    compile_better_droid_change(root, change_id);
+    root.join("openspec")
+        .join("changes")
+        .join(change_id)
+        .join("mission")
+}
+
+fn assert_invalid_source_detail(root: &Path, change_id: &str, expected_detail: &str) {
+    let result = load_openspec_source_snapshot(root.to_str().expect("root path"), change_id);
+    assert!(
+        matches!(
+            result,
+            Err(CoveyError::InvalidSourceSchema { ref detail, .. })
+                if detail.contains(expected_detail)
+        ),
+        "{change_id} should fail with detail containing {expected_detail:?}: {result:?}"
+    );
+}
+
 fn mutate_mission(mission_dir: &Path, mutate: impl FnOnce(&mut Value)) {
     let path = mission_dir.join("mission.json");
     let mut mission = read_json(&path);
     mutate(&mut mission);
     write_json(&path, &mission);
+}
+
+fn mutate_artifact(mission_dir: &Path, artifact: &str, mutate: impl FnOnce(&mut Value)) {
+    let path = mission_dir.join(artifact);
+    let mut value = read_json(&path);
+    mutate(&mut value);
+    write_json(&path, &value);
+    refresh_artifact_digests(mission_dir);
 }
 
 fn mutate_compile_report(mission_dir: &Path, mutate: impl FnOnce(&mut Value)) {

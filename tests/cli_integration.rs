@@ -61,6 +61,36 @@ fn register_orchestrator(covey: &Covey, principal: &str) -> String {
         .session_token
 }
 
+fn seed_ready_queue_item(db_path: &Path, session_token: &str, subtask_id: &str, queue_id: &str) {
+    let conn = Connection::open(db_path).expect("open seeded covey db");
+    conn.execute(
+        r#"
+        INSERT INTO artifacts (
+            artifact_digest, artifact_kind, base_rev, produced_by_subtask_id,
+            produced_by_session, manifest_path, changed_paths_digest, created_at
+        ) VALUES (?1, 'patch_bundle', 'base', ?2, ?3, 'manifest.json', 'sha256:paths', 1000)
+        "#,
+        params!["sha256:seeded-queue", subtask_id, session_token],
+    )
+    .expect("insert artifact fixture");
+    conn.execute(
+        "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = 'sha256:seeded-queue', updated_at = 1000 WHERE subtask_id = ?1",
+        params![subtask_id],
+    )
+    .expect("mark subtask fixture ready for apply");
+    conn.execute(
+        r#"
+        INSERT INTO ready_queue (
+            queue_id, artifact_digest, subtask_id, settlement_target, state,
+            claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
+            enqueued_at, updated_at
+        ) VALUES (?1, 'sha256:seeded-queue', ?2, 'canonical', 'queued', NULL, NULL, NULL, 1000, 1000)
+        "#,
+        params![queue_id, subtask_id],
+    )
+    .expect("insert ready queue fixture");
+}
+
 #[test]
 fn piped_success_defaults_to_json() {
     let tmp = TempDir::new().expect("tempdir");
@@ -136,6 +166,130 @@ fn explicit_json_help_and_version_emit_success_envelopes() {
     assert_eq!(version_payload["ok"], Value::Bool(true));
     assert_eq!(version_payload["data"]["command"], "covey");
     assert!(version_payload["data"]["version"].as_str().is_some());
+}
+
+#[test]
+fn queue_mark_in_flight_supersede_and_empty_claim_next_emit_json() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+
+    let orch = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "queue-orch",
+            "--agent-instance-id",
+            "queue-orch-1",
+            "--role",
+            "orchestrator",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("orch token")
+        .to_owned();
+    let gate = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "queue-gate",
+            "--agent-instance-id",
+            "queue-gate-1",
+            "--role",
+            "apply-gate",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("gate token")
+        .to_owned();
+    let meta_task_id = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "queue command coverage",
+        ],
+    ))["meta_task_id"]
+        .as_str()
+        .expect("meta id")
+        .to_owned();
+    let subtask_id = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "create",
+            "--session-token",
+            &orch,
+            "--meta-task-id",
+            &meta_task_id,
+            "--title",
+            "seed queue row",
+            "--kind",
+            "work",
+            "--priority",
+            "1",
+            "--subtask-id",
+            "queue_seed_work",
+        ],
+    ))["subtask_id"]
+        .as_str()
+        .expect("subtask id")
+        .to_owned();
+    seed_ready_queue_item(&db, &orch, &subtask_id, "queue_seed_1");
+
+    let claim = success_data(&run_db(
+        &db,
+        &[
+            "queue",
+            "mark-in-flight",
+            "--session-token",
+            &gate,
+            "--queue-id",
+            "queue_seed_1",
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    assert_eq!(claim["queue_id"], "queue_seed_1");
+    assert_eq!(claim["subtask_id"], subtask_id);
+    assert!(claim["claim_fence_seq"].as_i64().expect("claim fence") >= 1);
+
+    let superseded = success_data(&run_db(
+        &db,
+        &[
+            "queue",
+            "supersede",
+            "--session-token",
+            &gate,
+            "--queue-id",
+            "queue_seed_1",
+        ],
+    ));
+    assert_eq!(superseded["operation"], "supersede");
+    assert_eq!(superseded["queue_id"], "queue_seed_1");
+
+    let empty_claim = success_data(&run_db(
+        &db,
+        &[
+            "queue",
+            "claim-next",
+            "--session-token",
+            &gate,
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    assert_eq!(empty_claim, Value::Null);
+
+    let metrics = success_data(&run_db(&db, &["queue", "metrics"]));
+    assert_eq!(metrics["queued_count"], 0);
+    assert_eq!(metrics["in_flight_count"], 0);
 }
 
 #[test]
@@ -437,6 +591,26 @@ fn workflow_commands_emit_json() {
         &["subtask", "status", "--subtask-id", &subtask_id],
     ));
     assert_eq!(status["subtask"]["state"], "ready_for_apply");
+
+    let queue_fence = queue_claim["claim_fence_seq"]
+        .as_i64()
+        .expect("queue claim fence")
+        .to_string();
+    success_data(&run_db(
+        &db,
+        &[
+            "queue",
+            "mark-applied",
+            "--session-token",
+            &gate,
+            "--queue-id",
+            &queue_id,
+            "--claim-fence-seq",
+            &queue_fence,
+        ],
+    ));
+    let metrics = success_data(&run_db(&db, &["queue", "metrics"]));
+    assert_eq!(metrics["queued_count"], 0);
 }
 
 #[test]

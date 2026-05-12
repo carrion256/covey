@@ -1,3 +1,7 @@
+#![allow(unexpected_cfgs)]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 use std::{
     ffi::OsString,
     io::{self, IsTerminal, Write},

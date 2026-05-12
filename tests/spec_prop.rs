@@ -3,6 +3,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+mod support;
+
 use covey::{
     ClaimNextReq, Covey, CreateSubtaskReq, ManualClock, RegisterSessionReq, ReleaseClaimReq,
     RequestReservationReq, ScopeClass, SessionRole, SubmitMetaTaskReq, SubtaskKind,
@@ -11,6 +13,7 @@ use proptest::prelude::*;
 use tempfile::TempDir;
 
 fn fresh_covey() -> (TempDir, Arc<ManualClock>, Covey) {
+    support::enable_info_logging();
     let dir = TempDir::new().expect("tempdir");
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_with_clock(dir.path().join("covey.db"), clock.clone()).expect("covey");

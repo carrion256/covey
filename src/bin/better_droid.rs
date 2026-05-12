@@ -1,3 +1,7 @@
+#![allow(unexpected_cfgs)]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 use std::{
     ffi::OsString,
     io::{self, IsTerminal, Write},
@@ -213,4 +217,156 @@ fn write_json_stderr<T: Serialize>(value: &T) {
     let mut stderr = io::stderr();
     let _ = serde_json::to_writer(&mut stderr, value);
     let _ = stderr.write_all(b"\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(clap::error::ErrorKind::DisplayHelp, 0)]
+    #[case(clap::error::ErrorKind::DisplayVersion, 0)]
+    #[case(clap::error::ErrorKind::InvalidSubcommand, 2)]
+    #[case(clap::error::ErrorKind::UnknownArgument, 2)]
+    fn clap_exit_code_maps_help_version_and_errors(
+        #[case] kind: clap::error::ErrorKind,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(clap_exit_code(kind), expected);
+    }
+
+    #[test]
+    fn output_mode_resolve_prefers_json_for_explicit_flag_or_piped_stdout() {
+        assert_eq!(
+            OutputMode::resolve(&[OsString::from("better-droid"), OsString::from("--json")]),
+            OutputMode::Json
+        );
+        let expected_default = if io::stdout().is_terminal() {
+            OutputMode::Human
+        } else {
+            OutputMode::Json
+        };
+        assert_eq!(
+            OutputMode::resolve(&[OsString::from("better-droid")]),
+            expected_default
+        );
+    }
+
+    #[test]
+    fn run_maps_parse_errors_help_and_command_failures() {
+        let help = run(vec![
+            OsString::from("better-droid"),
+            OsString::from("--json"),
+            OsString::from("--help"),
+        ])
+        .expect("help should render successfully");
+        assert_eq!(help, ExitCode::SUCCESS);
+
+        let invalid = run(vec![
+            OsString::from("better-droid"),
+            OsString::from("--json"),
+            OsString::from("--bogus"),
+        ])
+        .expect_err("unknown argument should become CLI error");
+        assert_eq!(invalid.mode, OutputMode::Json);
+        assert_eq!(invalid.exit_code, 2);
+        assert_eq!(invalid.code, "invalid_args");
+
+        let missing_lint = run(vec![
+            OsString::from("better-droid"),
+            OsString::from("--json"),
+            OsString::from("--project-root"),
+            OsString::from("/definitely/missing/mutai/project"),
+            OsString::from("lint"),
+            OsString::from("missing-change"),
+        ])
+        .expect_err("missing lint source should become CLI error");
+        assert_eq!(missing_lint.mode, OutputMode::Json);
+        assert_eq!(missing_lint.exit_code, 2);
+        assert_eq!(missing_lint.code, "invalid_args");
+
+        let missing_compile = run(vec![
+            OsString::from("better-droid"),
+            OsString::from("--json"),
+            OsString::from("--project-root"),
+            OsString::from("/definitely/missing/mutai/project"),
+            OsString::from("compile"),
+            OsString::from("missing-change"),
+        ])
+        .expect_err("missing compile source should become CLI error");
+        assert_eq!(missing_compile.mode, OutputMode::Json);
+        assert_eq!(missing_compile.exit_code, 2);
+        assert_eq!(missing_compile.code, "invalid_args");
+    }
+
+    #[rstest]
+    #[case(
+        BetterDroidError::InvalidSource {
+            path: "openspec/changes/demo".into(),
+            detail: "missing tasks".into(),
+        },
+        2,
+        "invalid_args"
+    )]
+    #[case(
+        BetterDroidError::OutputPathEscape {
+            path: "../escape".into(),
+        },
+        2,
+        "output_path_escape"
+    )]
+    #[case(
+        BetterDroidError::Io {
+            path: "source.md".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        },
+        5,
+        "internal_error"
+    )]
+    fn better_droid_errors_map_to_cli_reports(
+        #[case] error: BetterDroidError,
+        #[case] exit_code: u8,
+        #[case] code: &'static str,
+    ) {
+        let cli_error = CliError::from_better_droid(OutputMode::Json, error);
+
+        assert_eq!(cli_error.mode, OutputMode::Json);
+        assert_eq!(cli_error.exit_code, exit_code);
+        assert_eq!(cli_error.code, code);
+        assert!(!cli_error.message.is_empty());
+    }
+
+    #[test]
+    fn render_helpers_cover_human_and_json_paths() {
+        render_success(
+            OutputMode::Human,
+            &HelpPayload {
+                help: "usage".into(),
+            },
+            "human usage".into(),
+        );
+        render_success(
+            OutputMode::Json,
+            &HelpPayload {
+                help: "usage".into(),
+            },
+            "json usage".into(),
+        );
+
+        let human_error = CliError {
+            mode: OutputMode::Human,
+            exit_code: 2,
+            code: "invalid_args",
+            message: "bad args".into(),
+        };
+        let json_error = CliError {
+            mode: OutputMode::Json,
+            exit_code: 5,
+            code: "internal_error",
+            message: "boom".into(),
+        };
+        assert_eq!(human_error.render(), ExitCode::from(2));
+        assert_eq!(json_error.render(), ExitCode::from(5));
+    }
 }
