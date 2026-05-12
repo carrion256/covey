@@ -150,7 +150,7 @@ Covey and its CLI remain transport-thin by design. The
 adapts Codex lifecycle and tool events into existing Covey CLI commands plus
 `mutai-rs` evidence contracts. Hooks may enforce before local Codex side
 effects, but they must not become scheduler, settlement, landing, or repoops
-authority. Covey remains the owner of `claim-next`, queue claiming, claims,
+authority. Covey remains the owner of `claim-next`, queue `claim-next`, claims,
 leases, fences, sessions, reservations, artifacts, reviews, review/apply queue
 state, events, conflicts, and lifecycle transitions.
 
