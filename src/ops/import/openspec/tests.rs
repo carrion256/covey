@@ -562,7 +562,7 @@ fn seed_better_droid_change(root: &Path, change_id: &str) {
   - **Dependencies:** none.
   - **Allowed Read Paths:** `openspec/changes/**`.
   - **Allowed Write Paths:** `covey/src/ops/import/openspec/source.rs`.
-  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`.
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`.
   - **Acceptance Criteria:** Compiled packet imports.
   - **Validation / Evidence:**
     - **Command / Action:** `cargo test openspec_mission_packet --lib`

@@ -17,18 +17,10 @@ const REQUIRED_TASK_FIELDS: &[&str] = &[
     "Traceability Refs",
     "Stale If",
 ];
-const CANONICAL_PROTECTED_FORBIDDEN_PATHS: &[&str] = &[
-    "authority/**",
-    "go/controlplane/**",
-    "vendored/cliproxyapiplus/**",
-    ".git/**",
-];
-const PROTECTED_FORBIDDEN_PATH_GROUPS: &[&[&str]] = &[
-    &["authority/**", "mutai-rs/**"],
-    &["go/controlplane/**"],
-    &["vendored/cliproxyapiplus/**"],
-    &[".git/**"],
-];
+const CANONICAL_PROTECTED_FORBIDDEN_PATHS: &[&str] =
+    &["authority/**", "contracts/imported/**", ".git/**"];
+const PROTECTED_FORBIDDEN_PATH_GROUPS: &[&[&str]] =
+    &[&["authority/**"], &["contracts/imported/**"], &[".git/**"]];
 const ARTIFACT_NAMES: &[&str] = &[
     "mission.json",
     "mission-packet.json",
@@ -749,7 +741,13 @@ fn is_empty_or_none(value: &str) -> bool {
 fn is_executable_task_type(task_type: &str) -> bool {
     matches!(
         task_type.trim().to_ascii_lowercase().as_str(),
-        "implementation" | "test" | "documentation" | "migration" | "refactor" | "apply"
+        "implementation"
+            | "test"
+            | "documentation"
+            | "data-movement"
+            | "schema-change"
+            | "refactor"
+            | "apply"
     )
 }
 

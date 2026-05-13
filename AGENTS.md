@@ -74,7 +74,7 @@ These are the sanctioned crate choices for Covey. Do not introduce parallel alte
 
 ## Persistence And Invariants
 
-- Agents must use `rusqlite_migration` for schema versioning and forward-only migrations.
+- Agents must use `rusqlite_migration` for forward-only schema changes.
 - Agents should adopt `serde_rusqlite` once query/result mapping boilerplate becomes material.
 - Agents must use `static_assertions` for compile-time guarantees that are worth enforcing outside runtime tests.
 - Agents must use `uuid` for externally visible identifiers when the code needs generated stable IDs.

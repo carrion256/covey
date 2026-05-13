@@ -232,17 +232,17 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
         END
         WHERE last_heartbeat_tick = 0;
 
-        ALTER TABLE reservation_generated_members RENAME TO reservation_generated_members_legacy;
+        ALTER TABLE reservation_generated_members RENAME TO reservation_generated_members_previous;
         CREATE TABLE reservation_generated_members (
             reservation_id TEXT NOT NULL REFERENCES reservations(reservation_id),
             member_path TEXT NOT NULL,
             PRIMARY KEY (reservation_id, member_path)
         );
         INSERT INTO reservation_generated_members (reservation_id, member_path)
-        SELECT reservation_generated_members_legacy.reservation_id, json_each.value
-        FROM reservation_generated_members_legacy
-        JOIN json_each(reservation_generated_members_legacy.members_json);
-        DROP TABLE reservation_generated_members_legacy;
+        SELECT reservation_generated_members_previous.reservation_id, json_each.value
+        FROM reservation_generated_members_previous
+        JOIN json_each(reservation_generated_members_previous.members_json);
+        DROP TABLE reservation_generated_members_previous;
 
         CREATE INDEX IF NOT EXISTS idx_reservation_generated_members_member_path
         ON reservation_generated_members(member_path, reservation_id);

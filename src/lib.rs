@@ -3,7 +3,7 @@
 
 //! Covey is a correctness-critical coordination substrate for agent cohorts.
 //!
-//! v0.1 intentionally targets a single-node embedded deployment over one
+//! Covey intentionally targets a single-node embedded deployment over one
 //! authoritative transactional store.
 //! The database is authoritative; `event_log` is an audit trail for subscribers,
 //! not an event-sourced recovery surface.

@@ -988,7 +988,7 @@ fn seed_openspec_change(root: &Path, change_id: &str, task_lines: &[&str]) {
   - **Dependencies:** none.
   - **Allowed Read Paths:** `openspec/changes/**`.
   - **Allowed Write Paths:** `covey/src/ops/import/openspec/source.rs`.
-  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`.
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`.
   - **Acceptance Criteria:** {title} imports as a compiled task packet.
   - **Validation / Evidence:**
     - **Command / Action:** `cargo test import_openspec --test cli_integration`

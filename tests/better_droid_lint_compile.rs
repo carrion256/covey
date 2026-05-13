@@ -786,12 +786,12 @@ const PASSING_TASK: &str = r#"- [ ] 1.1 Implement passing fixture compiler behav
   - **Dependencies:** none
   - **Allowed Read Paths:** `openspec/changes/**`
   - **Allowed Write Paths:** `covey/src/ops/better_droid/mod.rs`
-  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Acceptance Criteria:**
     - Lint reports import readiness.
   - **Validation / Evidence:**
     - **Command / Action:** `cargo test better_droid_lint_reports_readiness_without_writes --all-targets`
-    - **Working Directory:** `/data/projects/acfs-hive/covey`
+    - **Working Directory:** `/data/projects/mutai/covey`
     - **Expected Exit Code / Observation:** exits 0
     - **Required Evidence:** stdout and exit code
     - **Covers:** REQ-BDLCF-fixture, SCN-BDLCF-fixture, VAL-BDLCF-fixture
@@ -805,7 +805,7 @@ const VAGUE_TASK: &str = r#"- [ ] 1.1 Improve compiler behavior
   - **Type:** implementation
   - **Purpose:** Too vague.
   - **Allowed Write Paths:** `covey/src/ops/better_droid/mod.rs`
-  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
 "#;
 
@@ -819,12 +819,12 @@ const UNSAFE_PATH_TASK: &str = r#"- [ ] 1.1 Implement unsafe path fixture
   - **Dependencies:** none
   - **Allowed Read Paths:** `openspec/changes/**`
   - **Allowed Write Paths:** repo
-  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Acceptance Criteria:**
     - Lint rejects unsafe path policy.
   - **Validation / Evidence:**
     - **Command / Action:** `cargo test better_droid_unsafe_path_policy_is_blocked --all-targets`
-    - **Working Directory:** `/data/projects/acfs-hive/covey`
+    - **Working Directory:** `/data/projects/mutai/covey`
     - **Expected Exit Code / Observation:** exits 0
     - **Required Evidence:** stdout and exit code
     - **Covers:** REQ-BDLCF-fixture, SCN-BDLCF-fixture, VAL-BDLCF-fixture
@@ -846,7 +846,7 @@ const CLASSIFICATION_TASKS: &str = r#"- [ ] task-rejected Rejected malformed tas
   - **Type:** implementation
   - **Purpose:** Exercise high-risk approval blocking.
   - **Allowed Write Paths:** `covey/src/ops/better_droid/mod.rs`
-  - **Forbidden Paths:** `mutai-rs/**`, `go/controlplane/**`, `vendored/cliproxyapiplus/**`, `.git/**`
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Acceptance Criteria:**
     - High risk task is blocked.
   - **Validation / Evidence:**
@@ -863,7 +863,7 @@ const PATH_POLICY_EDGE_TASK: &str = r#"- [ ] 1.1 Implement path policy edge fixt
   - **Type:** implementation
   - **Purpose:** Exercise path policy edge blockers.
   - **Allowed Write Paths:** ., ../escape, authority/**, covey/src/ops/better_droid/mod.rs
-  - **Forbidden Paths:** authority/**, mutai-rs/**, go/controlplane/**, vendored/cliproxyapiplus/**, .git/**, covey/src/ops/better_droid/mod.rs
+  - **Forbidden Paths:** authority/**, contracts/imported/**, .git/**, covey/src/ops/better_droid/mod.rs
   - **Acceptance Criteria:**
     - Path policy is blocked.
   - **Validation / Evidence:**

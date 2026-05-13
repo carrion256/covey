@@ -55,7 +55,7 @@ Covey tracks a fixed set of entities:
 - `event_log`: append-only change feed for subscribers
 - `conflicts`: visible unresolved situations needing intervention
 
-The schema is versioned and migrations are forward-only.
+Schema changes are forward-only.
 
 ## Invariants That Matter
 
