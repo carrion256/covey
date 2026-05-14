@@ -130,10 +130,11 @@ impl From<CoveyError> for ReportableError {
             ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
             IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
             InputTooLarge, InvalidIdempotencyKey, InvalidImportDestination, InvalidImportRow,
-            InvalidLeaseDuration, InvalidPath, InvalidSessionToken, InvalidSourceSchema,
-            LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
-            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
-            ReviewKindMismatch, ReviewNotFound, SeparationOfDutiesViolation, SerializationError,
+            InvalidLeaseDuration, InvalidPath, InvalidRuntimeAttestation, InvalidSessionToken,
+            InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
+            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
+            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, StaleFenceToken, SubtaskAlreadyClaimed, SubtaskNotFound,
             UnknownArtifactDigest, WrongRole,
@@ -159,6 +160,7 @@ impl From<CoveyError> for ReportableError {
             InvalidLeaseDuration { .. }
             | InvalidPath { .. }
             | InputTooLarge { .. }
+            | InvalidRuntimeAttestation { .. }
             | InvalidIdempotencyKey { .. }
             | InvalidSourceSchema { .. }
             | InvalidImportDestination { .. }
@@ -195,7 +197,8 @@ impl From<CoveyError> for ReportableError {
             | DuplicateSubtaskId { .. }
             | IdempotencyConflict { .. }
             | ImportDuplicate { .. }
-            | ApplyGateEvidenceMissing { .. } => Self {
+            | ApplyGateEvidenceMissing { .. }
+            | RuntimeAttestationMissing { .. } => Self {
                 exit_code: 4,
                 code: "conflict",
                 message: error.to_string(),

@@ -6,10 +6,10 @@ use super::{
     ConflictResolutionState, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, EventType,
     ExitSessionReq, HeartbeatReq, ImportOpenSpecEvent, MarkAppliedReq, MetaTaskState, ObjectType,
     PublishArtifactReq, ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq,
-    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationState, ResolveConflictReq,
-    ReviewState, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SessionState,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState,
-    SupersedeQueueItemReq,
+    RecordRuntimeAttestationReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
+    ReservationState, ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionHandle,
+    SessionRole, SessionState, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind,
+    SubtaskState, SupersedeQueueItemReq,
 };
 
 /// Persisted session row.
@@ -25,6 +25,23 @@ pub struct Session {
     pub last_heartbeat_tick: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Runtime identity evidence bound to one Covey session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAttestation {
+    pub session_token: String,
+    pub agent_principal_id: String,
+    pub agent_instance_id: String,
+    pub role: SessionRole,
+    pub provider: String,
+    pub model: String,
+    pub process_id: Option<String>,
+    pub container_id: Option<String>,
+    pub command_transcript_digest: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub recorded_at: i64,
 }
 
 /// Persisted meta-task row.
@@ -189,6 +206,7 @@ pub enum EventPayload {
     SessionRegistered(SessionHandle),
     SessionHeartbeat(HeartbeatReq),
     SessionExited(ExitSessionReq),
+    RuntimeAttestationRecorded(RecordRuntimeAttestationReq),
     MetaTaskSubmitted(SubmitMetaTaskReq),
     MetaTaskCancelled(CancelMetaTaskReq),
     SubtaskCreated(CreateSubtaskReq),

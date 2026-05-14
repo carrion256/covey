@@ -6,15 +6,15 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        EventType, ExitSessionReq, HeartbeatReq, ObjectType, RegisterSessionReq, SessionHandle,
-        SessionState,
+        EventType, ExitSessionReq, HeartbeatReq, ObjectType, RecordRuntimeAttestationReq,
+        RegisterSessionReq, RuntimeAttestation, SessionHandle, SessionState,
     },
     queries::{load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
     store::append_session_event,
     validators::{
-        MAX_AGENT_ID_LEN, ensure_length, ensure_no_other_active_session, ensure_transition,
-        require_session,
+        MAX_AGENT_ID_LEN, MAX_RUNTIME_FIELD_LEN, ensure_length, ensure_no_other_active_session,
+        ensure_non_empty, ensure_transition, require_active_session, require_session,
     },
 };
 
@@ -86,6 +86,83 @@ impl Covey {
             started_at,
             &result,
             |handle| vec![format!("session:{}", handle.session_token)],
+        );
+        result
+    }
+
+    /// Records runtime identity evidence for an active session.
+    pub fn record_runtime_attestation(
+        &self,
+        req: RecordRuntimeAttestationReq,
+    ) -> Result<RuntimeAttestation> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_runtime_attestation",
+                &req.idempotency_key,
+                &req,
+                now,
+                || {
+                    let session = require_active_session(tx, &req.session_token)?;
+                    validate_runtime_attestation_req(&req)?;
+                    let attestation = RuntimeAttestation {
+                        session_token: session.session_token.clone(),
+                        agent_principal_id: session.agent_principal_id.clone(),
+                        agent_instance_id: session.agent_instance_id.clone(),
+                        role: session.role,
+                        provider: req.provider.clone(),
+                        model: req.model.clone(),
+                        process_id: req.process_id.clone(),
+                        container_id: req.container_id.clone(),
+                        command_transcript_digest: req.command_transcript_digest.clone(),
+                        started_at: req.started_at,
+                        ended_at: req.ended_at,
+                        recorded_at: now,
+                    };
+                    tx.execute(
+                        r#"
+                        INSERT INTO runtime_attestations (
+                            session_token, agent_principal_id, agent_instance_id, role,
+                            provider, model, process_id, container_id,
+                            command_transcript_digest, started_at, ended_at, recorded_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                        "#,
+                        params![
+                            attestation.session_token.as_str(),
+                            attestation.agent_principal_id.as_str(),
+                            attestation.agent_instance_id.as_str(),
+                            attestation.role.to_string(),
+                            attestation.provider.as_str(),
+                            attestation.model.as_str(),
+                            attestation.process_id.as_deref(),
+                            attestation.container_id.as_deref(),
+                            attestation.command_transcript_digest.as_str(),
+                            attestation.started_at,
+                            attestation.ended_at,
+                            attestation.recorded_at,
+                        ],
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::RuntimeAttestationRecorded,
+                        ObjectType::RuntimeAttestation,
+                        &req.session_token,
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    Ok(attestation)
+                },
+            )
+        });
+        self.log_operation(
+            "record_runtime_attestation",
+            &req.session_token,
+            started_at,
+            &result,
+            |attestation| vec![format!("session:{}", attestation.session_token)],
         );
         result
     }
@@ -213,4 +290,42 @@ impl Covey {
         );
         result
     }
+}
+
+fn validate_runtime_attestation_req(req: &RecordRuntimeAttestationReq) -> Result<()> {
+    ensure_length("provider", &req.provider, MAX_RUNTIME_FIELD_LEN)?;
+    ensure_length("model", &req.model, MAX_RUNTIME_FIELD_LEN)?;
+    ensure_length(
+        "command_transcript_digest",
+        &req.command_transcript_digest,
+        MAX_RUNTIME_FIELD_LEN,
+    )?;
+    ensure_non_empty("provider", &req.provider, &req.session_token)?;
+    ensure_non_empty("model", &req.model, &req.session_token)?;
+    ensure_non_empty(
+        "command_transcript_digest",
+        &req.command_transcript_digest,
+        &req.session_token,
+    )?;
+    if let Some(process_id) = req.process_id.as_deref() {
+        ensure_length("process_id", process_id, MAX_RUNTIME_FIELD_LEN)?;
+        ensure_non_empty("process_id", process_id, &req.session_token)?;
+    }
+    if let Some(container_id) = req.container_id.as_deref() {
+        ensure_length("container_id", container_id, MAX_RUNTIME_FIELD_LEN)?;
+        ensure_non_empty("container_id", container_id, &req.session_token)?;
+    }
+    if req.process_id.is_none() && req.container_id.is_none() {
+        return Err(CoveyError::InvalidRuntimeAttestation {
+            session_token: req.session_token.clone(),
+            reason: "process_id or container_id is required".to_owned(),
+        });
+    }
+    if req.ended_at < req.started_at {
+        return Err(CoveyError::InvalidRuntimeAttestation {
+            session_token: req.session_token.clone(),
+            reason: "ended_at must be greater than or equal to started_at".to_owned(),
+        });
+    }
+    Ok(())
 }

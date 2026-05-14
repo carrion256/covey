@@ -23,7 +23,8 @@ use crate::{
     validators::{
         MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, ensure_length, ensure_meta_task_is_schedulable,
         ensure_positive_lease_duration, ensure_ready_queue_transition, ensure_subtask_transition,
-        require_active_session, require_role, require_session_can_enqueue,
+        require_active_session, require_role, require_runtime_attestation,
+        require_session_can_enqueue,
     },
 };
 
@@ -302,6 +303,7 @@ impl Covey {
                 now,
                 || {
                     let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
+                    require_runtime_attestation(tx, &session)?;
                     ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
                     ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
                     ensure_length("review_id", &req.review_id, MAX_OBJECT_ID_LEN)?;
@@ -444,6 +446,7 @@ impl Covey {
                         });
                     }
                     let apply_gate_session = load_session_tx(tx, &req.session_token)?;
+                    require_runtime_attestation(tx, &apply_gate_session)?;
                     let live_evidence = require_live_apply_gate_evidence(
                         tx,
                         &item,
@@ -610,6 +613,8 @@ impl Covey {
 struct LiveApplyGateEvidence {
     review_id: String,
     findings_digest: String,
+    producer_session_token: String,
+    reviewer_session_token: String,
     producer_principal_id: String,
     reviewer_principal_id: String,
 }
@@ -624,6 +629,8 @@ fn require_live_apply_gate_evidence(
             r#"
             SELECT review.review_id,
                    review.findings_digest,
+                   producer.session_token,
+                   reviewer.session_token,
                    producer.agent_principal_id,
                    reviewer.agent_principal_id
             FROM reviews review
@@ -653,8 +660,10 @@ fn require_live_apply_gate_evidence(
                 Ok(LiveApplyGateEvidence {
                     review_id: row.get(0)?,
                     findings_digest: row.get(1)?,
-                    producer_principal_id: row.get(2)?,
-                    reviewer_principal_id: row.get(3)?,
+                    producer_session_token: row.get(2)?,
+                    reviewer_session_token: row.get(3)?,
+                    producer_principal_id: row.get(4)?,
+                    reviewer_principal_id: row.get(5)?,
                 })
             },
         )
@@ -684,6 +693,10 @@ fn require_live_apply_gate_evidence(
             conflicting_principal_id: evidence.reviewer_principal_id,
         });
     }
+    let producer_session = load_session_tx(tx, &evidence.producer_session_token)?;
+    let reviewer_session = load_session_tx(tx, &evidence.reviewer_session_token)?;
+    require_runtime_attestation(tx, &producer_session)?;
+    require_runtime_attestation(tx, &reviewer_session)?;
     Ok(evidence)
 }
 

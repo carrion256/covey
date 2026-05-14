@@ -49,6 +49,35 @@ fn stderr_code(output: &std::process::Output) -> String {
     payload["code"].as_str().expect("error code").to_owned()
 }
 
+fn attest_session(db_path: &Path, session_token: &str, role_label: &str) {
+    let process_id = format!("pid-{role_label}");
+    let transcript_digest = format!("sha256:{role_label}:transcript");
+    let idempotency_key = format!("record-runtime-attestation-{role_label}");
+    success_data(&run_db(
+        db_path,
+        &[
+            "session",
+            "attest",
+            "--session-token",
+            session_token,
+            "--provider",
+            "covey-test",
+            "--model",
+            "test-model",
+            "--process-id",
+            &process_id,
+            "--command-transcript-digest",
+            &transcript_digest,
+            "--started-at",
+            "1700000000000",
+            "--ended-at",
+            "1700000000001",
+            "--idempotency-key",
+            &idempotency_key,
+        ],
+    ));
+}
+
 fn register_orchestrator(covey: &Covey, principal: &str) -> String {
     covey
         .register_session(RegisterSessionReq {
@@ -122,6 +151,55 @@ fn piped_success_defaults_to_json() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn session_attest_records_runtime_identity_json() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let session = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "agent-attest",
+            "--agent-instance-id",
+            "run-attest",
+            "--role",
+            "reviewer",
+        ],
+    ));
+    let session_token = session["session_token"].as_str().expect("session token");
+
+    let output = run_db(
+        &db,
+        &[
+            "session",
+            "attest",
+            "--session-token",
+            session_token,
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-test",
+            "--process-id",
+            "pid-123",
+            "--command-transcript-digest",
+            "sha256:transcript",
+            "--started-at",
+            "1700000000000",
+            "--ended-at",
+            "1700000000001",
+        ],
+    );
+
+    let data = success_data(&output);
+    assert_eq!(data["session_token"], session_token);
+    assert_eq!(data["agent_principal_id"], "agent-attest");
+    assert_eq!(data["role"], "reviewer");
+    assert_eq!(data["provider"], "codex");
+    assert_eq!(data["command_transcript_digest"], "sha256:transcript");
 }
 
 #[test]
@@ -361,6 +439,9 @@ fn workflow_commands_emit_json() {
         .as_str()
         .expect("gate token")
         .to_owned();
+    attest_session(&db, &exec, "workflow-worker");
+    attest_session(&db, &reviewer, "workflow-reviewer");
+    attest_session(&db, &gate, "workflow-gate");
 
     let meta_task_id = success_data(&run_db(
         &db,

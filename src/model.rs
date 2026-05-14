@@ -13,8 +13,8 @@ mod views;
 pub use imports::*;
 pub use records::{
     ApplyVerification, Artifact, Claim, Conflict, Event, EventPayload, ExpiredCountPayload,
-    MetaTask, ReadyQueueItem, Reservation, ReservationOverlapConflictPayload, Review, Session,
-    StaleSessionsPayload, Subtask, TypedEvent,
+    MetaTask, ReadyQueueItem, Reservation, ReservationOverlapConflictPayload, Review,
+    RuntimeAttestation, Session, StaleSessionsPayload, Subtask, TypedEvent,
 };
 pub use requests::*;
 pub use state::*;

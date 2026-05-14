@@ -29,6 +29,9 @@ impl EventPayload {
                 Self::SessionHeartbeat(serde_json::from_str(payload_json)?)
             }
             EventType::SessionExited => Self::SessionExited(serde_json::from_str(payload_json)?),
+            EventType::RuntimeAttestationRecorded => {
+                Self::RuntimeAttestationRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::MetaTaskSubmitted => {
                 Self::MetaTaskSubmitted(serde_json::from_str(payload_json)?)
             }

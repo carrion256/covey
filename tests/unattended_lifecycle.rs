@@ -8,9 +8,9 @@ mod support;
 use covey::{
     ArtifactKind, ClaimNextReq, Covey, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq,
     HeartbeatReq, ManualClock, MarkAppliedReq, MarkInFlightReq, PublishArtifactReq,
-    RecordApplyVerificationReq, RegisterSessionReq, ReleaseClaimReq, RequestReservationReq,
-    RequestReviewReq, ScopeClass, SessionRole, SessionState, SettlementTarget, StartSubtaskReq,
-    SubmitMetaTaskReq, SubtaskState,
+    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    RequestReservationReq, RequestReviewReq, ScopeClass, SessionRole, SessionState,
+    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
 };
 use tempfile::TempDir;
 
@@ -59,6 +59,22 @@ fn register(covey: &Covey, principal: &str, role: SessionRole) -> String {
         })
         .expect("register session")
         .session_token
+}
+
+fn attest(covey: &Covey, session_token: &str) {
+    covey
+        .record_runtime_attestation(RecordRuntimeAttestationReq {
+            session_token: session_token.to_owned(),
+            provider: "covey-test".into(),
+            model: "test-model".into(),
+            process_id: Some(format!("pid-{session_token}")),
+            container_id: None,
+            command_transcript_digest: format!("sha256:{session_token}:transcript"),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_000_001,
+            idempotency_key: format!("record-runtime-attestation-{session_token}"),
+        })
+        .expect("record runtime attestation");
 }
 
 #[test]
@@ -157,6 +173,9 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
     let resumed_worker = register(&covey, "worker-resumed", SessionRole::Executor);
     let reviewer = register(&covey, "reviewer", SessionRole::Reviewer);
     let apply_gate = register(&covey, "apply-gate", SessionRole::ApplyGate);
+    attest(&covey, &resumed_worker);
+    attest(&covey, &reviewer);
+    attest(&covey, &apply_gate);
 
     let meta_task_id = covey
         .submit_meta_task(SubmitMetaTaskReq {

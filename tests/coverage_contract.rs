@@ -9,10 +9,11 @@ use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
     Covey, CoveyError, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, ManualClock,
     MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
-    RecordApplyVerificationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
-    ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
-    StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState, SupersedeQueueItemReq,
+    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
+    RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole,
+    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState,
+    SupersedeQueueItemReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -59,6 +60,22 @@ fn register(covey: &Covey, principal: &str, role: SessionRole) -> String {
         .session_token
 }
 
+fn attest(covey: &Covey, session_token: &str) {
+    covey
+        .record_runtime_attestation(RecordRuntimeAttestationReq {
+            session_token: session_token.to_owned(),
+            provider: "covey-test".into(),
+            model: "test-model".into(),
+            process_id: Some(format!("pid-{session_token}")),
+            container_id: None,
+            command_transcript_digest: format!("sha256:{session_token}:transcript"),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_000_001,
+            idempotency_key: format!("record-runtime-attestation-{session_token}"),
+        })
+        .expect("record runtime attestation");
+}
+
 fn seed_work(covey: &Covey, subtask_id: &str) -> (String, String) {
     let orch = register(
         covey,
@@ -94,6 +111,8 @@ fn prepare_approved_artifact(rig: &Rig, subtask_id: &str, worker: &str, digest: 
         &format!("reviewer-{subtask_id}"),
         SessionRole::Reviewer,
     );
+    attest(&rig.covey, worker);
+    attest(&rig.covey, &reviewer);
     let conn = Connection::open(&rig.db_path).expect("open db");
     conn.execute(
         "INSERT INTO artifacts (
@@ -161,6 +180,7 @@ fn record_apply_verification(
     findings_digest: &str,
     claim_fence_seq: i64,
 ) {
+    attest(covey, gate);
     covey
         .record_apply_verification(RecordApplyVerificationReq {
             session_token: gate.to_owned(),
@@ -316,6 +336,7 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
     ));
 
     let gate = register(&rig.covey, "gate-queue-error-paths", SessionRole::ApplyGate);
+    attest(&rig.covey, &gate);
     assert!(matches!(
         rig.covey.mark_applied(MarkAppliedReq {
             session_token: gate.clone(),
@@ -379,9 +400,49 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
 }
 
 #[rstest]
+fn apply_verification_requires_runtime_attestation(rig: Rig) {
+    let (_orch, queue_id) = enqueue_ready_item(
+        &rig,
+        "queue_requires_runtime_attestation",
+        "sha256:queue_requires_runtime_attestation",
+    );
+    let gate = register(
+        &rig.covey,
+        "gate-missing-runtime-attestation",
+        SessionRole::ApplyGate,
+    );
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("mark in flight");
+
+    assert!(matches!(
+        rig.covey.record_apply_verification(RecordApplyVerificationReq {
+            session_token: gate.clone(),
+            queue_id,
+            artifact_digest: "sha256:queue_requires_runtime_attestation".into(),
+            review_id: "review_queue_requires_runtime_attestation".into(),
+            findings_digest: "sha256:queue_requires_runtime_attestation:findings".into(),
+            claim_fence_seq: claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: "sha256:queue_requires_runtime_attestation:verdict".into(),
+            seal_digest: "sha256:queue_requires_runtime_attestation:seal".into(),
+            idempotency_key: id_key("record-apply-verification"),
+        }),
+        Err(CoveyError::RuntimeAttestationMissing { session_token }) if session_token == gate
+    ));
+}
+
+#[rstest]
 fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig) {
     let (orch, work_id) = seed_work(&rig.covey, "queue_evidence_required");
     let gate = register(&rig.covey, "gate-evidence-required", SessionRole::ApplyGate);
+    attest(&rig.covey, &gate);
     prepare_approved_artifact_without_review(
         &rig,
         &work_id,

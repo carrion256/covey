@@ -43,6 +43,13 @@ pub enum CoveyError {
         session_token: String,
         active_subtask_id: String,
     },
+    #[error("runtime attestation missing for session {session_token}")]
+    RuntimeAttestationMissing { session_token: String },
+    #[error("invalid runtime attestation for session {session_token}: {reason}")]
+    InvalidRuntimeAttestation {
+        session_token: String,
+        reason: String,
+    },
     #[error("invalid session token {session_token}")]
     InvalidSessionToken { session_token: String },
     #[error("invalid idempotency key {idempotency_key}")]
@@ -162,10 +169,11 @@ impl PartialEq for CoveyError {
             ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
             IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
             InputTooLarge, InvalidIdempotencyKey, InvalidImportDestination, InvalidImportRow,
-            InvalidLeaseDuration, InvalidPath, InvalidSessionToken, InvalidSourceSchema,
-            LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
-            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
-            ReviewKindMismatch, ReviewNotFound, SeparationOfDutiesViolation, SerializationError,
+            InvalidLeaseDuration, InvalidPath, InvalidRuntimeAttestation, InvalidSessionToken,
+            InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
+            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
+            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, StaleFenceToken, SubtaskAlreadyClaimed, SubtaskNotFound,
             UnknownArtifactDigest, WrongRole,
@@ -233,6 +241,24 @@ impl PartialEq for CoveyError {
                     active_subtask_id: right_subtask_id,
                 },
             ) => left_session_token == right_session_token && left_subtask_id == right_subtask_id,
+            (
+                RuntimeAttestationMissing {
+                    session_token: left_session_token,
+                },
+                RuntimeAttestationMissing {
+                    session_token: right_session_token,
+                },
+            ) => left_session_token == right_session_token,
+            (
+                InvalidRuntimeAttestation {
+                    session_token: left_session_token,
+                    reason: left_reason,
+                },
+                InvalidRuntimeAttestation {
+                    session_token: right_session_token,
+                    reason: right_reason,
+                },
+            ) => left_session_token == right_session_token && left_reason == right_reason,
             (
                 InvalidSessionToken {
                     session_token: left_token,

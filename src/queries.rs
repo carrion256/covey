@@ -9,7 +9,8 @@ use crate::{
     model::{
         ActorKind, Artifact, Claim, ClaimState, Event, MetaTask, MutationIdempotencyRecord,
         ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
-        ReservationState, Review, Session, SessionState, Subtask, parse_generated_members,
+        ReservationState, Review, RuntimeAttestation, Session, SessionState, Subtask,
+        parse_generated_members,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -85,6 +86,28 @@ pub(crate) fn load_session_tx(tx: &Transaction<'_>, session_token: &str) -> Resu
             deserialize_row::<Session>,
         ),
         CoveyError::SessionNotFound,
+    )
+}
+
+pub(crate) fn load_runtime_attestation_tx(
+    tx: &Transaction<'_>,
+    session_token: &str,
+) -> Result<RuntimeAttestation> {
+    map_missing_row(
+        tx.query_row(
+            r#"
+            SELECT session_token, agent_principal_id, agent_instance_id, role,
+                   provider, model, process_id, container_id, command_transcript_digest,
+                   started_at, ended_at, recorded_at
+            FROM runtime_attestations
+            WHERE session_token = ?1
+            "#,
+            params![session_token],
+            deserialize_row::<RuntimeAttestation>,
+        ),
+        CoveyError::RuntimeAttestationMissing {
+            session_token: session_token.to_owned(),
+        },
     )
 }
 

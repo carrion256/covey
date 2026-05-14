@@ -18,8 +18,8 @@ use covey::{
     DecideReviewReq, EnqueueForApplyReq, EventPayload, EventType, ExitSessionReq, HeartbeatReq,
     ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason, ManualClock,
     MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType, OverlapQueryReq,
-    PublishArtifactReq, ReadyQueueState, RecordApplyVerificationReq, RegisterSessionReq,
-    ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    PublishArtifactReq, ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RequestReservationReq, RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq,
     ScopeClass, SessionRole, SessionState, SettlementTarget, StartSubtaskReq, StateValue,
     SubmitMetaTaskReq, SubtaskKind, SubtaskState,
@@ -79,6 +79,22 @@ fn register(covey: &Covey, token: &str, principal: &str, role: SessionRole) -> S
         .session_token
 }
 
+fn attest(covey: &Covey, session_token: &str) {
+    covey
+        .record_runtime_attestation(RecordRuntimeAttestationReq {
+            session_token: session_token.to_owned(),
+            provider: "covey-test".into(),
+            model: "test-model".into(),
+            process_id: Some(format!("pid-{session_token}")),
+            container_id: None,
+            command_transcript_digest: format!("sha256:{session_token}:transcript"),
+            started_at: 1_700_000_000_000,
+            ended_at: 1_700_000_000_001,
+            idempotency_key: format!("record-runtime-attestation-{session_token}"),
+        })
+        .expect("record runtime attestation");
+}
+
 fn seed_work_subtask(rig: &Rig) -> (String, String) {
     let covey = rig.covey();
     let orch = register(&covey, "orch", "orch", SessionRole::Orchestrator);
@@ -132,6 +148,7 @@ fn record_apply_verification(
     findings_digest: &str,
     claim_fence_seq: i64,
 ) {
+    attest(covey, gate);
     covey
         .record_apply_verification(RecordApplyVerificationReq {
             session_token: gate.to_owned(),
@@ -2751,6 +2768,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
     {
         let worker_alias = format!("worker_{digest}");
         let worker = register(&covey, &worker_alias, &worker_alias, SessionRole::Executor);
+        attest(&covey, &worker);
         let claim = covey
             .claim_next_subtask(ClaimNextReq {
                 session_token: worker.clone(),
@@ -2805,6 +2823,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
             &reviewer_alias,
             SessionRole::Reviewer,
         );
+        attest(&covey, &reviewer);
         let review_claim = covey
             .claim_next_subtask(ClaimNextReq {
                 session_token: reviewer.clone(),
@@ -2894,6 +2913,8 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
     let gate_b = register(&covey, "gate_b", "gate_b", SessionRole::ApplyGate);
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
+    attest(&covey, &worker);
+    attest(&covey, &reviewer);
 
     let meta_task_id = covey
         .submit_meta_task(SubmitMetaTaskReq {
@@ -4762,6 +4783,9 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
     let worker_b = register(&covey, "worker_b", "worker_b", SessionRole::Executor);
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
     let gate = register(&covey, "gate", "gate", SessionRole::ApplyGate);
+    attest(&covey, &worker_a);
+    attest(&covey, &reviewer);
+    attest(&covey, &gate);
 
     let meta_task_id = covey
         .submit_meta_task(SubmitMetaTaskReq {
@@ -4973,6 +4997,9 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
     let gate = register(&covey, "gate", "gate", SessionRole::ApplyGate);
+    attest(&covey, &worker);
+    attest(&covey, &reviewer);
+    attest(&covey, &gate);
 
     let meta_task_id = covey
         .submit_meta_task(SubmitMetaTaskReq {

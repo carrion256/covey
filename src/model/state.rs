@@ -13,6 +13,7 @@ pub enum ObjectType {
     Review,
     ReadyQueue,
     Session,
+    RuntimeAttestation,
     Reservation,
     Conflict,
 }
@@ -25,6 +26,7 @@ pub enum EventType {
     SessionRegistered,
     SessionHeartbeat,
     SessionExited,
+    RuntimeAttestationRecorded,
     MetaTaskSubmitted,
     MetaTaskCancelled,
     SubtaskCreated,

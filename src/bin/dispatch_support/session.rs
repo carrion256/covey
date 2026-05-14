@@ -19,6 +19,28 @@ pub(super) fn dispatch_session(store: &Covey, command: SessionCommand) -> covey:
                 ),
             ))
         }
+        SessionCommand::Attest(args) => {
+            let attestation = store.record_runtime_attestation(RecordRuntimeAttestationReq {
+                session_token: args.session_token.clone(),
+                provider: args.provider,
+                model: args.model,
+                process_id: args.process_id,
+                container_id: args.container_id,
+                command_transcript_digest: args.command_transcript_digest,
+                started_at: args.started_at,
+                ended_at: args.ended_at,
+                idempotency_key: args
+                    .idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("record-runtime-attestation")),
+            })?;
+            Ok(Rendered::summary(
+                &attestation,
+                format!(
+                    "runtime attestation {} role={} principal={}",
+                    attestation.session_token, attestation.role, attestation.agent_principal_id
+                ),
+            ))
+        }
         SessionCommand::Heartbeat(args) => {
             store.heartbeat(HeartbeatReq {
                 session_token: args.session_token.clone(),

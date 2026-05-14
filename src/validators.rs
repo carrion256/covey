@@ -4,10 +4,12 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         Claim, ClaimState, MetaTaskState, ObjectType, ReadyQueueState, ReservationState,
-        ReviewState, Session, SessionRole, SessionState, StateValue, SubtaskKind, SubtaskState,
+        ReviewState, RuntimeAttestation, Session, SessionRole, SessionState, StateValue,
+        SubtaskKind, SubtaskState,
     },
     queries::{
-        load_artifact_tx, load_claim_tx, load_meta_task_tx, load_session_tx, load_subtask_tx,
+        load_artifact_tx, load_claim_tx, load_meta_task_tx, load_runtime_attestation_tx,
+        load_session_tx, load_subtask_tx,
     },
 };
 
@@ -20,6 +22,7 @@ pub(crate) const MAX_DIGEST_LEN: usize = 512;
 pub(crate) const MAX_BASE_REV_LEN: usize = 512;
 pub(crate) const MAX_PATH_LEN: usize = 4 * 1024;
 pub(crate) const MAX_GENERATED_MEMBERS: usize = 1_024;
+pub(crate) const MAX_RUNTIME_FIELD_LEN: usize = 512;
 
 pub(crate) fn ensure_no_other_active_session(
     tx: &Transaction<'_>,
@@ -70,6 +73,23 @@ pub(crate) fn require_role(
             actual: session.role,
         })
     }
+}
+
+pub(crate) fn require_runtime_attestation(
+    tx: &Transaction<'_>,
+    session: &Session,
+) -> Result<RuntimeAttestation> {
+    let attestation = load_runtime_attestation_tx(tx, &session.session_token)?;
+    if attestation.agent_principal_id != session.agent_principal_id
+        || attestation.agent_instance_id != session.agent_instance_id
+        || attestation.role != session.role
+    {
+        return Err(CoveyError::InvalidRuntimeAttestation {
+            session_token: session.session_token.clone(),
+            reason: "attestation identity does not match the session identity".to_owned(),
+        });
+    }
+    Ok(attestation)
 }
 
 pub(crate) fn ensure_meta_task_exists(tx: &Transaction<'_>, meta_task_id: &str) -> Result<()> {
@@ -290,6 +310,16 @@ pub(crate) fn ensure_length(field: &str, value: &str, max: usize) -> Result<()> 
             field: field.to_owned(),
             actual,
             max,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_non_empty(field: &str, value: &str, session_token: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(CoveyError::InvalidRuntimeAttestation {
+            session_token: session_token.to_owned(),
+            reason: format!("{field} must not be empty"),
         });
     }
     Ok(())

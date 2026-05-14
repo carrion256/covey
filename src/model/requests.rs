@@ -55,6 +55,20 @@ pub struct ExitSessionReq {
     pub idempotency_key: String,
 }
 
+/// Request to bind runtime identity evidence to a Covey session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordRuntimeAttestationReq {
+    pub session_token: String,
+    pub provider: String,
+    pub model: String,
+    pub process_id: Option<String>,
+    pub container_id: Option<String>,
+    pub command_transcript_digest: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub idempotency_key: String,
+}
+
 /// Request to create a work or review subtask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSubtaskReq {
