@@ -24,6 +24,8 @@ pub(super) fn dispatch_session(store: &Covey, command: SessionCommand) -> covey:
                 session_token: args.session_token.clone(),
                 provider: args.provider,
                 model: args.model,
+                provider_run_id: args.provider_run_id,
+                provider_run_id_issuer: args.provider_run_id_issuer,
                 process_id: args.process_id,
                 container_id: args.container_id,
                 command_transcript_digest: args.command_transcript_digest,

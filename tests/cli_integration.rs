@@ -51,6 +51,7 @@ fn stderr_code(output: &std::process::Output) -> String {
 
 fn attest_session(db_path: &Path, session_token: &str, role_label: &str) {
     let process_id = format!("pid-{role_label}");
+    let provider_run_id = format!("provider-run-{role_label}");
     let transcript_digest = format!("sha256:{role_label}:transcript");
     let idempotency_key = format!("record-runtime-attestation-{role_label}");
     success_data(&run_db(
@@ -64,6 +65,10 @@ fn attest_session(db_path: &Path, session_token: &str, role_label: &str) {
             "covey-test",
             "--model",
             "test-model",
+            "--provider-run-id",
+            &provider_run_id,
+            "--provider-run-id-issuer",
+            "covey-test-provider",
             "--process-id",
             &process_id,
             "--command-transcript-digest",
@@ -183,6 +188,10 @@ fn session_attest_records_runtime_identity_json() {
             "codex",
             "--model",
             "gpt-test",
+            "--provider-run-id",
+            "provider-run-123",
+            "--provider-run-id-issuer",
+            "codex-test-provider",
             "--process-id",
             "pid-123",
             "--command-transcript-digest",
@@ -199,6 +208,8 @@ fn session_attest_records_runtime_identity_json() {
     assert_eq!(data["agent_principal_id"], "agent-attest");
     assert_eq!(data["role"], "reviewer");
     assert_eq!(data["provider"], "codex");
+    assert_eq!(data["provider_run_id"], "provider-run-123");
+    assert_eq!(data["provider_run_id_issuer"], "codex-test-provider");
     assert_eq!(data["command_transcript_digest"], "sha256:transcript");
 }
 

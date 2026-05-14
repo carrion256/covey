@@ -13,6 +13,9 @@ use crate::{
     },
 };
 
+const MISSING_PROVIDER_RUN_ID: &str = "__covey_missing_provider_run_id__";
+const MISSING_PROVIDER_RUN_ID_ISSUER: &str = "__covey_missing_provider_run_id_issuer__";
+
 pub(crate) const MAX_PROMPT_LEN: usize = 32 * 1024;
 pub(crate) const MAX_TITLE_LEN: usize = 512;
 pub(crate) const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
@@ -87,6 +90,14 @@ pub(crate) fn require_runtime_attestation(
         return Err(CoveyError::InvalidRuntimeAttestation {
             session_token: session.session_token.clone(),
             reason: "attestation identity does not match the session identity".to_owned(),
+        });
+    }
+    if attestation.provider_run_id == MISSING_PROVIDER_RUN_ID
+        || attestation.provider_run_id_issuer == MISSING_PROVIDER_RUN_ID_ISSUER
+    {
+        return Err(CoveyError::InvalidRuntimeAttestation {
+            session_token: session.session_token.clone(),
+            reason: "provider run identity is required".to_owned(),
         });
     }
     Ok(attestation)

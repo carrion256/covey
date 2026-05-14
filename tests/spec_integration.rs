@@ -85,6 +85,8 @@ fn attest(covey: &Covey, session_token: &str) {
             session_token: session_token.to_owned(),
             provider: "covey-test".into(),
             model: "test-model".into(),
+            provider_run_id: format!("provider-run-{session_token}"),
+            provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
             command_transcript_digest: format!("sha256:{session_token}:transcript"),

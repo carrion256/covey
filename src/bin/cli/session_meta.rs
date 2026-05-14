@@ -37,6 +37,10 @@ pub(crate) struct RecordRuntimeAttestationArgs {
     #[arg(long)]
     pub(crate) model: String,
     #[arg(long)]
+    pub(crate) provider_run_id: String,
+    #[arg(long)]
+    pub(crate) provider_run_id_issuer: String,
+    #[arg(long)]
     pub(crate) process_id: Option<String>,
     #[arg(long)]
     pub(crate) container_id: Option<String>,

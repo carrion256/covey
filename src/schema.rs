@@ -524,6 +524,16 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
         ON runtime_attestations(agent_principal_id, role);
         "#,
         ),
+        M::up(
+            r#"
+        ALTER TABLE runtime_attestations
+        ADD COLUMN provider_run_id TEXT NOT NULL DEFAULT '__covey_missing_provider_run_id__';
+        ALTER TABLE runtime_attestations
+        ADD COLUMN provider_run_id_issuer TEXT NOT NULL DEFAULT '__covey_missing_provider_run_id_issuer__';
+        CREATE INDEX IF NOT EXISTS idx_runtime_attestations_provider_run
+        ON runtime_attestations(provider_run_id_issuer, provider_run_id);
+        "#,
+        ),
     ])
     .to_latest(conn)
     .map_err(CoveyError::from)

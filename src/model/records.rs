@@ -36,6 +36,8 @@ pub struct RuntimeAttestation {
     pub role: SessionRole,
     pub provider: String,
     pub model: String,
+    pub provider_run_id: String,
+    pub provider_run_id_issuer: String,
     pub process_id: Option<String>,
     pub container_id: Option<String>,
     pub command_transcript_digest: String,

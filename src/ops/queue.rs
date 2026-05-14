@@ -731,6 +731,12 @@ fn require_runtime_actor_separation(
             reason: format!("{left_role} and {right_role} runtime refs are not separated"),
         });
     }
+    if provider_run_ref(left) == provider_run_ref(right) {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: queue_id.to_owned(),
+            reason: format!("{left_role} and {right_role} provider run ids are not separated"),
+        });
+    }
     if left.command_transcript_digest == right.command_transcript_digest {
         return Err(CoveyError::ApplyGateEvidenceMissing {
             queue_id: queue_id.to_owned(),
@@ -744,6 +750,13 @@ fn runtime_ref(attestation: &RuntimeAttestation) -> (Option<&str>, Option<&str>)
     (
         attestation.process_id.as_deref(),
         attestation.container_id.as_deref(),
+    )
+}
+
+fn provider_run_ref(attestation: &RuntimeAttestation) -> (&str, &str) {
+    (
+        attestation.provider_run_id_issuer.as_str(),
+        attestation.provider_run_id.as_str(),
     )
 }
 

@@ -114,6 +114,8 @@ impl Covey {
                         role: session.role,
                         provider: req.provider.clone(),
                         model: req.model.clone(),
+                        provider_run_id: req.provider_run_id.clone(),
+                        provider_run_id_issuer: req.provider_run_id_issuer.clone(),
                         process_id: req.process_id.clone(),
                         container_id: req.container_id.clone(),
                         command_transcript_digest: req.command_transcript_digest.clone(),
@@ -125,9 +127,10 @@ impl Covey {
                         r#"
                         INSERT INTO runtime_attestations (
                             session_token, agent_principal_id, agent_instance_id, role,
-                            provider, model, process_id, container_id,
+                            provider, model, provider_run_id, provider_run_id_issuer,
+                            process_id, container_id,
                             command_transcript_digest, started_at, ended_at, recorded_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                         "#,
                         params![
                             attestation.session_token.as_str(),
@@ -136,6 +139,8 @@ impl Covey {
                             attestation.role.to_string(),
                             attestation.provider.as_str(),
                             attestation.model.as_str(),
+                            attestation.provider_run_id.as_str(),
+                            attestation.provider_run_id_issuer.as_str(),
                             attestation.process_id.as_deref(),
                             attestation.container_id.as_deref(),
                             attestation.command_transcript_digest.as_str(),
@@ -296,12 +301,28 @@ fn validate_runtime_attestation_req(req: &RecordRuntimeAttestationReq) -> Result
     ensure_length("provider", &req.provider, MAX_RUNTIME_FIELD_LEN)?;
     ensure_length("model", &req.model, MAX_RUNTIME_FIELD_LEN)?;
     ensure_length(
+        "provider_run_id",
+        &req.provider_run_id,
+        MAX_RUNTIME_FIELD_LEN,
+    )?;
+    ensure_length(
+        "provider_run_id_issuer",
+        &req.provider_run_id_issuer,
+        MAX_RUNTIME_FIELD_LEN,
+    )?;
+    ensure_length(
         "command_transcript_digest",
         &req.command_transcript_digest,
         MAX_RUNTIME_FIELD_LEN,
     )?;
     ensure_non_empty("provider", &req.provider, &req.session_token)?;
     ensure_non_empty("model", &req.model, &req.session_token)?;
+    ensure_non_empty("provider_run_id", &req.provider_run_id, &req.session_token)?;
+    ensure_non_empty(
+        "provider_run_id_issuer",
+        &req.provider_run_id_issuer,
+        &req.session_token,
+    )?;
     ensure_non_empty(
         "command_transcript_digest",
         &req.command_transcript_digest,

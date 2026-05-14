@@ -97,7 +97,8 @@ pub(crate) fn load_runtime_attestation_tx(
         tx.query_row(
             r#"
             SELECT session_token, agent_principal_id, agent_instance_id, role,
-                   provider, model, process_id, container_id, command_transcript_digest,
+                   provider, model, provider_run_id, provider_run_id_issuer,
+                   process_id, container_id, command_transcript_digest,
                    started_at, ended_at, recorded_at
             FROM runtime_attestations
             WHERE session_token = ?1

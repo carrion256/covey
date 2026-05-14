@@ -66,6 +66,8 @@ fn attest(covey: &Covey, session_token: &str) {
             session_token: session_token.to_owned(),
             provider: "covey-test".into(),
             model: "test-model".into(),
+            provider_run_id: format!("provider-run-{session_token}"),
+            provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
             command_transcript_digest: format!("sha256:{session_token}:transcript"),
@@ -90,6 +92,27 @@ fn force_runtime_ref(rig: &Rig, session_token: &str, process_id: &str, transcrip
             params![session_token, process_id, transcript_digest],
         )
         .expect("force runtime ref");
+    assert_eq!(updated, 1);
+}
+
+fn force_provider_run_ref(
+    rig: &Rig,
+    session_token: &str,
+    provider_run_id_issuer: &str,
+    provider_run_id: &str,
+) {
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let updated = conn
+        .execute(
+            r#"
+            UPDATE runtime_attestations
+            SET provider_run_id_issuer = ?2,
+                provider_run_id = ?3
+            WHERE session_token = ?1
+            "#,
+            params![session_token, provider_run_id_issuer, provider_run_id],
+        )
+        .expect("force provider run ref");
     assert_eq!(updated, 1);
 }
 
@@ -544,6 +567,48 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
         }),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "producer and apply_gate transcript digests are not separated"
+    ));
+}
+
+#[rstest]
+fn apply_verification_rejects_shared_provider_run_identity(rig: Rig) {
+    let subtask_id = "queue_shared_provider_run";
+    let digest = "sha256:queue_shared_provider_run";
+    let (worker, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
+    let reviewer = review_session_for(&rig, subtask_id);
+    force_provider_run_ref(&rig, &worker, "codex-provider", "run-shared");
+    force_provider_run_ref(&rig, &reviewer, "codex-provider", "run-shared");
+    let gate = register(
+        &rig.covey,
+        "gate-shared-provider-run",
+        SessionRole::ApplyGate,
+    );
+    attest(&rig.covey, &gate);
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("mark in flight");
+
+    assert!(matches!(
+        rig.covey.record_apply_verification(RecordApplyVerificationReq {
+            session_token: gate,
+            queue_id,
+            artifact_digest: digest.into(),
+            review_id: format!("review_{subtask_id}"),
+            findings_digest: format!("{digest}:findings"),
+            claim_fence_seq: claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: format!("{digest}:verdict"),
+            seal_digest: format!("{digest}:seal"),
+            idempotency_key: id_key("record-apply-verification"),
+        }),
+        Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
+            if reason == "producer and reviewer provider run ids are not separated"
     ));
 }
 
