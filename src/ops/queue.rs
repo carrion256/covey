@@ -10,7 +10,8 @@ use crate::{
     model::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, MarkAppliedReq, MarkInFlightReq,
         ObjectType, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        RecordApplyVerificationReq, SessionRole, SubtaskState, SupersedeQueueItemReq,
+        RecordApplyVerificationReq, RuntimeAttestation, Session, SessionRole, SubtaskState,
+        SupersedeQueueItemReq,
     },
     queries::{
         collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
@@ -324,8 +325,7 @@ impl Covey {
                                     .to_owned(),
                         });
                     }
-                    let live_evidence =
-                        require_live_apply_gate_evidence(tx, &item, &session.agent_principal_id)?;
+                    let live_evidence = require_live_apply_gate_evidence(tx, &item, &session)?;
                     if live_evidence.review_id != req.review_id
                         || live_evidence.findings_digest != req.findings_digest
                     {
@@ -446,12 +446,8 @@ impl Covey {
                         });
                     }
                     let apply_gate_session = load_session_tx(tx, &req.session_token)?;
-                    require_runtime_attestation(tx, &apply_gate_session)?;
-                    let live_evidence = require_live_apply_gate_evidence(
-                        tx,
-                        &item,
-                        &apply_gate_session.agent_principal_id,
-                    )?;
+                    let live_evidence =
+                        require_live_apply_gate_evidence(tx, &item, &apply_gate_session)?;
                     require_recorded_apply_verification(
                         tx,
                         &item,
@@ -622,7 +618,7 @@ struct LiveApplyGateEvidence {
 fn require_live_apply_gate_evidence(
     tx: &Transaction<'_>,
     item: &ReadyQueueItem,
-    apply_gate_principal_id: &str,
+    apply_gate_session: &Session,
 ) -> Result<LiveApplyGateEvidence> {
     let evidence = tx
         .query_row(
@@ -679,25 +675,76 @@ fn require_live_apply_gate_evidence(
             reason: "producer and reviewer principals are not separated".to_owned(),
         });
     }
-    if apply_gate_principal_id == evidence.producer_principal_id {
+    if apply_gate_session.agent_principal_id == evidence.producer_principal_id {
         return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
-            apply_gate_principal_id: apply_gate_principal_id.to_owned(),
+            apply_gate_principal_id: apply_gate_session.agent_principal_id.clone(),
             conflicting_role: "producer".to_owned(),
             conflicting_principal_id: evidence.producer_principal_id,
         });
     }
-    if apply_gate_principal_id == evidence.reviewer_principal_id {
+    if apply_gate_session.agent_principal_id == evidence.reviewer_principal_id {
         return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
-            apply_gate_principal_id: apply_gate_principal_id.to_owned(),
+            apply_gate_principal_id: apply_gate_session.agent_principal_id.clone(),
             conflicting_role: "reviewer".to_owned(),
             conflicting_principal_id: evidence.reviewer_principal_id,
         });
     }
     let producer_session = load_session_tx(tx, &evidence.producer_session_token)?;
     let reviewer_session = load_session_tx(tx, &evidence.reviewer_session_token)?;
-    require_runtime_attestation(tx, &producer_session)?;
-    require_runtime_attestation(tx, &reviewer_session)?;
+    let producer_attestation = require_runtime_attestation(tx, &producer_session)?;
+    let reviewer_attestation = require_runtime_attestation(tx, &reviewer_session)?;
+    let apply_gate_attestation = require_runtime_attestation(tx, apply_gate_session)?;
+    require_runtime_actor_separation(
+        &item.queue_id,
+        "producer",
+        &producer_attestation,
+        "reviewer",
+        &reviewer_attestation,
+    )?;
+    require_runtime_actor_separation(
+        &item.queue_id,
+        "producer",
+        &producer_attestation,
+        "apply_gate",
+        &apply_gate_attestation,
+    )?;
+    require_runtime_actor_separation(
+        &item.queue_id,
+        "reviewer",
+        &reviewer_attestation,
+        "apply_gate",
+        &apply_gate_attestation,
+    )?;
     Ok(evidence)
+}
+
+fn require_runtime_actor_separation(
+    queue_id: &str,
+    left_role: &str,
+    left: &RuntimeAttestation,
+    right_role: &str,
+    right: &RuntimeAttestation,
+) -> Result<()> {
+    if runtime_ref(left) == runtime_ref(right) {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: queue_id.to_owned(),
+            reason: format!("{left_role} and {right_role} runtime refs are not separated"),
+        });
+    }
+    if left.command_transcript_digest == right.command_transcript_digest {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: queue_id.to_owned(),
+            reason: format!("{left_role} and {right_role} transcript digests are not separated"),
+        });
+    }
+    Ok(())
+}
+
+fn runtime_ref(attestation: &RuntimeAttestation) -> (Option<&str>, Option<&str>) {
+    (
+        attestation.process_id.as_deref(),
+        attestation.container_id.as_deref(),
+    )
 }
 
 fn require_recorded_apply_verification(

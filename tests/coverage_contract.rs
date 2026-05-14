@@ -76,6 +76,33 @@ fn attest(covey: &Covey, session_token: &str) {
         .expect("record runtime attestation");
 }
 
+fn force_runtime_ref(rig: &Rig, session_token: &str, process_id: &str, transcript_digest: &str) {
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let updated = conn
+        .execute(
+            r#"
+            UPDATE runtime_attestations
+            SET process_id = ?2,
+                container_id = NULL,
+                command_transcript_digest = ?3
+            WHERE session_token = ?1
+            "#,
+            params![session_token, process_id, transcript_digest],
+        )
+        .expect("force runtime ref");
+    assert_eq!(updated, 1);
+}
+
+fn review_session_for(rig: &Rig, subtask_id: &str) -> String {
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    conn.query_row(
+        "SELECT reviewer_session FROM reviews WHERE subtask_id = ?1",
+        params![subtask_id],
+        |row| row.get(0),
+    )
+    .expect("reviewer session")
+}
+
 fn seed_work(covey: &Covey, subtask_id: &str) -> (String, String) {
     let orch = register(
         covey,
@@ -435,6 +462,88 @@ fn apply_verification_requires_runtime_attestation(rig: Rig) {
             idempotency_key: id_key("record-apply-verification"),
         }),
         Err(CoveyError::RuntimeAttestationMissing { session_token }) if session_token == gate
+    ));
+}
+
+#[rstest]
+fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
+    let subtask_id = "queue_shared_worker_reviewer_runtime";
+    let digest = "sha256:queue_shared_worker_reviewer_runtime";
+    let (worker, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
+    let reviewer = review_session_for(&rig, subtask_id);
+    force_runtime_ref(
+        &rig,
+        &worker,
+        "pid-shared-review",
+        "sha256:worker-transcript",
+    );
+    force_runtime_ref(
+        &rig,
+        &reviewer,
+        "pid-shared-review",
+        "sha256:reviewer-transcript",
+    );
+    let gate = register(&rig.covey, "gate-shared-runtime", SessionRole::ApplyGate);
+    attest(&rig.covey, &gate);
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("mark in flight");
+
+    assert!(matches!(
+        rig.covey.record_apply_verification(RecordApplyVerificationReq {
+            session_token: gate,
+            queue_id,
+            artifact_digest: digest.into(),
+            review_id: format!("review_{subtask_id}"),
+            findings_digest: format!("{digest}:findings"),
+            claim_fence_seq: claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: format!("{digest}:verdict"),
+            seal_digest: format!("{digest}:seal"),
+            idempotency_key: id_key("record-apply-verification"),
+        }),
+        Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
+            if reason == "producer and reviewer runtime refs are not separated"
+    ));
+
+    let subtask_id = "queue_shared_worker_gate_transcript";
+    let digest = "sha256:queue_shared_worker_gate_transcript";
+    let (worker, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
+    let gate = register(&rig.covey, "gate-shared-transcript", SessionRole::ApplyGate);
+    attest(&rig.covey, &gate);
+    force_runtime_ref(&rig, &worker, "pid-worker", "sha256:shared-transcript");
+    force_runtime_ref(&rig, &gate, "pid-gate", "sha256:shared-transcript");
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("mark in flight");
+
+    assert!(matches!(
+        rig.covey.record_apply_verification(RecordApplyVerificationReq {
+            session_token: gate,
+            queue_id,
+            artifact_digest: digest.into(),
+            review_id: format!("review_{subtask_id}"),
+            findings_digest: format!("{digest}:findings"),
+            claim_fence_seq: claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: format!("{digest}:verdict"),
+            seal_digest: format!("{digest}:seal"),
+            idempotency_key: id_key("record-apply-verification"),
+        }),
+        Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
+            if reason == "producer and apply_gate transcript digests are not separated"
     ));
 }
 
