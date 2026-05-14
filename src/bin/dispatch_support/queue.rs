@@ -83,6 +83,23 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
                 format!("queue apply verification recorded {}", args.queue_id),
             ))
         }
+        QueueCommand::VerifyLandingAuthorization(args) => {
+            let status = store.verify_landing_authorization(VerifyLandingAuthorizationReq {
+                session_token: args.session_token,
+                queue_id: args.queue_id,
+                artifact_digest: args.artifact_digest,
+                review_id: args.review_id,
+                findings_digest: args.findings_digest,
+                claim_fence_seq: args.claim_fence_seq,
+                verifier: args.verifier,
+                verdict_digest: args.verdict_digest,
+                seal_digest: args.seal_digest,
+            })?;
+            Ok(Rendered::summary(
+                &status,
+                format!("landing authorization verified {}", status.queue_id),
+            ))
+        }
         QueueCommand::MarkApplied(args) => {
             store.mark_applied(MarkAppliedReq {
                 session_token: args.session_token,

@@ -60,6 +60,22 @@ pub struct ReadyQueueMetrics {
     pub oldest_in_flight_age_ms: Option<i64>,
 }
 
+/// Live authorization check for a git landing side effect.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+pub struct LandingAuthorizationStatus {
+    pub accepted: bool,
+    pub queue_id: String,
+    pub artifact_digest: String,
+    pub review_id: String,
+    pub findings_digest: String,
+    pub claim_fence_seq: i64,
+    pub verifier: String,
+    pub verdict_digest: String,
+    pub seal_digest: String,
+    pub recorded_by_session: String,
+}
+
 /// Policy facts passed through to mutAI repoops preflight.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]

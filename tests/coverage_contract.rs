@@ -13,7 +13,7 @@ use covey::{
     ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
     RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole,
     SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState,
-    SupersedeQueueItemReq,
+    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -691,6 +691,77 @@ fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig
             conflicting_role,
             ..
         }) if conflicting_role == "producer"
+    ));
+}
+
+#[rstest]
+fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
+    let subtask_id = "queue_landing_authorization";
+    let digest = "sha256:queue_landing_authorization";
+    let (_orch, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
+    let gate = register(
+        &rig.covey,
+        "gate-landing-authorization",
+        SessionRole::ApplyGate,
+    );
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("claim queue item");
+    record_apply_verification(
+        &rig.covey,
+        &gate,
+        &queue_id,
+        subtask_id,
+        digest,
+        &format!("{digest}:findings"),
+        claim.claim_fence_seq,
+    );
+    rig.covey
+        .mark_applied(MarkAppliedReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            claim_fence_seq: claim.claim_fence_seq,
+            idempotency_key: id_key("mark-applied"),
+        })
+        .expect("mark applied");
+
+    let status = rig
+        .covey
+        .verify_landing_authorization(VerifyLandingAuthorizationReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            artifact_digest: digest.into(),
+            review_id: format!("review_{subtask_id}"),
+            findings_digest: format!("{digest}:findings"),
+            claim_fence_seq: claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: format!("{digest}:verdict"),
+            seal_digest: format!("{digest}:seal"),
+        })
+        .expect("verify landing authorization");
+    assert!(status.accepted);
+    assert_eq!(status.recorded_by_session, gate);
+
+    assert!(matches!(
+        rig.covey.verify_landing_authorization(VerifyLandingAuthorizationReq {
+            session_token: status.recorded_by_session,
+            queue_id,
+            artifact_digest: digest.into(),
+            review_id: format!("review_{subtask_id}"),
+            findings_digest: format!("{digest}:findings"),
+            claim_fence_seq: claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: format!("{digest}:verdict"),
+            seal_digest: "sha256:wrong-apply-verification-seal".into(),
+        }),
+        Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
+            if reason == "accepted apply verifier verdict does not match landing authorization"
     ));
 }
 

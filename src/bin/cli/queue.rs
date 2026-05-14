@@ -10,6 +10,8 @@ pub(crate) enum QueueCommand {
     MarkInFlight(MarkInFlightArgs),
     #[command(name = "record-apply-verification")]
     RecordApplyVerification(RecordApplyVerificationArgs),
+    #[command(name = "verify-landing-authorization")]
+    VerifyLandingAuthorization(VerifyLandingAuthorizationArgs),
     #[command(name = "mark-applied")]
     MarkApplied(MarkAppliedArgs),
     Supersede(SupersedeQueueArgs),
@@ -77,6 +79,28 @@ pub(crate) struct RecordApplyVerificationArgs {
     pub(crate) seal_digest: String,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct VerifyLandingAuthorizationArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) queue_id: String,
+    #[arg(long)]
+    pub(crate) artifact_digest: String,
+    #[arg(long)]
+    pub(crate) review_id: String,
+    #[arg(long)]
+    pub(crate) findings_digest: String,
+    #[arg(long)]
+    pub(crate) claim_fence_seq: i64,
+    #[arg(long)]
+    pub(crate) verifier: String,
+    #[arg(long)]
+    pub(crate) verdict_digest: String,
+    #[arg(long)]
+    pub(crate) seal_digest: String,
 }
 
 #[derive(Args, Debug)]

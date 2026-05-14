@@ -8,10 +8,10 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimReadyQueueReq, EnqueueForApplyReq, EventType, MarkAppliedReq, MarkInFlightReq,
-        ObjectType, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        RecordApplyVerificationReq, RuntimeAttestation, Session, SessionRole, SubtaskState,
-        SupersedeQueueItemReq,
+        ClaimReadyQueueReq, EnqueueForApplyReq, EventType, LandingAuthorizationStatus,
+        MarkAppliedReq, MarkInFlightReq, ObjectType, ReadyQueueClaim, ReadyQueueItem,
+        ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RuntimeAttestation,
+        Session, SessionRole, SubtaskState, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
     },
     queries::{
         collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
@@ -601,6 +601,106 @@ impl Covey {
             started_at,
             &result,
             |_metrics| Vec::<String>::new(),
+        );
+        result
+    }
+
+    /// Verifies that a landing authorization still matches live Covey apply evidence.
+    pub fn verify_landing_authorization(
+        &self,
+        req: VerifyLandingAuthorizationReq,
+    ) -> Result<LandingAuthorizationStatus> {
+        let started_at = Instant::now();
+        let session_token_for_log = req.session_token.clone();
+        let result = self.with_read_tx(|tx| {
+            require_role(
+                tx,
+                &req.session_token,
+                &[SessionRole::ApplyGate, SessionRole::Orchestrator],
+            )?;
+            ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
+            ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+            ensure_length("review_id", &req.review_id, MAX_OBJECT_ID_LEN)?;
+            ensure_length("findings_digest", &req.findings_digest, MAX_DIGEST_LEN)?;
+            ensure_length("verifier", &req.verifier, MAX_OBJECT_ID_LEN)?;
+            ensure_length("verdict_digest", &req.verdict_digest, MAX_DIGEST_LEN)?;
+            ensure_length("seal_digest", &req.seal_digest, MAX_DIGEST_LEN)?;
+
+            let item = load_queue_item_tx(tx, &req.queue_id)?;
+            if item.state != ReadyQueueState::Applied {
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id: req.queue_id.clone(),
+                    reason: "landing authorization queue item is not applied".to_owned(),
+                });
+            }
+            if item.artifact_digest != req.artifact_digest {
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id: req.queue_id.clone(),
+                    reason: "landing authorization artifact digest does not match queue item"
+                        .to_owned(),
+                });
+            }
+            if item.claim_fence_seq != Some(req.claim_fence_seq) {
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id: req.queue_id.clone(),
+                    reason: "landing authorization claim fence does not match queue item"
+                        .to_owned(),
+                });
+            }
+
+            let recorded_by_session: String = tx
+                .query_row(
+                    r#"
+                    SELECT recorded_by_session
+                    FROM apply_verifications
+                    WHERE queue_id = ?1
+                      AND artifact_digest = ?2
+                      AND review_id = ?3
+                      AND findings_digest = ?4
+                      AND claim_fence_seq = ?5
+                      AND verifier = ?6
+                      AND verdict_digest = ?7
+                      AND seal_digest = ?8
+                    LIMIT 1
+                    "#,
+                    params![
+                        req.queue_id.as_str(),
+                        req.artifact_digest.as_str(),
+                        req.review_id.as_str(),
+                        req.findings_digest.as_str(),
+                        req.claim_fence_seq,
+                        req.verifier.as_str(),
+                        req.verdict_digest.as_str(),
+                        req.seal_digest.as_str(),
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+                    queue_id: req.queue_id.clone(),
+                    reason: "accepted apply verifier verdict does not match landing authorization"
+                        .to_owned(),
+                })?;
+
+            Ok(LandingAuthorizationStatus::new(
+                true,
+                req.queue_id,
+                req.artifact_digest,
+                req.review_id,
+                req.findings_digest,
+                req.claim_fence_seq,
+                req.verifier,
+                req.verdict_digest,
+                req.seal_digest,
+                recorded_by_session,
+            ))
+        });
+        self.log_operation(
+            "verify_landing_authorization",
+            &session_token_for_log,
+            started_at,
+            &result,
+            |status| vec![format!("queue:{}", status.queue_id)],
         );
         result
     }

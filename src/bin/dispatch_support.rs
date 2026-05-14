@@ -15,7 +15,7 @@ use covey::{
     RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
     ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
     RequestReviewReq, ResolveConflictReq, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    SupersedeQueueItemReq,
+    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use uuid::Uuid;
 
