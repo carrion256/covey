@@ -10,9 +10,9 @@ use covey::{
     Covey, CoveyError, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, ManualClock,
     MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq, RegisterSessionReq,
     ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
-    SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState,
-    SupersedeQueueItemReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
+    ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind,
+    SubtaskState, SupersedeQueueItemReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -89,6 +89,11 @@ fn seed_work(covey: &Covey, subtask_id: &str) -> (String, String) {
 }
 
 fn prepare_approved_artifact(rig: &Rig, subtask_id: &str, worker: &str, digest: &str) {
+    let reviewer = register(
+        &rig.covey,
+        &format!("reviewer-{subtask_id}"),
+        SessionRole::Reviewer,
+    );
     let conn = Connection::open(&rig.db_path).expect("open db");
     conn.execute(
         "INSERT INTO artifacts (
@@ -112,6 +117,23 @@ fn prepare_approved_artifact(rig: &Rig, subtask_id: &str, worker: &str, digest: 
         params![subtask_id, SubtaskState::Approved.to_string(), digest],
     )
     .expect("approve subtask");
+    conn.execute(
+        "INSERT INTO reviews (
+            review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id,
+            verdict, findings_digest, state, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?8)",
+        params![
+            format!("review_{subtask_id}"),
+            subtask_id,
+            digest,
+            reviewer,
+            ReviewVerdict::Approve.to_string(),
+            format!("{digest}:findings"),
+            ReviewState::Decided.to_string(),
+            1_700_000_000_001_i64,
+        ],
+    )
+    .expect("insert approved review evidence");
 }
 
 fn enqueue_ready_item(rig: &Rig, subtask_id: &str, digest: &str) -> (String, String) {
@@ -310,6 +332,118 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
         }),
         Err(CoveyError::IllegalTransition { .. })
     ));
+}
+
+#[rstest]
+fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig) {
+    let (orch, work_id) = seed_work(&rig.covey, "queue_evidence_required");
+    let gate = register(&rig.covey, "gate-evidence-required", SessionRole::ApplyGate);
+    prepare_approved_artifact_without_review(
+        &rig,
+        &work_id,
+        &orch,
+        "sha256:queue_evidence_required",
+    );
+    let queue_id = rig
+        .covey
+        .enqueue_for_apply(EnqueueForApplyReq {
+            session_token: orch.clone(),
+            artifact_digest: "sha256:queue_evidence_required".into(),
+            subtask_id: work_id,
+            settlement_target: SettlementTarget::Canonical,
+            idempotency_key: id_key("enqueue-for-apply"),
+        })
+        .expect("enqueue without review evidence");
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("claim queue item");
+
+    assert!(matches!(
+        rig.covey.mark_applied(MarkAppliedReq {
+            session_token: gate,
+            queue_id,
+            claim_fence_seq: claim.claim_fence_seq,
+            idempotency_key: id_key("mark-applied"),
+        }),
+        Err(CoveyError::ApplyGateEvidenceMissing { .. })
+    ));
+
+    let (orch, work_id) = seed_work(&rig.covey, "queue_apply_gate_separation");
+    let gate = register(
+        &rig.covey,
+        "gate-separation-producer",
+        SessionRole::ApplyGate,
+    );
+    prepare_approved_artifact(&rig, &work_id, &gate, "sha256:queue_apply_gate_separation");
+    let queue_id = rig
+        .covey
+        .enqueue_for_apply(EnqueueForApplyReq {
+            session_token: orch,
+            artifact_digest: "sha256:queue_apply_gate_separation".into(),
+            subtask_id: work_id,
+            settlement_target: SettlementTarget::Canonical,
+            idempotency_key: id_key("enqueue-for-apply"),
+        })
+        .expect("enqueue with review evidence");
+    let claim = rig
+        .covey
+        .mark_in_flight(MarkInFlightReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            lease_duration_ms: 30_000,
+            idempotency_key: id_key("mark-in-flight"),
+        })
+        .expect("claim queue item");
+
+    assert!(matches!(
+        rig.covey.mark_applied(MarkAppliedReq {
+            session_token: gate,
+            queue_id,
+            claim_fence_seq: claim.claim_fence_seq,
+            idempotency_key: id_key("mark-applied"),
+        }),
+        Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
+            conflicting_role,
+            ..
+        }) if conflicting_role == "producer"
+    ));
+}
+
+fn prepare_approved_artifact_without_review(
+    rig: &Rig,
+    subtask_id: &str,
+    worker: &str,
+    digest: &str,
+) {
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO artifacts (
+            artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session,
+            manifest_path, changed_paths_digest, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            digest,
+            ArtifactKind::PatchBundle.to_string(),
+            "base",
+            subtask_id,
+            worker,
+            format!("{subtask_id}.json"),
+            format!("{digest}:paths"),
+            1_700_000_000_000_i64,
+        ],
+    )
+    .expect("insert artifact");
+    conn.execute(
+        "UPDATE subtasks SET state = ?2, artifact_digest = ?3 WHERE subtask_id = ?1",
+        params![subtask_id, SubtaskState::Approved.to_string(), digest],
+    )
+    .expect("approve subtask");
 }
 
 #[rstest]

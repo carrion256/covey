@@ -125,6 +125,7 @@ impl ReportableError {
 impl From<CoveyError> for ReportableError {
     fn from(error: CoveyError) -> Self {
         use CoveyError::{
+            ApplyGateEvidenceMissing, ApplyGateSeparationOfDutiesViolation,
             ArtifactDigestCollision, ArtifactNotFound, ClaimNotFound, ClaimNotHeld,
             ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
             IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
@@ -170,7 +171,8 @@ impl From<CoveyError> for ReportableError {
             WrongRole { .. }
             | NotClaimOwner { .. }
             | NotQueueClaimOwner { .. }
-            | SeparationOfDutiesViolation { .. } => Self {
+            | SeparationOfDutiesViolation { .. }
+            | ApplyGateSeparationOfDutiesViolation { .. } => Self {
                 exit_code: 3,
                 code: "permission_denied",
                 message: error.to_string(),
@@ -192,7 +194,8 @@ impl From<CoveyError> for ReportableError {
             | ArtifactDigestCollision { .. }
             | DuplicateSubtaskId { .. }
             | IdempotencyConflict { .. }
-            | ImportDuplicate { .. } => Self {
+            | ImportDuplicate { .. }
+            | ApplyGateEvidenceMissing { .. } => Self {
                 exit_code: 4,
                 code: "conflict",
                 message: error.to_string(),

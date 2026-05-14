@@ -99,6 +99,16 @@ pub enum CoveyError {
         reviewer_principal_id: String,
         producer_principal_id: String,
     },
+    #[error("apply gate evidence missing for queue item {queue_id}: {reason}")]
+    ApplyGateEvidenceMissing { queue_id: String, reason: String },
+    #[error(
+        "apply gate separation of duties violated: apply gate principal {apply_gate_principal_id} matches {conflicting_role} principal {conflicting_principal_id}"
+    )]
+    ApplyGateSeparationOfDutiesViolation {
+        apply_gate_principal_id: String,
+        conflicting_role: String,
+        conflicting_principal_id: String,
+    },
     #[error("meta-task {meta_task_id} is not executable in state {state}")]
     MetaTaskUnavailable {
         meta_task_id: String,
@@ -147,6 +157,7 @@ pub enum CoveyError {
 impl PartialEq for CoveyError {
     fn eq(&self, other: &Self) -> bool {
         use CoveyError::{
+            ApplyGateEvidenceMissing, ApplyGateSeparationOfDutiesViolation,
             ArtifactDigestCollision, ArtifactNotFound, ClaimNotFound, ClaimNotHeld,
             ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
             IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
@@ -350,6 +361,32 @@ impl PartialEq for CoveyError {
                     producer_principal_id: right_producer,
                 },
             ) => left_reviewer == right_reviewer && left_producer == right_producer,
+            (
+                ApplyGateEvidenceMissing {
+                    queue_id: left_queue_id,
+                    reason: left_reason,
+                },
+                ApplyGateEvidenceMissing {
+                    queue_id: right_queue_id,
+                    reason: right_reason,
+                },
+            ) => left_queue_id == right_queue_id && left_reason == right_reason,
+            (
+                ApplyGateSeparationOfDutiesViolation {
+                    apply_gate_principal_id: left_apply_gate,
+                    conflicting_role: left_role,
+                    conflicting_principal_id: left_conflicting,
+                },
+                ApplyGateSeparationOfDutiesViolation {
+                    apply_gate_principal_id: right_apply_gate,
+                    conflicting_role: right_role,
+                    conflicting_principal_id: right_conflicting,
+                },
+            ) => {
+                left_apply_gate == right_apply_gate
+                    && left_role == right_role
+                    && left_conflicting == right_conflicting
+            }
             (
                 MetaTaskUnavailable {
                     meta_task_id: left_meta_task_id,

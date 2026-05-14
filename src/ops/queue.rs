@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
     Covey,
@@ -12,7 +12,9 @@ use crate::{
         ObjectType, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
         SessionRole, SubtaskState, SupersedeQueueItemReq,
     },
-    queries::{collect_rows, deserialize_row, load_queue_item_tx, load_subtask_tx},
+    queries::{
+        collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
+    },
     schema::advance_lease_clock,
     store::{
         append_session_event, claim_ready_queue_item, ordered_ready_queue_candidates,
@@ -352,6 +354,8 @@ impl Covey {
                             object: ObjectType::Subtask,
                         });
                     }
+                    let apply_gate_session = load_session_tx(tx, &req.session_token)?;
+                    require_live_apply_gate_evidence(tx, &item, &apply_gate_session.agent_principal_id)?;
                     let queue_updated = tx.execute(
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4 AND claimed_by_session_token = ?5 AND claim_fence_seq = ?6",
                         params![
@@ -502,4 +506,78 @@ impl Covey {
         );
         result
     }
+}
+
+struct LiveApplyGateEvidence {
+    producer_principal_id: String,
+    reviewer_principal_id: String,
+}
+
+fn require_live_apply_gate_evidence(
+    tx: &Transaction<'_>,
+    item: &ReadyQueueItem,
+    apply_gate_principal_id: &str,
+) -> Result<LiveApplyGateEvidence> {
+    let evidence = tx
+        .query_row(
+            r#"
+            SELECT producer.agent_principal_id,
+                   reviewer.agent_principal_id
+            FROM reviews review
+            JOIN artifacts artifact
+              ON artifact.artifact_digest = review.artifact_digest
+             AND artifact.produced_by_subtask_id = review.subtask_id
+            JOIN sessions producer
+              ON producer.session_token = artifact.produced_by_session
+            JOIN sessions reviewer
+              ON reviewer.session_token = review.reviewer_session
+            WHERE review.subtask_id = ?1
+              AND review.artifact_digest = ?2
+              AND review.state = ?3
+              AND review.verdict = ?4
+              AND review.findings_digest IS NOT NULL
+              AND TRIM(review.findings_digest) != ''
+            ORDER BY review.updated_at DESC
+            LIMIT 1
+            "#,
+            params![
+                item.subtask_id,
+                item.artifact_digest,
+                crate::model::ReviewState::Decided.to_string(),
+                crate::model::ReviewVerdict::Approve.to_string()
+            ],
+            |row| {
+                Ok(LiveApplyGateEvidence {
+                    producer_principal_id: row.get(0)?,
+                    reviewer_principal_id: row.get(1)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+            queue_id: item.queue_id.clone(),
+            reason: "approved review with findings digest not found for queued artifact".to_owned(),
+        })?;
+
+    if evidence.producer_principal_id == evidence.reviewer_principal_id {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: item.queue_id.clone(),
+            reason: "producer and reviewer principals are not separated".to_owned(),
+        });
+    }
+    if apply_gate_principal_id == evidence.producer_principal_id {
+        return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
+            apply_gate_principal_id: apply_gate_principal_id.to_owned(),
+            conflicting_role: "producer".to_owned(),
+            conflicting_principal_id: evidence.producer_principal_id,
+        });
+    }
+    if apply_gate_principal_id == evidence.reviewer_principal_id {
+        return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
+            apply_gate_principal_id: apply_gate_principal_id.to_owned(),
+            conflicting_role: "reviewer".to_owned(),
+            conflicting_principal_id: evidence.reviewer_principal_id,
+        });
+    }
+    Ok(evidence)
 }
