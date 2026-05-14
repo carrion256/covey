@@ -299,6 +299,14 @@ fn better_droid_compile_emits_mutai_mission_packet_v1() {
         "better-droid:mission-packet"
     );
     assert_eq!(packet["runtime"]["provider_mode"], "FakeDeliver");
+    assert_eq!(
+        packet["runtime"]["authority_boundary"]["covey_owns_lifecycle"],
+        true
+    );
+    assert_eq!(
+        packet["runtime"]["authority_boundary"]["mutai_rs_evaluates_single_covey_selected_attempt"],
+        true
+    );
     assert_eq!(packet["provider"]["provider_id"], "better-droid");
     assert_eq!(packet["provider"]["model_id"], "compiled-mission");
     assert_eq!(packet["path_policy"]["mutation_allowed"], false);
@@ -322,6 +330,69 @@ fn better_droid_compile_emits_mutai_mission_packet_v1() {
             .is_some_and(|items| !items.is_empty())
     );
     assert!(packet["assumptions"].as_array().is_some());
+}
+
+#[test]
+fn better_droid_packet_declares_promoted_fleet_identity_contract() {
+    let fixture = Fixture::passing();
+
+    compile_change(&CompileOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "passing-fixture".to_owned(),
+        output_dir: None,
+    })
+    .expect("compile passing fixture");
+
+    let packet = read_json(
+        &fixture
+            .mission_dir("passing-fixture")
+            .join("mission-packet.json"),
+    );
+    let contract = &packet["runtime"]["promoted_fleet_identity_contract"];
+    assert_eq!(contract["schema"], "mutai.runtime-identity-contract.v1");
+    let required_for = contract["required_for"].as_array().expect("required_for");
+    assert!(
+        required_for
+            .iter()
+            .any(|item| item == "promoted_fleet_proof")
+    );
+    assert!(required_for.iter().any(|item| item == "landing"));
+    assert!(
+        contract["actor_roles"]
+            .as_array()
+            .expect("actor roles")
+            .iter()
+            .any(|role| role == "reviewer")
+    );
+    assert!(
+        contract["required_provider_identity_fields"]
+            .as_array()
+            .expect("provider identity fields")
+            .iter()
+            .any(|field| field == "provider_run_id")
+    );
+    assert_eq!(contract["trusted_provider_run_id_issuer_required"], true);
+    assert!(
+        contract["forbidden_provider_run_id_issuers"]
+            .as_array()
+            .expect("forbidden issuers")
+            .iter()
+            .any(|issuer| issuer == "mutai-local-proof-runner")
+    );
+    assert!(
+        contract["separation_invariants"]
+            .as_array()
+            .expect("separation invariants")
+            .iter()
+            .any(|invariant| invariant == "executor.provider_run_id != reviewer.provider_run_id")
+    );
+    assert!(
+        contract["covey_binding_fields"]
+            .as_array()
+            .expect("covey binding fields")
+            .iter()
+            .any(|field| field == "claim_fence_seq")
+    );
 }
 
 #[test]

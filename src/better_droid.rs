@@ -1137,6 +1137,50 @@ fn build_mission_packet(
             }
         },
         "runtime": {
+            "authority_boundary": {
+                "better_droid_may_schedule_or_settle": false,
+                "covey_owns_lifecycle": true,
+                "mutai_rs_evaluates_single_covey_selected_attempt": true,
+                "codex_hooks_enforce_side_effect_boundaries": true
+            },
+            "promoted_fleet_identity_contract": {
+                "schema": "mutai.runtime-identity-contract.v1",
+                "required_for": ["promoted_fleet_proof", "landing"],
+                "actor_roles": ["executor", "reviewer", "apply_gate", "closer"],
+                "required_runtime_fields": [
+                    "session_token",
+                    "agent_principal_id",
+                    "agent_instance_id",
+                    "role",
+                    "provider",
+                    "model",
+                    "process_id_or_container_id",
+                    "command_transcript_digest",
+                    "started_at",
+                    "ended_at"
+                ],
+                "required_provider_identity_fields": [
+                    "provider_run_id",
+                    "provider_run_id_issuer"
+                ],
+                "trusted_provider_run_id_issuer_required": true,
+                "forbidden_provider_run_id_issuers": ["mutai-local-proof-runner", "codex-env"],
+                "separation_invariants": [
+                    "executor.agent_principal_id != reviewer.agent_principal_id",
+                    "executor.agent_principal_id != apply_gate.agent_principal_id",
+                    "reviewer.agent_principal_id != apply_gate.agent_principal_id",
+                    "executor.provider_run_id != reviewer.provider_run_id",
+                    "executor.provider_run_id != apply_gate.provider_run_id",
+                    "reviewer.provider_run_id != apply_gate.provider_run_id"
+                ],
+                "covey_binding_fields": [
+                    "queue_id",
+                    "artifact_digest",
+                    "review_id",
+                    "claim_fence_seq",
+                    "apply_verification_seal_digest"
+                ]
+            },
             "fleet_snapshot": {
                 "observed_at": "2026-04-26T00:00:01Z",
                 "agents": [{
