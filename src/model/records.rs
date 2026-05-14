@@ -5,10 +5,11 @@ use super::{
     AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimResult, ClaimState,
     ConflictResolutionState, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, EventType,
     ExitSessionReq, HeartbeatReq, ImportOpenSpecEvent, MarkAppliedReq, MetaTaskState, ObjectType,
-    PublishArtifactReq, ReadyQueueClaim, ReadyQueueState, ReleaseClaimReq, RequestReservationReq,
-    RequestReviewReq, ReservationState, ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass,
-    SessionHandle, SessionRole, SessionState, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    SubtaskKind, SubtaskState, SupersedeQueueItemReq,
+    PublishArtifactReq, ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq,
+    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationState, ResolveConflictReq,
+    ReviewState, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SessionState,
+    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState,
+    SupersedeQueueItemReq,
 };
 
 /// Persisted session row.
@@ -124,6 +125,21 @@ pub struct ReadyQueueItem {
     pub updated_at: i64,
 }
 
+/// Accepted verifier evidence bound to one apply attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyVerification {
+    pub queue_id: String,
+    pub artifact_digest: String,
+    pub review_id: String,
+    pub findings_digest: String,
+    pub claim_fence_seq: i64,
+    pub verifier: String,
+    pub verdict_digest: String,
+    pub seal_digest: String,
+    pub recorded_by_session: String,
+    pub created_at: i64,
+}
+
 /// Raw event-log row with JSON payload.
 ///
 /// This log is an audit trail for subscribers, not an event-sourced state engine.
@@ -186,6 +202,7 @@ pub enum EventPayload {
     ReviewDecided(DecideReviewReq),
     ReadyQueueEnqueued(EnqueueForApplyReq),
     ReadyQueueInFlight(ReadyQueueClaim),
+    ApplyVerificationRecorded(RecordApplyVerificationReq),
     ReadyQueueApplied(MarkAppliedReq),
     ReadyQueueSuperseded(SupersedeQueueItemReq),
     ReservationRequested(RequestReservationReq),

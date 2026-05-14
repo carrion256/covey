@@ -38,6 +38,7 @@ pub enum EventType {
     ReviewDecided,
     ReadyQueueEnqueued,
     ReadyQueueInFlight,
+    ApplyVerificationRecorded,
     ReadyQueueApplied,
     ReadyQueueSuperseded,
     ReservationRequested,

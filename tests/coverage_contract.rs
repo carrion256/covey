@@ -8,11 +8,11 @@ mod support;
 use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
     Covey, CoveyError, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, ManualClock,
-    MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq, RegisterSessionReq,
-    ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
-    ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind,
-    SubtaskState, SupersedeQueueItemReq,
+    MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
+    RecordApplyVerificationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
+    ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState, SupersedeQueueItemReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -150,6 +150,31 @@ fn enqueue_ready_item(rig: &Rig, subtask_id: &str, digest: &str) -> (String, Str
         })
         .expect("enqueue");
     (orch, queue_id)
+}
+
+fn record_apply_verification(
+    covey: &Covey,
+    gate: &str,
+    queue_id: &str,
+    subtask_id: &str,
+    digest: &str,
+    findings_digest: &str,
+    claim_fence_seq: i64,
+) {
+    covey
+        .record_apply_verification(RecordApplyVerificationReq {
+            session_token: gate.to_owned(),
+            queue_id: queue_id.to_owned(),
+            artifact_digest: digest.to_owned(),
+            review_id: format!("review_{subtask_id}"),
+            findings_digest: findings_digest.to_owned(),
+            claim_fence_seq,
+            verifier: "mutai-rs".to_owned(),
+            verdict_digest: format!("{digest}:verdict"),
+            seal_digest: format!("{digest}:seal"),
+            idempotency_key: id_key("record-apply-verification"),
+        })
+        .expect("record apply verification");
 }
 
 #[rstest]
@@ -314,6 +339,25 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
     assert_eq!(metrics.queued_count, 0);
     assert_eq!(metrics.in_flight_count, 1);
     assert!(metrics.oldest_in_flight_age_ms.is_some());
+
+    assert!(matches!(
+        rig.covey.mark_applied(MarkAppliedReq {
+            session_token: gate.clone(),
+            queue_id: queue_id.clone(),
+            claim_fence_seq: claim.claim_fence_seq,
+            idempotency_key: id_key("mark-applied-missing-verification"),
+        }),
+        Err(CoveyError::ApplyGateEvidenceMissing { .. })
+    ));
+    record_apply_verification(
+        &rig.covey,
+        &gate,
+        &queue_id,
+        "queue_error_paths",
+        "sha256:queue_error_paths",
+        "sha256:queue_error_paths:findings",
+        claim.claim_fence_seq,
+    );
 
     rig.covey
         .mark_applied(MarkAppliedReq {

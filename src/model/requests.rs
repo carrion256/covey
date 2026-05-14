@@ -209,6 +209,21 @@ pub struct MarkInFlightReq {
     pub idempotency_key: String,
 }
 
+/// Request to record an accepted verifier verdict for one apply attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordApplyVerificationReq {
+    pub session_token: String,
+    pub queue_id: String,
+    pub artifact_digest: String,
+    pub review_id: String,
+    pub findings_digest: String,
+    pub claim_fence_seq: i64,
+    pub verifier: String,
+    pub verdict_digest: String,
+    pub seal_digest: String,
+    pub idempotency_key: String,
+}
+
 /// Request to mark an in-flight queue item applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkAppliedReq {

@@ -56,6 +56,9 @@ impl EventPayload {
             EventType::ReadyQueueInFlight => {
                 Self::ReadyQueueInFlight(serde_json::from_str(payload_json)?)
             }
+            EventType::ApplyVerificationRecorded => {
+                Self::ApplyVerificationRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::ReadyQueueApplied => {
                 Self::ReadyQueueApplied(serde_json::from_str(payload_json)?)
             }

@@ -10,7 +10,7 @@ use crate::{
     model::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, MarkAppliedReq, MarkInFlightReq,
         ObjectType, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        SessionRole, SubtaskState, SupersedeQueueItemReq,
+        RecordApplyVerificationReq, SessionRole, SubtaskState, SupersedeQueueItemReq,
     },
     queries::{
         collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
@@ -289,6 +289,95 @@ impl Covey {
         result
     }
 
+    /// Records an accepted verifier verdict for the current apply attempt.
+    pub fn record_apply_verification(&self, req: RecordApplyVerificationReq) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_apply_verification",
+                &req.idempotency_key,
+                &req,
+                now,
+                || {
+                    let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
+                    ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+                    ensure_length("review_id", &req.review_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("findings_digest", &req.findings_digest, MAX_DIGEST_LEN)?;
+                    ensure_length("verifier", &req.verifier, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("verdict_digest", &req.verdict_digest, MAX_DIGEST_LEN)?;
+                    ensure_length("seal_digest", &req.seal_digest, MAX_DIGEST_LEN)?;
+
+                    let item = load_queue_item_tx(tx, &req.queue_id)?;
+                    if item.state != ReadyQueueState::InFlight
+                        || item.artifact_digest != req.artifact_digest
+                        || item.claim_fence_seq != Some(req.claim_fence_seq)
+                    {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: req.queue_id.clone(),
+                            reason:
+                                "apply verification must target the current in-flight queue fence"
+                                    .to_owned(),
+                        });
+                    }
+                    let live_evidence =
+                        require_live_apply_gate_evidence(tx, &item, &session.agent_principal_id)?;
+                    if live_evidence.review_id != req.review_id
+                        || live_evidence.findings_digest != req.findings_digest
+                    {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: req.queue_id.clone(),
+                            reason: "apply verification does not match the live approved review"
+                                .to_owned(),
+                        });
+                    }
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO apply_verifications (
+                            queue_id, artifact_digest, review_id, findings_digest,
+                            claim_fence_seq, verifier, verdict_digest, seal_digest,
+                            recorded_by_session, created_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                        "#,
+                        params![
+                            req.queue_id.as_str(),
+                            req.artifact_digest.as_str(),
+                            req.review_id.as_str(),
+                            req.findings_digest.as_str(),
+                            req.claim_fence_seq,
+                            req.verifier.as_str(),
+                            req.verdict_digest.as_str(),
+                            req.seal_digest.as_str(),
+                            req.session_token.as_str(),
+                            now,
+                        ],
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::ApplyVerificationRecorded,
+                        ObjectType::ReadyQueue,
+                        &req.queue_id,
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    Ok(())
+                },
+            )
+        });
+        self.log_operation(
+            "record_apply_verification",
+            &req.session_token,
+            started_at,
+            &result,
+            |_| vec![format!("queue:{}", req.queue_id)],
+        );
+        result
+    }
+
     /// Marks an in-flight apply item as applied and settles the underlying subtask.
     pub fn mark_applied(&self, req: MarkAppliedReq) -> Result<()> {
         let started_at = Instant::now();
@@ -355,7 +444,17 @@ impl Covey {
                         });
                     }
                     let apply_gate_session = load_session_tx(tx, &req.session_token)?;
-                    require_live_apply_gate_evidence(tx, &item, &apply_gate_session.agent_principal_id)?;
+                    let live_evidence = require_live_apply_gate_evidence(
+                        tx,
+                        &item,
+                        &apply_gate_session.agent_principal_id,
+                    )?;
+                    require_recorded_apply_verification(
+                        tx,
+                        &item,
+                        &live_evidence,
+                        req.claim_fence_seq,
+                    )?;
                     let queue_updated = tx.execute(
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4 AND claimed_by_session_token = ?5 AND claim_fence_seq = ?6",
                         params![
@@ -509,6 +608,8 @@ impl Covey {
 }
 
 struct LiveApplyGateEvidence {
+    review_id: String,
+    findings_digest: String,
     producer_principal_id: String,
     reviewer_principal_id: String,
 }
@@ -521,7 +622,9 @@ fn require_live_apply_gate_evidence(
     let evidence = tx
         .query_row(
             r#"
-            SELECT producer.agent_principal_id,
+            SELECT review.review_id,
+                   review.findings_digest,
+                   producer.agent_principal_id,
                    reviewer.agent_principal_id
             FROM reviews review
             JOIN artifacts artifact
@@ -548,8 +651,10 @@ fn require_live_apply_gate_evidence(
             ],
             |row| {
                 Ok(LiveApplyGateEvidence {
-                    producer_principal_id: row.get(0)?,
-                    reviewer_principal_id: row.get(1)?,
+                    review_id: row.get(0)?,
+                    findings_digest: row.get(1)?,
+                    producer_principal_id: row.get(2)?,
+                    reviewer_principal_id: row.get(3)?,
                 })
             },
         )
@@ -580,4 +685,43 @@ fn require_live_apply_gate_evidence(
         });
     }
     Ok(evidence)
+}
+
+fn require_recorded_apply_verification(
+    tx: &Transaction<'_>,
+    item: &ReadyQueueItem,
+    evidence: &LiveApplyGateEvidence,
+    claim_fence_seq: i64,
+) -> Result<()> {
+    let exists = tx
+        .query_row(
+            r#"
+            SELECT 1
+            FROM apply_verifications
+            WHERE queue_id = ?1
+              AND artifact_digest = ?2
+              AND review_id = ?3
+              AND findings_digest = ?4
+              AND claim_fence_seq = ?5
+            LIMIT 1
+            "#,
+            params![
+                item.queue_id.as_str(),
+                item.artifact_digest.as_str(),
+                evidence.review_id.as_str(),
+                evidence.findings_digest.as_str(),
+                claim_fence_seq
+            ],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: item.queue_id.clone(),
+            reason:
+                "accepted apply verifier verdict not recorded for queue artifact review and fence"
+                    .to_owned(),
+        });
+    }
+    Ok(())
 }

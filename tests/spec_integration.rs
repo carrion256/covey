@@ -18,11 +18,11 @@ use covey::{
     DecideReviewReq, EnqueueForApplyReq, EventPayload, EventType, ExitSessionReq, HeartbeatReq,
     ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason, ManualClock,
     MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType, OverlapQueryReq,
-    PublishArtifactReq, ReadyQueueState, RegisterSessionReq, ReleaseClaimReq,
-    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
-    RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq, ScopeClass,
-    SessionRole, SessionState, SettlementTarget, StartSubtaskReq, StateValue, SubmitMetaTaskReq,
-    SubtaskKind, SubtaskState,
+    PublishArtifactReq, ReadyQueueState, RecordApplyVerificationReq, RegisterSessionReq,
+    ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RequestReservationReq, RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq,
+    ScopeClass, SessionRole, SessionState, SettlementTarget, StartSubtaskReq, StateValue,
+    SubmitMetaTaskReq, SubtaskKind, SubtaskState,
 };
 use rusqlite::ffi::{SQLITE_TESTCTRL_FAULT_INSTALL, sqlite3_test_control};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -123,6 +123,31 @@ fn count_subtask_claim_events(covey: &Covey) -> usize {
     subtask_claim_events(covey).len()
 }
 
+fn record_apply_verification(
+    covey: &Covey,
+    gate: &str,
+    queue_id: &str,
+    artifact_digest: &str,
+    review_id: &str,
+    findings_digest: &str,
+    claim_fence_seq: i64,
+) {
+    covey
+        .record_apply_verification(RecordApplyVerificationReq {
+            session_token: gate.to_owned(),
+            queue_id: queue_id.to_owned(),
+            artifact_digest: artifact_digest.to_owned(),
+            review_id: review_id.to_owned(),
+            findings_digest: findings_digest.to_owned(),
+            claim_fence_seq,
+            verifier: "mutai-rs".to_owned(),
+            verdict_digest: format!("{artifact_digest}:verdict"),
+            seal_digest: format!("{artifact_digest}:seal"),
+            idempotency_key: id_key("record-apply-verification"),
+        })
+        .expect("record apply verification");
+}
+
 fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
     let covey = rig.covey();
     let (_, subtask_id) = seed_work_subtask(rig);
@@ -215,7 +240,7 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer,
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::ChangesRequested,
@@ -2720,6 +2745,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
         })
         .expect("subtask2");
 
+    let mut review_records = Vec::new();
     for (subtask_id, digest, created_at) in
         [(&first, "sha256:q1", 1_i64), (&second, "sha256:q2", 2_i64)]
     {
@@ -2798,7 +2824,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
         covey
             .decide_review(DecideReviewReq {
                 session_token: reviewer,
-                review_id,
+                review_id: review_id.clone(),
                 claim_id: review_claim.claim_id,
                 fence_seq: review_claim.fence_seq,
                 verdict: covey::ReviewVerdict::Approve,
@@ -2815,6 +2841,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
                 idempotency_key: id_key("enqueue-for-apply"),
             })
             .expect("enqueue");
+        review_records.push((subtask_id.to_string(), digest.to_string(), review_id));
         rig.tick(1);
     }
 
@@ -2831,6 +2858,19 @@ fn ready_queue_orders_items_and_applies_in_order() {
         })
         .expect("claim ready queue")
         .expect("queue claim");
+    let (_, digest, review_id) = review_records
+        .iter()
+        .find(|(subtask_id, _, _)| subtask_id == &queue_claim.subtask_id)
+        .expect("review record for queue claim");
+    record_apply_verification(
+        &covey,
+        &gate,
+        &queue_claim.queue_id,
+        digest,
+        review_id,
+        "sha256:findings",
+        queue_claim.claim_fence_seq,
+    );
     covey
         .mark_applied(MarkAppliedReq {
             session_token: gate.clone(),
@@ -2941,7 +2981,7 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer,
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -2990,6 +3030,15 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
     assert_eq!(second_claim.queue_id, first_claim.queue_id);
     assert!(second_claim.claim_fence_seq > first_claim.claim_fence_seq);
 
+    record_apply_verification(
+        &covey,
+        &gate_b,
+        &second_claim.queue_id,
+        "sha256:queue_reclaim",
+        &review_id,
+        "sha256:findings_queue_reclaim",
+        second_claim.claim_fence_seq,
+    );
     covey
         .mark_applied(MarkAppliedReq {
             session_token: gate_b,
@@ -3875,7 +3924,7 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer.clone(),
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -4014,7 +4063,7 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer.clone(),
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -4430,7 +4479,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
     assert!(matches!(
         covey.decide_review(DecideReviewReq {
             session_token: worker.clone(),
-            review_id,
+            review_id: review_id.clone(),
             claim_id: worker_claim.claim_id,
             fence_seq: worker_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -4815,7 +4864,7 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer.clone(),
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -4840,6 +4889,15 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
             idempotency_key: id_key("mark-in-flight"),
         })
         .expect("flight");
+    record_apply_verification(
+        &covey,
+        &gate,
+        &queue_id,
+        "sha256:apply",
+        &review_id,
+        "sha256:findings",
+        queue_claim.claim_fence_seq,
+    );
     covey
         .mark_applied(MarkAppliedReq {
             session_token: gate.clone(),
@@ -5021,7 +5079,7 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer,
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -5047,6 +5105,15 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
             idempotency_key: id_key("mark-in-flight"),
         })
         .expect("mark in flight");
+    record_apply_verification(
+        &covey,
+        &gate,
+        &queue_id,
+        "sha256:meta_flow",
+        &review_id,
+        "sha256:meta_flow_findings",
+        queue_claim.claim_fence_seq,
+    );
     covey
         .mark_applied(MarkAppliedReq {
             session_token: gate,

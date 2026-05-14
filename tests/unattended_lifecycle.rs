@@ -8,8 +8,9 @@ mod support;
 use covey::{
     ArtifactKind, ClaimNextReq, Covey, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq,
     HeartbeatReq, ManualClock, MarkAppliedReq, MarkInFlightReq, PublishArtifactReq,
-    RegisterSessionReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ScopeClass,
-    SessionRole, SessionState, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    RecordApplyVerificationReq, RegisterSessionReq, ReleaseClaimReq, RequestReservationReq,
+    RequestReviewReq, ScopeClass, SessionRole, SessionState, SettlementTarget, StartSubtaskReq,
+    SubmitMetaTaskReq, SubtaskState,
 };
 use tempfile::TempDir;
 
@@ -309,7 +310,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
     covey
         .decide_review(DecideReviewReq {
             session_token: reviewer,
-            review_id,
+            review_id: review_id.clone(),
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
@@ -334,6 +335,20 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
             idempotency_key: id_key("mark-in-flight"),
         })
         .expect("mark in flight");
+    covey
+        .record_apply_verification(RecordApplyVerificationReq {
+            session_token: apply_gate.clone(),
+            queue_id: queue_id.clone(),
+            artifact_digest: "sha256:unattended_artifact".into(),
+            review_id,
+            findings_digest: "sha256:unattended_findings".into(),
+            claim_fence_seq: queue_claim.claim_fence_seq,
+            verifier: "mutai-rs".into(),
+            verdict_digest: "sha256:unattended_verdict".into(),
+            seal_digest: "sha256:unattended_seal".into(),
+            idempotency_key: id_key("record-apply-verification"),
+        })
+        .expect("record apply verification");
 
     let mark_applied = MarkAppliedReq {
         session_token: apply_gate,

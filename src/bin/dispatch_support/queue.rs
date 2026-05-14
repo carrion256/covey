@@ -59,6 +59,30 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
                 ),
             ))
         }
+        QueueCommand::RecordApplyVerification(args) => {
+            store.record_apply_verification(RecordApplyVerificationReq {
+                session_token: args.session_token,
+                queue_id: args.queue_id.clone(),
+                artifact_digest: args.artifact_digest,
+                review_id: args.review_id,
+                findings_digest: args.findings_digest,
+                claim_fence_seq: args.claim_fence_seq,
+                verifier: args.verifier,
+                verdict_digest: args.verdict_digest,
+                seal_digest: args.seal_digest,
+                idempotency_key: args
+                    .idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("record-apply-verification")),
+            })?;
+            Ok(Rendered::summary(
+                QueueClaimAck {
+                    operation: "record_apply_verification",
+                    queue_id: args.queue_id.clone(),
+                    claim_fence_seq: args.claim_fence_seq,
+                },
+                format!("queue apply verification recorded {}", args.queue_id),
+            ))
+        }
         QueueCommand::MarkApplied(args) => {
             store.mark_applied(MarkAppliedReq {
                 session_token: args.session_token,
