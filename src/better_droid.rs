@@ -174,6 +174,7 @@ struct SourceTask {
     title: String,
     source_path: String,
     fields: BTreeMap<String, String>,
+    field_syntax_errors: Vec<String>,
     raw_block: String,
 }
 
@@ -456,11 +457,13 @@ fn parse_tasks(tasks: &SourceFile) -> Vec<SourceTask> {
         }
 
         let raw_block = block.join("\n");
+        let parsed_fields = parse_task_fields(&raw_block);
         result.push(SourceTask {
             id: task_id.to_owned(),
             title: title.trim().to_owned(),
             source_path: tasks.relative_path.clone(),
-            fields: parse_task_fields(&raw_block),
+            fields: parsed_fields.fields,
+            field_syntax_errors: parsed_fields.syntax_errors,
             raw_block,
         });
     }
@@ -475,8 +478,15 @@ fn task_line_rest(trimmed: &str) -> Option<&str> {
         .or_else(|| trimmed.strip_prefix("- [X] "))
 }
 
-fn parse_task_fields(raw_block: &str) -> BTreeMap<String, String> {
+#[derive(Debug, Default)]
+struct ParsedTaskFields {
+    fields: BTreeMap<String, String>,
+    syntax_errors: Vec<String>,
+}
+
+fn parse_task_fields(raw_block: &str) -> ParsedTaskFields {
     let mut fields = BTreeMap::new();
+    let mut syntax_errors = Vec::new();
     let mut current: Option<String> = None;
 
     for line in raw_block.lines() {
@@ -484,10 +494,23 @@ fn parse_task_fields(raw_block: &str) -> BTreeMap<String, String> {
         if let Some(rest) = trimmed.strip_prefix("- **")
             && let Some((field, value)) = rest.split_once(":**")
         {
-            let key = field.trim().to_owned();
+            let key = canonical_task_field_name(field.trim());
             let value = value.trim().to_owned();
             current = Some(key.clone());
             fields.insert(key, value);
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("- ")
+            && let Some((field, _value)) = rest.split_once(':')
+            && recognized_task_field_name(field.trim())
+        {
+            syntax_errors.push(format!(
+                "non-canonical task field syntax for {}; use `- **{}:** ...`",
+                canonical_task_field_name(field.trim()),
+                canonical_task_field_name(field.trim())
+            ));
+            current = None;
             continue;
         }
 
@@ -502,7 +525,93 @@ fn parse_task_fields(raw_block: &str) -> BTreeMap<String, String> {
         }
     }
 
-    fields
+    ParsedTaskFields {
+        fields,
+        syntax_errors,
+    }
+}
+
+fn recognized_task_field_name(field: &str) -> bool {
+    matches!(
+        canonical_task_field_name(field).as_str(),
+        "Type"
+            | "Readiness"
+            | "Authority Owner"
+            | "Purpose"
+            | "Scope In"
+            | "Scope Out"
+            | "Dependencies"
+            | "Preconditions"
+            | "Source Freshness / Revalidation"
+            | "Dirty Worktree Protection"
+            | "Base Revision / Source Digest Expectations"
+            | "Assumptions"
+            | "Assumptions To Verify"
+            | "Risk Level"
+            | "Human Approval Required"
+            | "Allowed Read Paths"
+            | "Allowed Write Paths"
+            | "Generated Paths"
+            | "Forbidden Paths"
+            | "Path Conflict Policy"
+            | "Acceptance Criteria"
+            | "Failure / Negative Cases"
+            | "Validation / Evidence"
+            | "Command / Action"
+            | "Working Directory"
+            | "Expected Exit Code / Observation"
+            | "Required Evidence"
+            | "Expected Evidence"
+            | "Expected Artifact Kind"
+            | "Review Evidence Binding"
+            | "Review Checklist"
+            | "Traceability Refs"
+            | "Stale If"
+            | "Covers"
+    )
+}
+
+fn canonical_task_field_name(field: &str) -> String {
+    match field.trim().to_ascii_lowercase().as_str() {
+        "type" => "Type",
+        "readiness" => "Readiness",
+        "authority owner" => "Authority Owner",
+        "purpose" => "Purpose",
+        "scope in" => "Scope In",
+        "scope out" => "Scope Out",
+        "dependencies" => "Dependencies",
+        "preconditions" => "Preconditions",
+        "source freshness / revalidation" => "Source Freshness / Revalidation",
+        "dirty worktree protection" => "Dirty Worktree Protection",
+        "base revision / source digest expectations" => {
+            "Base Revision / Source Digest Expectations"
+        }
+        "assumptions" => "Assumptions",
+        "assumptions to verify" => "Assumptions To Verify",
+        "risk level" => "Risk Level",
+        "human approval required" => "Human Approval Required",
+        "allowed read paths" => "Allowed Read Paths",
+        "allowed write paths" => "Allowed Write Paths",
+        "generated paths" => "Generated Paths",
+        "forbidden paths" => "Forbidden Paths",
+        "path conflict policy" => "Path Conflict Policy",
+        "acceptance criteria" => "Acceptance Criteria",
+        "failure / negative cases" => "Failure / Negative Cases",
+        "validation" | "validation / evidence" => "Validation / Evidence",
+        "command / action" => "Command / Action",
+        "working directory" => "Working Directory",
+        "expected exit code / observation" => "Expected Exit Code / Observation",
+        "required evidence" => "Required Evidence",
+        "covers" => "Covers",
+        "expected evidence" => "Expected Evidence",
+        "expected artifact kind" => "Expected Artifact Kind",
+        "review evidence binding" => "Review Evidence Binding",
+        "review checklist" => "Review Checklist",
+        "traceability refs" => "Traceability Refs",
+        "stale-if" | "stale if" => "Stale If",
+        _ => field.trim(),
+    }
+    .to_owned()
 }
 
 fn parse_specs(specs: &[SourceFile]) -> (Vec<Requirement>, Vec<Scenario>) {
@@ -576,14 +685,32 @@ fn lint_source(source: &SourceSnapshot) -> LintState {
         });
     }
 
+    for spec in &source.specs {
+        if !has_openspec_delta_section(&spec.text) {
+            blockers.push(Blocker {
+                id: "missing_openspec_delta_section".to_owned(),
+                source_path: spec.relative_path.clone(),
+                task_id: None,
+                scenario_id: None,
+                detail:
+                    "spec file must use OpenSpec delta headings such as `## ADDED Requirements`"
+                        .to_owned(),
+            });
+        }
+    }
+
     let mut seen_task_ids = BTreeSet::new();
     for task in &source.tasks_parsed {
         let mut task_blockers = Vec::new();
+        task_blockers.extend(task.field_syntax_errors.iter().cloned());
         if !is_stable_task_id(&task.id) {
             task_blockers.push("malformed task id".to_owned());
         }
         if !seen_task_ids.insert(task.id.clone()) {
             task_blockers.push("duplicate task id".to_owned());
+        }
+        if !has_required_task_field(task, "Type") {
+            task_blockers.push("missing Type".to_owned());
         }
 
         let task_type = task_field(task, "Type").unwrap_or("unknown");
@@ -629,7 +756,9 @@ fn lint_source(source: &SourceSnapshot) -> LintState {
 
         for detail in task_blockers {
             blockers.push(Blocker {
-                id: if detail.contains("path")
+                id: if detail.contains("non-canonical task field syntax") {
+                    "non_canonical_task_field_syntax".to_owned()
+                } else if detail.contains("path")
                     || detail.contains("Allowed Write Paths")
                     || detail.contains("write scope")
                     || detail.contains("protected")
@@ -706,6 +835,18 @@ fn lint_source(source: &SourceSnapshot) -> LintState {
 
 fn task_field<'a>(task: &'a SourceTask, field: &str) -> Option<&'a str> {
     task.fields.get(field).map(String::as_str)
+}
+
+fn has_openspec_delta_section(text: &str) -> bool {
+    text.lines().any(|line| {
+        matches!(
+            line.trim(),
+            "## ADDED Requirements"
+                | "## MODIFIED Requirements"
+                | "## REMOVED Requirements"
+                | "## RENAMED Requirements"
+        )
+    })
 }
 
 fn has_required_task_field(task: &SourceTask, field: &str) -> bool {
@@ -1606,6 +1747,7 @@ intro
             title: "unsafe paths".into(),
             source_path: "tasks.md".into(),
             raw_block: String::new(),
+            field_syntax_errors: Vec::new(),
             fields: BTreeMap::from([
                 (
                     "Allowed Write Paths".into(),

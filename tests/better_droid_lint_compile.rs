@@ -121,6 +121,54 @@ fn better_droid_unsafe_path_policy_is_blocked() {
 }
 
 #[test]
+fn better_droid_noncanonical_task_fields_are_blocked() {
+    let fixture = Fixture::new();
+    fixture.write_change(
+        "noncanonical-task-fields-fixture",
+        NONCANONICAL_TASK_FIELDS,
+        PASSING_SPEC,
+    );
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "noncanonical-task-fields-fixture".to_owned(),
+    })
+    .expect("lint noncanonical task field fixture");
+
+    assert_eq!(report.status, ReportStatus::Blocked);
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.id == "non_canonical_task_field_syntax")
+    );
+    assert_eq!(
+        report.task_classifications[0].task_type, "unknown",
+        "noncanonical fields must not be silently accepted as typed executable work"
+    );
+}
+
+#[test]
+fn better_droid_spec_without_delta_sections_is_blocked() {
+    let fixture = Fixture::new();
+    fixture.write_change("non-delta-spec-fixture", PASSING_TASK, NON_DELTA_SPEC);
+
+    let report = lint_change(&LintOptions {
+        project_root: fixture.root().to_owned(),
+        change_id: "non-delta-spec-fixture".to_owned(),
+    })
+    .expect("lint non-delta spec fixture");
+
+    assert_eq!(report.status, ReportStatus::Blocked);
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.id == "missing_openspec_delta_section")
+    );
+}
+
+#[test]
 fn better_droid_compile_rejects_blocked_source() {
     let fixture = Fixture::vague_task();
 
@@ -847,6 +895,18 @@ The compiler SHALL reject unmapped scenarios.
 - **THEN** import readiness is false
 "#;
 
+const NON_DELTA_SPEC: &str = r#"## Requirements
+
+### Requirement: REQ-BDLCF-fixture Passing fixture requirement
+
+The compiler SHALL reject specs that do not use OpenSpec delta headings.
+
+#### Scenario: SCN-BDLCF-fixture Passing fixture scenario
+
+- **WHEN** lint runs
+- **THEN** import readiness is false
+"#;
+
 const PASSING_TASK: &str = r#"- [ ] 1.1 Implement passing fixture compiler behavior
   - **Type:** implementation
   - **Readiness:** ready-for-execution
@@ -878,6 +938,20 @@ const VAGUE_TASK: &str = r#"- [ ] 1.1 Improve compiler behavior
   - **Allowed Write Paths:** `covey/src/ops/better_droid/mod.rs`
   - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Traceability Refs:** REQ-BDLCF-fixture, SCN-BDLCF-fixture
+"#;
+
+const NONCANONICAL_TASK_FIELDS: &str = r#"- [ ] 1.1 Implement noncanonical task fixture
+  - Type: implementation
+  - Purpose: Exercise noncanonical task field rejection.
+  - Allowed Read Paths: `openspec/changes/**`
+  - Allowed Write Paths: `covey/src/ops/better_droid/mod.rs`
+  - Forbidden Paths: `authority/**`, `contracts/imported/**`, `.git/**`
+  - Acceptance Criteria: Lint rejects noncanonical field syntax.
+  - Validation: `cargo test better_droid_noncanonical_task_fields_are_blocked --all-targets`
+  - Expected Artifact Kind: patch-bundle
+  - Review Checklist: noncanonical fields are blockers.
+  - Traceability Refs: REQ-BDLCF-fixture, SCN-BDLCF-fixture
+  - Stale-if: fixture source changes
 "#;
 
 const UNSAFE_PATH_TASK: &str = r#"- [ ] 1.1 Implement unsafe path fixture

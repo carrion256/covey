@@ -6,12 +6,12 @@ use std::{
     ffi::OsString,
     io::{self, IsTerminal, Write},
     path::PathBuf,
-    process::ExitCode,
+    process::{Command as ProcessCommand, ExitCode},
 };
 
 use clap::{Parser, Subcommand};
 use covey::better_droid::{
-    BetterDroidError, CompileOptions, LintOptions, compile_change, lint_change,
+    BetterDroidError, CompileOptions, LintOptions, MissionReport, compile_change, lint_change,
 };
 use serde::Serialize;
 
@@ -44,6 +44,14 @@ enum Command {
         /// Optional output directory. It must stay inside openspec/changes/CHANGE_ID/mission.
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    /// Compare root OpenSpec readiness with Better Droid mission readiness.
+    Doctor {
+        /// OpenSpec change id under openspec/changes/.
+        change_id: String,
+        /// OpenSpec executable to use. Defaults to PATH lookup for `openspec`.
+        #[arg(long, default_value = "openspec")]
+        openspec_bin: PathBuf,
     },
 }
 
@@ -111,7 +119,217 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, CliError> {
             render_success(mode, &report, format!("compile status: {}", report.status));
             Ok(exit)
         }
+        Command::Doctor {
+            change_id,
+            openspec_bin,
+        } => {
+            let report = doctor_change(cli.project_root, change_id, openspec_bin)
+                .map_err(|error| CliError::from_better_droid(mode, error))?;
+            let exit = if report.import_ready {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(4)
+            };
+            render_success(mode, &report, format!("doctor status: {}", report.status));
+            Ok(exit)
+        }
     }
+}
+
+fn doctor_change(
+    project_root: PathBuf,
+    change_id: String,
+    openspec_bin: PathBuf,
+) -> Result<DoctorReport, BetterDroidError> {
+    let mut checks = Vec::new();
+    let schema_path = project_root
+        .join("openspec")
+        .join("schemas")
+        .join("better-droid")
+        .join("schema.yaml");
+    checks.push(DoctorCheck {
+        id: "root_better_droid_schema".to_owned(),
+        status: if schema_path.is_file() {
+            DoctorCheckStatus::Passed
+        } else {
+            DoctorCheckStatus::Failed
+        },
+        command: None,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        detail: format!(
+            "{} {}",
+            schema_path.display(),
+            if schema_path.is_file() {
+                "exists"
+            } else {
+                "is missing"
+            }
+        ),
+    });
+
+    checks.push(run_openspec_check(
+        &project_root,
+        &openspec_bin,
+        "openspec_schema_which_better_droid",
+        &["schema", "which", "better-droid"],
+    ));
+    checks.push(run_openspec_check(
+        &project_root,
+        &openspec_bin,
+        "openspec_validate_strict",
+        &["validate", &change_id, "--strict", "--json"],
+    ));
+    checks.push(run_openspec_check(
+        &project_root,
+        &openspec_bin,
+        "openspec_status",
+        &["status", "--change", &change_id, "--json"],
+    ));
+
+    let better_droid = lint_change(&LintOptions {
+        project_root,
+        change_id: change_id.clone(),
+    })?;
+    checks.push(DoctorCheck {
+        id: "better_droid_lint".to_owned(),
+        status: if better_droid.import_ready {
+            DoctorCheckStatus::Passed
+        } else {
+            DoctorCheckStatus::Failed
+        },
+        command: None,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        detail: format!("lint status: {}", better_droid.status),
+    });
+
+    let openspec_ready = checks
+        .iter()
+        .filter(|check| check.id.starts_with("openspec_") || check.id == "root_better_droid_schema")
+        .all(|check| check.status == DoctorCheckStatus::Passed);
+    checks.push(DoctorCheck {
+        id: "readiness_alignment".to_owned(),
+        status: if openspec_ready == better_droid.import_ready {
+            DoctorCheckStatus::Passed
+        } else {
+            DoctorCheckStatus::Failed
+        },
+        command: None,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        detail: format!(
+            "openspec_ready={openspec_ready}; better_droid_import_ready={}",
+            better_droid.import_ready
+        ),
+    });
+
+    let import_ready = checks
+        .iter()
+        .all(|check| check.status == DoctorCheckStatus::Passed)
+        && better_droid.import_ready;
+    Ok(DoctorReport {
+        schema: "better-droid.doctor-report.v1",
+        change_id,
+        status: if import_ready {
+            DoctorStatus::Ready
+        } else {
+            DoctorStatus::Blocked
+        },
+        import_ready,
+        checks,
+        better_droid,
+    })
+}
+
+fn run_openspec_check(
+    project_root: &std::path::Path,
+    openspec_bin: &std::path::Path,
+    id: &str,
+    args: &[&str],
+) -> DoctorCheck {
+    let command = std::iter::once(openspec_bin.display().to_string())
+        .chain(args.iter().map(|arg| (*arg).to_owned()))
+        .collect::<Vec<_>>();
+    match ProcessCommand::new(openspec_bin)
+        .args(args)
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(output) => DoctorCheck {
+            id: id.to_owned(),
+            status: if output.status.success() {
+                DoctorCheckStatus::Passed
+            } else {
+                DoctorCheckStatus::Failed
+            },
+            command: Some(command),
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            detail: if output.status.success() {
+                "openspec command succeeded".to_owned()
+            } else {
+                "openspec command failed".to_owned()
+            },
+        },
+        Err(error) => DoctorCheck {
+            id: id.to_owned(),
+            status: DoctorCheckStatus::Failed,
+            command: Some(command),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: error.to_string(),
+            detail: "failed to execute openspec command".to_owned(),
+        },
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct DoctorReport {
+    schema: &'static str,
+    change_id: String,
+    status: DoctorStatus,
+    import_ready: bool,
+    checks: Vec<DoctorCheck>,
+    better_droid: MissionReport,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DoctorStatus {
+    Ready,
+    Blocked,
+}
+
+impl std::fmt::Display for DoctorStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => formatter.write_str("ready"),
+            Self::Blocked => formatter.write_str("blocked"),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct DoctorCheck {
+    id: String,
+    status: DoctorCheckStatus,
+    command: Option<Vec<String>>,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DoctorCheckStatus {
+    Passed,
+    Failed,
 }
 
 fn clap_exit_code(kind: clap::error::ErrorKind) -> u8 {
@@ -251,6 +469,24 @@ mod tests {
             OutputMode::resolve(&[OsString::from("better-droid")]),
             expected_default
         );
+    }
+
+    #[test]
+    fn doctor_status_display_and_failed_openspec_execution_are_stable() {
+        assert_eq!(DoctorStatus::Ready.to_string(), "ready");
+        assert_eq!(DoctorStatus::Blocked.to_string(), "blocked");
+
+        let check = run_openspec_check(
+            std::path::Path::new("."),
+            std::path::Path::new("/definitely/missing/openspec"),
+            "unit_openspec",
+            &["--version"],
+        );
+        assert_eq!(check.id, "unit_openspec");
+        assert_eq!(check.status, DoctorCheckStatus::Failed);
+        assert!(check.exit_code.is_none());
+        assert!(check.command.is_some());
+        assert!(!check.stderr.is_empty());
     }
 
     #[test]
