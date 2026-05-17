@@ -107,6 +107,7 @@ pub(crate) struct MetaStatusArgs {
 pub(crate) enum SessionRoleArg {
     Executor,
     Orchestrator,
+    #[value(alias = "apply_gate")]
     ApplyGate,
     Reviewer,
 }

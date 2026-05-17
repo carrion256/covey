@@ -159,6 +159,28 @@ fn piped_success_defaults_to_json() {
 }
 
 #[test]
+fn session_register_accepts_apply_gate_role_alias() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let output = run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "apply-gate-alias",
+            "--agent-instance-id",
+            "apply-gate-alias-run",
+            "--role",
+            "apply_gate",
+        ],
+    );
+
+    let data = success_data(&output);
+    assert_eq!(data["role"], "apply_gate");
+}
+
+#[test]
 fn session_attest_records_runtime_identity_json() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");
