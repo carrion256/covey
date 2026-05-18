@@ -44,7 +44,7 @@ fn better_droid_source_ingest_records_required_inputs() {
     );
     assert!(
         report.source_digests.values().all(|digest| {
-            digest.starts_with("sha256:") && digest.len() == "sha256:".len() + 64
+            digest.starts_with("blake3:") && digest.len() == "blake3:".len() + 64
         })
     );
     assert_eq!(
@@ -332,7 +332,7 @@ fn better_droid_compile_emits_source_derived_mission_packet_v1() {
     assert!(
         packet["provenance"]["source_digest"]
             .as_str()
-            .is_some_and(|digest| digest.starts_with("sha256:"))
+            .is_some_and(|digest| digest.starts_with("blake3:"))
     );
     assert!(packet["scheduler"].is_null());
     assert_eq!(packet["runtime"]["dispatch"], "external-orchestrator-owned");

@@ -719,7 +719,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         );
         let signers: BTreeSet<String> = host_claims
             .values()
-            .filter_map(|claim| claim.get("public_key_sha256").and_then(Value::as_str))
+            .filter_map(|claim| claim.get("public_key_blake3").and_then(Value::as_str))
             .map(ToOwned::to_owned)
             .collect();
         checks.insert(
@@ -1056,7 +1056,7 @@ pub fn verify_apply_proof_batch(args: ApplyProofBatchArgs) -> Result<u8, ApplyPr
                     .unwrap_or(Value::Null),
             ),
             (
-                "seal_file_sha256",
+                "seal_file_blake3",
                 if child_output.exists() {
                     Value::String(blake3_file(&child_output)?)
                 } else {
@@ -1617,7 +1617,7 @@ fn verify_host_signed_runtime_claim(
     );
     insert_object(
         &mut result,
-        "public_key_sha256",
+        "public_key_blake3",
         Value::String(format!("blake3:{}", blake3_bytes(public_key.as_bytes()))),
     );
     Ok(result)

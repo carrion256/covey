@@ -89,7 +89,7 @@ fn attest(covey: &Covey, session_token: &str) {
             provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
-            command_transcript_digest: format!("sha256:{session_token}:transcript"),
+            command_transcript_digest: format!("blake3:{session_token}:transcript"),
             started_at: 1_700_000_000_000,
             ended_at: 1_700_000_000_001,
             idempotency_key: format!("record-runtime-attestation-{session_token}"),
@@ -204,11 +204,11 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:changes_requested_seed".into(),
+            artifact_digest: "blake3:changes_requested_seed".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "changes_requested_seed.json".into(),
-            changed_paths_digest: "sha256:changes_requested_seed_paths".into(),
+            changed_paths_digest: "blake3:changes_requested_seed_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish artifact");
@@ -216,7 +216,7 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:changes_requested_seed".into(),
+            artifact_digest: "blake3:changes_requested_seed".into(),
             review_subtask_id: Some("review_changes_requested_seed".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -263,7 +263,7 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::ChangesRequested,
-            findings_digest: "sha256:changes_requested_findings".into(),
+            findings_digest: "blake3:changes_requested_findings".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("request changes");
@@ -543,11 +543,11 @@ fn failed_mutations_do_not_append_event_rows_and_artifact_digests_are_unique() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:artifact_a".into(),
+            artifact_digest: "blake3:artifact_a".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "deadbeef".into(),
             manifest_path: "artifacts/a.json".into(),
-            changed_paths_digest: "sha256:paths_a".into(),
+            changed_paths_digest: "blake3:paths_a".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish artifact");
@@ -557,16 +557,16 @@ fn failed_mutations_do_not_append_event_rows_and_artifact_digests_are_unique() {
         session_token: worker,
         claim_id: claim.claim_id,
         fence_seq: claim.fence_seq,
-        artifact_digest: "sha256:artifact_a".into(),
+        artifact_digest: "blake3:artifact_a".into(),
         artifact_kind: ArtifactKind::PatchBundle,
         base_rev: "deadbeef".into(),
         manifest_path: "artifacts/b.json".into(),
-        changed_paths_digest: "sha256:paths_b".into(),
+        changed_paths_digest: "blake3:paths_b".into(),
         idempotency_key: id_key("publish-artifact"),
     });
     assert!(matches!(
         collision,
-        Err(CoveyError::ArtifactDigestCollision { digest }) if digest == "sha256:artifact_a"
+        Err(CoveyError::ArtifactDigestCollision { digest }) if digest == "blake3:artifact_a"
     ));
 
     let after_events = covey.fetch_events(0, 100).expect("events").len();
@@ -1962,11 +1962,11 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
             session_token: executor.clone(),
             claim_id: work_claim.claim_id.clone(),
             fence_seq: work_claim.fence_seq,
-            artifact_digest: "sha256:wrong_role_review_target".into(),
+            artifact_digest: "blake3:wrong_role_review_target".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "wrong_role_review_target.json".into(),
-            changed_paths_digest: "sha256:wrong_role_review_target_paths".into(),
+            changed_paths_digest: "blake3:wrong_role_review_target_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish work target artifact");
@@ -1974,7 +1974,7 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
         .request_review(RequestReviewReq {
             session_token: executor.clone(),
             subtask_id: work_subtask_id.clone(),
-            artifact_digest: "sha256:wrong_role_review_target".into(),
+            artifact_digest: "blake3:wrong_role_review_target".into(),
             review_subtask_id: Some("wrong_role_review_target_review".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -2329,11 +2329,11 @@ fn claim_subtask_rejects_illegal_state_without_appending_event() {
             session_token: first_worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:illegal_state_target".into(),
+            artifact_digest: "blake3:illegal_state_target".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "illegal_state_target.json".into(),
-            changed_paths_digest: "sha256:illegal_state_target_paths".into(),
+            changed_paths_digest: "blake3:illegal_state_target_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish seeded artifact");
@@ -2567,11 +2567,11 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:a".into(),
+            artifact_digest: "blake3:a".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "a.json".into(),
-            changed_paths_digest: "sha256:paths_a".into(),
+            changed_paths_digest: "blake3:paths_a".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish a");
@@ -2580,7 +2580,7 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:a".into(),
+            artifact_digest: "blake3:a".into(),
             review_subtask_id: Some("review_a".into()),
             priority: 2,
             idempotency_key: id_key("request-review"),
@@ -2593,17 +2593,17 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
             session_token: worker.clone(),
             claim_id: claim.claim_id,
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:b".into(),
+            artifact_digest: "blake3:b".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "b.json".into(),
-            changed_paths_digest: "sha256:paths_b".into(),
+            changed_paths_digest: "blake3:paths_b".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish b");
 
     let status = covey.subtask_status(&subtask_id).expect("status");
-    assert_eq!(status.subtask.artifact_digest.as_deref(), Some("sha256:b"));
+    assert_eq!(status.subtask.artifact_digest.as_deref(), Some("blake3:b"));
     let review = status
         .reviews
         .into_iter()
@@ -2641,11 +2641,11 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:a".into(),
+            artifact_digest: "blake3:a".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "a.json".into(),
-            changed_paths_digest: "sha256:paths_a".into(),
+            changed_paths_digest: "blake3:paths_a".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish a");
@@ -2653,7 +2653,7 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:a".into(),
+            artifact_digest: "blake3:a".into(),
             review_subtask_id: Some("review_stale".into()),
             priority: 2,
             idempotency_key: id_key("request-review"),
@@ -2665,11 +2665,11 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:b".into(),
+            artifact_digest: "blake3:b".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "b.json".into(),
-            changed_paths_digest: "sha256:paths_b".into(),
+            changed_paths_digest: "blake3:paths_b".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish b");
@@ -2711,7 +2711,7 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
     ));
 
     let status = covey.subtask_status(&subtask_id).expect("status");
-    assert_eq!(status.subtask.artifact_digest.as_deref(), Some("sha256:b"));
+    assert_eq!(status.subtask.artifact_digest.as_deref(), Some("blake3:b"));
     assert_eq!(status.subtask.state, SubtaskState::ArtifactPublished);
     assert_eq!(
         covey
@@ -2766,7 +2766,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
 
     let mut review_records = Vec::new();
     for (subtask_id, digest, created_at) in
-        [(&first, "sha256:q1", 1_i64), (&second, "sha256:q2", 2_i64)]
+        [(&first, "blake3:q1", 1_i64), (&second, "blake3:q2", 2_i64)]
     {
         let worker_alias = format!("worker_{digest}");
         let worker = register(&covey, &worker_alias, &worker_alias, SessionRole::Executor);
@@ -2796,7 +2796,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
                 artifact_kind: ArtifactKind::PatchBundle,
                 base_rev: "base".into(),
                 manifest_path: format!("{digest}.json"),
-                changed_paths_digest: format!("sha256:paths_{created_at}"),
+                changed_paths_digest: format!("blake3:paths_{created_at}"),
                 idempotency_key: id_key("publish-artifact"),
             })
             .expect("publish");
@@ -2849,7 +2849,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
                 claim_id: review_claim.claim_id,
                 fence_seq: review_claim.fence_seq,
                 verdict: covey::ReviewVerdict::Approve,
-                findings_digest: "sha256:findings".into(),
+                findings_digest: "blake3:findings".into(),
                 idempotency_key: id_key("decide-review"),
             })
             .expect("decide");
@@ -2889,7 +2889,7 @@ fn ready_queue_orders_items_and_applies_in_order() {
         &queue_claim.queue_id,
         digest,
         review_id,
-        "sha256:findings",
+        "blake3:findings",
         queue_claim.claim_fence_seq,
     );
     covey
@@ -2959,11 +2959,11 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:queue_reclaim".into(),
+            artifact_digest: "blake3:queue_reclaim".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "queue_reclaim.json".into(),
-            changed_paths_digest: "sha256:paths_queue_reclaim".into(),
+            changed_paths_digest: "blake3:paths_queue_reclaim".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish");
@@ -2971,7 +2971,7 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:queue_reclaim".into(),
+            artifact_digest: "blake3:queue_reclaim".into(),
             review_subtask_id: Some("review_queue_reclaim".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -3008,14 +3008,14 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:findings_queue_reclaim".into(),
+            findings_digest: "blake3:findings_queue_reclaim".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("approve");
     covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch,
-            artifact_digest: "sha256:queue_reclaim".into(),
+            artifact_digest: "blake3:queue_reclaim".into(),
             subtask_id: subtask_id.clone(),
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -3057,9 +3057,9 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
         &covey,
         &gate_b,
         &second_claim.queue_id,
-        "sha256:queue_reclaim",
+        "blake3:queue_reclaim",
         &review_id,
-        "sha256:findings_queue_reclaim",
+        "blake3:findings_queue_reclaim",
         second_claim.claim_fence_seq,
     );
     covey
@@ -3501,13 +3501,13 @@ fn observability_queries_report_stuck_work_expiring_claims_and_queue_metrics() {
             manifest_path, changed_paths_digest, created_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            "sha256:ready_metrics",
+            "blake3:ready_metrics",
             ArtifactKind::PatchBundle.to_string(),
             "base",
             subtask_id.clone(),
             worker.clone(),
             "metrics.json",
-            "sha256:metrics_paths",
+            "blake3:metrics_paths",
             1_700_000_005_000_i64,
         ],
     )
@@ -3517,7 +3517,7 @@ fn observability_queries_report_stuck_work_expiring_claims_and_queue_metrics() {
         params![
             subtask_id,
             SubtaskState::Approved.to_string(),
-            "sha256:ready_metrics"
+            "blake3:ready_metrics"
         ],
     )
     .expect("approve subtask");
@@ -3529,7 +3529,7 @@ fn observability_queries_report_stuck_work_expiring_claims_and_queue_metrics() {
                 "orch_metrics",
                 SessionRole::Orchestrator,
             ),
-            artifact_digest: "sha256:ready_metrics".into(),
+            artifact_digest: "blake3:ready_metrics".into(),
             subtask_id,
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -3608,11 +3608,11 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:artifact_a".into(),
+            artifact_digest: "blake3:artifact_a".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "artifact_a.json".into(),
-            changed_paths_digest: "sha256:paths_a".into(),
+            changed_paths_digest: "blake3:paths_a".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish a");
@@ -3620,7 +3620,7 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:artifact_a".into(),
+            artifact_digest: "blake3:artifact_a".into(),
             review_subtask_id: Some("review_stale_a".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -3631,11 +3631,11 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:artifact_b".into(),
+            artifact_digest: "blake3:artifact_b".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "artifact_b.json".into(),
-            changed_paths_digest: "sha256:paths_b".into(),
+            changed_paths_digest: "blake3:paths_b".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish b");
@@ -3644,12 +3644,12 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
         covey.request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:artifact_a".into(),
+            artifact_digest: "blake3:artifact_a".into(),
             review_subtask_id: Some("review_stale_b".into()),
             priority: 1,
         idempotency_key: id_key("request-review"),
         }),
-        Err(CoveyError::UnknownArtifactDigest { digest }) if digest == "sha256:artifact_a"
+        Err(CoveyError::UnknownArtifactDigest { digest }) if digest == "blake3:artifact_a"
     ));
 
     let status = covey.subtask_status(&subtask_id).expect("status");
@@ -3664,7 +3664,7 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id,
-            artifact_digest: "sha256:artifact_b".into(),
+            artifact_digest: "blake3:artifact_b".into(),
             review_subtask_id: Some("review_fresh".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -3902,11 +3902,11 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:queue".into(),
+            artifact_digest: "blake3:queue".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "queue.json".into(),
-            changed_paths_digest: "sha256:paths_queue".into(),
+            changed_paths_digest: "blake3:paths_queue".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish");
@@ -3914,7 +3914,7 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:queue".into(),
+            artifact_digest: "blake3:queue".into(),
             review_subtask_id: Some("review_queue".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -3951,7 +3951,7 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:findings".into(),
+            findings_digest: "blake3:findings".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("approve");
@@ -3959,7 +3959,7 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
     let queue_id = covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch.clone(),
-            artifact_digest: "sha256:queue".into(),
+            artifact_digest: "blake3:queue".into(),
             subtask_id,
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -4040,11 +4040,11 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:queue_drift".into(),
+            artifact_digest: "blake3:queue_drift".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "queue_drift.json".into(),
-            changed_paths_digest: "sha256:paths_queue_drift".into(),
+            changed_paths_digest: "blake3:paths_queue_drift".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish");
@@ -4052,7 +4052,7 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:queue_drift".into(),
+            artifact_digest: "blake3:queue_drift".into(),
             review_subtask_id: Some("review_queue_drift".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -4090,7 +4090,7 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:findings_queue_drift".into(),
+            findings_digest: "blake3:findings_queue_drift".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("approve");
@@ -4098,7 +4098,7 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
     let queue_id = covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch.clone(),
-            artifact_digest: "sha256:queue_drift".into(),
+            artifact_digest: "blake3:queue_drift".into(),
             subtask_id: subtask_id.clone(),
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -4120,20 +4120,20 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
             manifest_path, changed_paths_digest, created_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            "sha256:queue_drifted",
+            "blake3:queue_drifted",
             ArtifactKind::PatchBundle.to_string(),
             "base",
             subtask_id.clone(),
             worker.clone(),
             "queue_drifted.json",
-            "sha256:paths_queue_drifted",
+            "blake3:paths_queue_drifted",
             1_700_000_000_999_i64,
         ],
     )
     .expect("insert drift artifact");
     conn.execute(
         "UPDATE subtasks SET artifact_digest = ?2 WHERE subtask_id = ?1",
-        params![subtask_id, "sha256:queue_drifted"],
+        params![subtask_id, "blake3:queue_drifted"],
     )
     .expect("drift artifact digest");
 
@@ -4341,7 +4341,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             title: "missing review target".into(),
             kind: SubtaskKind::Review,
             review_target_subtask_id: Some("no_such_subtask".into()),
-            review_target_artifact_digest: Some("sha256:missing".into()),
+            review_target_artifact_digest: Some("blake3:missing".into()),
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         }),
@@ -4373,11 +4373,11 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             session_token: worker.clone(),
             claim_id: work_claim.claim_id.clone(),
             fence_seq: work_claim.fence_seq,
-            artifact_digest: "sha256:dup".into(),
+            artifact_digest: "blake3:dup".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "dup.json".into(),
-            changed_paths_digest: "sha256:paths_dup".into(),
+            changed_paths_digest: "blake3:paths_dup".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish");
@@ -4402,7 +4402,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             title: "review bad digest".into(),
             kind: SubtaskKind::Review,
             review_target_subtask_id: Some("dup".into()),
-            review_target_artifact_digest: Some("sha256:missing".into()),
+            review_target_artifact_digest: Some("blake3:missing".into()),
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         }),
@@ -4416,7 +4416,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             title: "review wrong target".into(),
             kind: SubtaskKind::Review,
             review_target_subtask_id: Some("other_work".into()),
-            review_target_artifact_digest: Some("sha256:dup".into()),
+            review_target_artifact_digest: Some("blake3:dup".into()),
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         }),
@@ -4427,19 +4427,19 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
         covey.request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: "dup".into(),
-            artifact_digest: "sha256:missing".into(),
+            artifact_digest: "blake3:missing".into(),
             review_subtask_id: Some("review_missing".into()),
             priority: 1,
         idempotency_key: id_key("request-review"),
         }),
-        Err(CoveyError::UnknownArtifactDigest { digest }) if digest == "sha256:missing"
+        Err(CoveyError::UnknownArtifactDigest { digest }) if digest == "blake3:missing"
     ));
 
     let review_id = covey
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: "dup".into(),
-            artifact_digest: "sha256:dup".into(),
+            artifact_digest: "blake3:dup".into(),
             review_subtask_id: Some("review_dup".into()),
             priority: 3,
             idempotency_key: id_key("request-review"),
@@ -4484,7 +4484,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             claim_id: review_claim.claim_id.clone(),
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:findings".into(),
+            findings_digest: "blake3:findings".into(),
             idempotency_key: id_key("decide-review"),
         }),
         Err(CoveyError::ReviewNotFound)
@@ -4506,7 +4506,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             claim_id: worker_claim.claim_id,
             fence_seq: worker_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:findings".into(),
+            findings_digest: "blake3:findings".into(),
             idempotency_key: id_key("decide-review"),
         }),
         Err(CoveyError::WrongRole { actual, .. }) if actual == SessionRole::Executor
@@ -4515,7 +4515,7 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
     let conn = Connection::open(&rig.db_path).expect("open db");
     let corrupt = conn.execute(
         "UPDATE subtasks SET artifact_digest = ?2 WHERE subtask_id = ?1",
-        params!["dup", "sha256:missing_artifact"],
+        params!["dup", "blake3:missing_artifact"],
     );
     assert!(corrupt.is_err());
 }
@@ -4844,11 +4844,11 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
             session_token: worker_a.clone(),
             claim_id: claim_a.claim_id.clone(),
             fence_seq: claim_a.fence_seq,
-            artifact_digest: "sha256:apply".into(),
+            artifact_digest: "blake3:apply".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "apply.json".into(),
-            changed_paths_digest: "sha256:apply_paths".into(),
+            changed_paths_digest: "blake3:apply_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish");
@@ -4856,7 +4856,7 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
         .request_review(RequestReviewReq {
             session_token: worker_a.clone(),
             subtask_id: apply_subtask.clone(),
-            artifact_digest: "sha256:apply".into(),
+            artifact_digest: "blake3:apply".into(),
             review_subtask_id: Some("review_apply".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -4894,14 +4894,14 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:findings".into(),
+            findings_digest: "blake3:findings".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("decide");
     let queue_id = covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch.clone(),
-            artifact_digest: "sha256:apply".into(),
+            artifact_digest: "blake3:apply".into(),
             subtask_id: apply_subtask.clone(),
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -4919,9 +4919,9 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
         &covey,
         &gate,
         &queue_id,
-        "sha256:apply",
+        "blake3:apply",
         &review_id,
-        "sha256:findings",
+        "blake3:findings",
         queue_claim.claim_fence_seq,
     );
     covey
@@ -5062,11 +5062,11 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
             session_token: worker.clone(),
             claim_id: work_claim.claim_id.clone(),
             fence_seq: work_claim.fence_seq,
-            artifact_digest: "sha256:meta_flow".into(),
+            artifact_digest: "blake3:meta_flow".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "meta_flow.json".into(),
-            changed_paths_digest: "sha256:meta_flow_paths".into(),
+            changed_paths_digest: "blake3:meta_flow_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish");
@@ -5074,7 +5074,7 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:meta_flow".into(),
+            artifact_digest: "blake3:meta_flow".into(),
             review_subtask_id: Some("meta_flow_review".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -5112,7 +5112,7 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:meta_flow_findings".into(),
+            findings_digest: "blake3:meta_flow_findings".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("decide review");
@@ -5120,7 +5120,7 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
     let queue_id = covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch,
-            artifact_digest: "sha256:meta_flow".into(),
+            artifact_digest: "blake3:meta_flow".into(),
             subtask_id,
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -5138,9 +5138,9 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
         &covey,
         &gate,
         &queue_id,
-        "sha256:meta_flow",
+        "blake3:meta_flow",
         &review_id,
-        "sha256:meta_flow_findings",
+        "blake3:meta_flow_findings",
         queue_claim.claim_fence_seq,
     );
     covey
@@ -5248,11 +5248,11 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:bounds_a".into(),
+            artifact_digest: "blake3:bounds_a".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: long.clone(),
             manifest_path: "bounds.json".into(),
-            changed_paths_digest: "sha256:bounds_paths".into(),
+            changed_paths_digest: "blake3:bounds_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         }),
         Err(CoveyError::InputTooLarge { field, .. }) if field == "base_rev"
@@ -5262,11 +5262,11 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:bounds_b".into(),
+            artifact_digest: "blake3:bounds_b".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: long.clone(),
-            changed_paths_digest: "sha256:bounds_paths".into(),
+            changed_paths_digest: "blake3:bounds_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         }),
         Err(CoveyError::InputTooLarge { field, .. }) if field == "manifest_path"
@@ -5276,7 +5276,7 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:bounds_c".into(),
+            artifact_digest: "blake3:bounds_c".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "bounds.json".into(),
@@ -5291,11 +5291,11 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
             session_token: worker.clone(),
             claim_id: claim.claim_id.clone(),
             fence_seq: claim.fence_seq,
-            artifact_digest: "sha256:bounds_valid".into(),
+            artifact_digest: "blake3:bounds_valid".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "bounds.json".into(),
-            changed_paths_digest: "sha256:bounds_paths".into(),
+            changed_paths_digest: "blake3:bounds_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish valid artifact");
@@ -5303,7 +5303,7 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:bounds_valid".into(),
+            artifact_digest: "blake3:bounds_valid".into(),
             review_subtask_id: Some("bounds_review".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),

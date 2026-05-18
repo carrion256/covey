@@ -71,7 +71,7 @@ fn attest(covey: &Covey, session_token: &str) {
             provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
-            command_transcript_digest: format!("sha256:{session_token}:transcript"),
+            command_transcript_digest: format!("blake3:{session_token}:transcript"),
             started_at: 1_700_000_000_000,
             ended_at: 1_700_000_000_001,
             idempotency_key: format!("record-runtime-attestation-{session_token}"),
@@ -284,11 +284,11 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
             session_token: resumed_worker.clone(),
             claim_id: resumed_claim.claim_id.clone(),
             fence_seq: resumed_claim.fence_seq,
-            artifact_digest: "sha256:unattended_artifact".into(),
+            artifact_digest: "blake3:unattended_artifact".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base".into(),
             manifest_path: "unattended-artifact.json".into(),
-            changed_paths_digest: "sha256:unattended_paths".into(),
+            changed_paths_digest: "blake3:unattended_paths".into(),
             idempotency_key: id_key("publish-artifact"),
         })
         .expect("publish artifact");
@@ -296,7 +296,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         .request_review(RequestReviewReq {
             session_token: resumed_worker.clone(),
             subtask_id: subtask_id.clone(),
-            artifact_digest: "sha256:unattended_artifact".into(),
+            artifact_digest: "blake3:unattended_artifact".into(),
             review_subtask_id: Some("review_unattended_work".into()),
             priority: 1,
             idempotency_key: id_key("request-review"),
@@ -335,14 +335,14 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "sha256:unattended_findings".into(),
+            findings_digest: "blake3:unattended_findings".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("approve review");
     let queue_id = covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orchestrator,
-            artifact_digest: "sha256:unattended_artifact".into(),
+            artifact_digest: "blake3:unattended_artifact".into(),
             subtask_id: subtask_id.clone(),
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -360,13 +360,13 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         .record_apply_verification(RecordApplyVerificationReq {
             session_token: apply_gate.clone(),
             queue_id: queue_id.clone(),
-            artifact_digest: "sha256:unattended_artifact".into(),
+            artifact_digest: "blake3:unattended_artifact".into(),
             review_id,
-            findings_digest: "sha256:unattended_findings".into(),
+            findings_digest: "blake3:unattended_findings".into(),
             claim_fence_seq: queue_claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: "sha256:unattended_verdict".into(),
-            seal_digest: "sha256:unattended_seal".into(),
+            verdict_digest: "blake3:unattended_verdict".into(),
+            seal_digest: "blake3:unattended_seal".into(),
             idempotency_key: id_key("record-apply-verification"),
         })
         .expect("record apply verification");

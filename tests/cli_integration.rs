@@ -52,7 +52,7 @@ fn stderr_code(output: &std::process::Output) -> String {
 fn attest_session(db_path: &Path, session_token: &str, role_label: &str) {
     let process_id = format!("pid-{role_label}");
     let provider_run_id = format!("provider-run-{role_label}");
-    let transcript_digest = format!("sha256:{role_label}:transcript");
+    let transcript_digest = format!("blake3:{role_label}:transcript");
     let idempotency_key = format!("record-runtime-attestation-{role_label}");
     success_data(&run_db(
         db_path,
@@ -102,13 +102,13 @@ fn seed_ready_queue_item(db_path: &Path, session_token: &str, subtask_id: &str, 
         INSERT INTO artifacts (
             artifact_digest, artifact_kind, base_rev, produced_by_subtask_id,
             produced_by_session, manifest_path, changed_paths_digest, created_at
-        ) VALUES (?1, 'patch_bundle', 'base', ?2, ?3, 'manifest.json', 'sha256:paths', 1000)
+        ) VALUES (?1, 'patch_bundle', 'base', ?2, ?3, 'manifest.json', 'blake3:paths', 1000)
         "#,
-        params!["sha256:seeded-queue", subtask_id, session_token],
+        params!["blake3:seeded-queue", subtask_id, session_token],
     )
     .expect("insert artifact fixture");
     conn.execute(
-        "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = 'sha256:seeded-queue', updated_at = 1000 WHERE subtask_id = ?1",
+        "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = 'blake3:seeded-queue', updated_at = 1000 WHERE subtask_id = ?1",
         params![subtask_id],
     )
     .expect("mark subtask fixture ready for apply");
@@ -118,7 +118,7 @@ fn seed_ready_queue_item(db_path: &Path, session_token: &str, subtask_id: &str, 
             queue_id, artifact_digest, subtask_id, settlement_target, state,
             claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
             enqueued_at, updated_at
-        ) VALUES (?1, 'sha256:seeded-queue', ?2, 'canonical', 'queued', NULL, NULL, NULL, 1000, 1000)
+        ) VALUES (?1, 'blake3:seeded-queue', ?2, 'canonical', 'queued', NULL, NULL, NULL, 1000, 1000)
         "#,
         params![queue_id, subtask_id],
     )
@@ -217,7 +217,7 @@ fn session_attest_records_runtime_identity_json() {
             "--process-id",
             "pid-123",
             "--command-transcript-digest",
-            "sha256:transcript",
+            "blake3:transcript",
             "--started-at",
             "1700000000000",
             "--ended-at",
@@ -232,7 +232,7 @@ fn session_attest_records_runtime_identity_json() {
     assert_eq!(data["provider"], "codex");
     assert_eq!(data["provider_run_id"], "provider-run-123");
     assert_eq!(data["provider_run_id_issuer"], "codex-test-provider");
-    assert_eq!(data["command_transcript_digest"], "sha256:transcript");
+    assert_eq!(data["command_transcript_digest"], "blake3:transcript");
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn workflow_commands_emit_json() {
             "--fence-seq",
             &fence_seq,
             "--artifact-digest",
-            "sha256:a",
+            "blake3:a",
             "--artifact-kind",
             "patch-bundle",
             "--base-rev",
@@ -562,7 +562,7 @@ fn workflow_commands_emit_json() {
             "--manifest-path",
             "a.json",
             "--changed-paths-digest",
-            "sha256:paths_a",
+            "blake3:paths_a",
         ],
     ));
 
@@ -576,7 +576,7 @@ fn workflow_commands_emit_json() {
             "--subtask-id",
             &subtask_id,
             "--artifact-digest",
-            "sha256:a",
+            "blake3:a",
             "--review-subtask-id",
             "review_1",
         ],
@@ -649,7 +649,7 @@ fn workflow_commands_emit_json() {
             "--verdict",
             "approve",
             "--findings-digest",
-            "sha256:findings",
+            "blake3:findings",
         ],
     ));
 
@@ -661,7 +661,7 @@ fn workflow_commands_emit_json() {
             "--session-token",
             &orch,
             "--artifact-digest",
-            "sha256:a",
+            "blake3:a",
             "--subtask-id",
             &subtask_id,
         ],
@@ -720,19 +720,19 @@ fn workflow_commands_emit_json() {
             "--queue-id",
             &queue_id,
             "--artifact-digest",
-            "sha256:a",
+            "blake3:a",
             "--review-id",
             &review_id,
             "--findings-digest",
-            "sha256:findings",
+            "blake3:findings",
             "--claim-fence-seq",
             &queue_fence,
             "--verifier",
             "mutai-rs",
             "--verdict-digest",
-            "sha256:verdict",
+            "blake3:verdict",
             "--seal-digest",
-            "sha256:seal",
+            "blake3:seal",
         ],
     ));
     success_data(&run_db(

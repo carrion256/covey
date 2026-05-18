@@ -210,7 +210,7 @@ covey import openspec \
 
 # Claim and publish
 covey subtask claim-next --session-token <worker-session> --lease-duration-ms 30000
-covey artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest sha256:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest sha256:paths
+covey artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest blake3:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest blake3:paths
 ```
 
 ### OpenSpec Import

@@ -370,7 +370,7 @@ def orchestrate(args: argparse.Namespace) -> int:
             "apply_verification_seal_digest"
         ],
         "final_seal_digest": state["closer"]["seal_digest"],
-        "host_runtime_claim_public_key_sha256": sha256_file(public_key_path),
+        "host_runtime_claim_public_key_blake3": blake3_file(public_key_path),
         "actor_process_ids": {
             "worker": state["worker"]["pid"],
             "reviewer": state["reviewer"]["pid"],
@@ -472,7 +472,7 @@ def worker_actor(db: Path, state: dict[str, Any]) -> dict[str, Any]:
             f"worker_pid={os.getpid()}\n",
             encoding="utf-8",
         )
-    artifact_digest = sha256_file(artifact_file)
+    artifact_digest = blake3_file(artifact_file)
     changed_paths_file = Path(state["evidence_dir"]) / "changed-paths.txt"
     if state.get("feature_patch_from_head"):
         changed_paths_file.write_text(
@@ -489,7 +489,7 @@ def worker_actor(db: Path, state: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         changed_paths_file.write_text("feature.patch\n", encoding="utf-8")
-    changed_paths_digest = sha256_file(changed_paths_file)
+    changed_paths_digest = blake3_file(changed_paths_file)
     manifest = {
         "schema": "actor_split_artifact_manifest",
         "artifact_file": "feature.patch",
@@ -624,7 +624,7 @@ def reviewer_actor(db: Path, state: dict[str, Any]) -> dict[str, Any]:
     }
     findings_path = Path(state["evidence_dir"]) / "reviewer-findings.json"
     write_json(findings_path, findings)
-    findings_digest = sha256_file(findings_path)
+    findings_digest = blake3_file(findings_path)
     actor.covey(
         db,
         "review",
@@ -720,7 +720,7 @@ def apply_gate_actor(db: Path, state: dict[str, Any]) -> dict[str, Any]:
     }
     verdict_path = Path(state["evidence_dir"]) / "apply-gate-output.json"
     write_json(verdict_path, verdict)
-    verdict_digest = sha256_file(verdict_path)
+    verdict_digest = blake3_file(verdict_path)
     seal_input = {
         "schema": "actor_split_apply_verification_seal_input",
         "queue_id": state["queue_id"],
@@ -732,7 +732,7 @@ def apply_gate_actor(db: Path, state: dict[str, Any]) -> dict[str, Any]:
     }
     seal_input_path = Path(state["evidence_dir"]) / "apply-verification-seal-input.json"
     write_json(seal_input_path, seal_input)
-    apply_verification_seal_digest = sha256_file(seal_input_path)
+    apply_verification_seal_digest = blake3_file(seal_input_path)
     transcript_digest = actor.write_transcript()
     ended_at = now_ms()
     run_identity = provider_run_identity(state, "apply_gate")
@@ -880,7 +880,7 @@ def closer_actor(db: Path, state: dict[str, Any]) -> dict[str, Any]:
         "pid": os.getpid(),
         "seal": str(output),
         "seal_digest": payload["seal_digest"],
-        "transcript_digest": sha256_file(evidence_dir / "closer-transcript.json"),
+        "transcript_digest": blake3_file(evidence_dir / "closer-transcript.json"),
     }
 
 
@@ -915,7 +915,7 @@ class ActorLog:
     def write_transcript(self) -> str:
         path = self.evidence_dir / f"{self.label}-transcript.json"
         write_json(path, self.entries)
-        return sha256_file(path)
+        return blake3_file(path)
 
 
 def run_actor(actor: str, db: Path, state: Path) -> dict[str, Any]:
@@ -1145,7 +1145,7 @@ def load_provider_run_id_input(
     normalized_payload["signature"] = {
         "algorithm": "ed25519",
         "verified": True,
-        "public_key_sha256": sha256_file(public_key_path),
+        "public_key_blake3": blake3_file(public_key_path),
     }
     return normalized_payload
 
@@ -1243,10 +1243,6 @@ def canonical_json(payload: Any) -> bytes:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def sha256_file(path: Path) -> str:
-    return blake3_file(path)
 
 
 def temp_parent() -> str | None:

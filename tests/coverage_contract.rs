@@ -70,7 +70,7 @@ fn attest(covey: &Covey, session_token: &str) {
             provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
-            command_transcript_digest: format!("sha256:{session_token}:transcript"),
+            command_transcript_digest: format!("blake3:{session_token}:transcript"),
             started_at: 1_700_000_000_000,
             ended_at: 1_700_000_000_001,
             idempotency_key: format!("record-runtime-attestation-{session_token}"),
@@ -249,7 +249,7 @@ fn record_apply_verification(
 
 #[rstest]
 fn ready_queue_alternate_paths_cover_fetch_claim_supersede_and_owner_errors(rig: Rig) {
-    let (_orch, queue_id) = enqueue_ready_item(&rig, "queue_cover", "sha256:queue_cover");
+    let (_orch, queue_id) = enqueue_ready_item(&rig, "queue_cover", "blake3:queue_cover");
     let gate = register(&rig.covey, "gate-queue-cover", SessionRole::ApplyGate);
     let other_gate = register(&rig.covey, "gate-queue-other", SessionRole::ApplyGate);
 
@@ -309,7 +309,7 @@ fn ready_queue_alternate_paths_cover_fetch_claim_supersede_and_owner_errors(rig:
 
 #[rstest]
 fn mark_in_flight_and_lease_expiry_paths_are_observable(rig: Rig) {
-    let (_orch, queue_id) = enqueue_ready_item(&rig, "queue_expiry", "sha256:queue_expiry");
+    let (_orch, queue_id) = enqueue_ready_item(&rig, "queue_expiry", "blake3:queue_expiry");
     let gate = register(&rig.covey, "gate-queue-expiry", SessionRole::ApplyGate);
 
     let claim = rig
@@ -338,12 +338,12 @@ fn mark_in_flight_and_lease_expiry_paths_are_observable(rig: Rig) {
 #[rstest]
 fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
     let (orch, work_id) = seed_work(&rig.covey, "queue_error_paths");
-    prepare_approved_artifact(&rig, &work_id, &orch, "sha256:queue_error_paths");
+    prepare_approved_artifact(&rig, &work_id, &orch, "blake3:queue_error_paths");
 
     assert!(matches!(
         rig.covey.enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch.clone(),
-            artifact_digest: "sha256:different".into(),
+            artifact_digest: "blake3:different".into(),
             subtask_id: work_id.clone(),
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-digest-mismatch"),
@@ -355,7 +355,7 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
         .covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch.clone(),
-            artifact_digest: "sha256:queue_error_paths".into(),
+            artifact_digest: "blake3:queue_error_paths".into(),
             subtask_id: work_id,
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -425,8 +425,8 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
         &gate,
         &queue_id,
         "queue_error_paths",
-        "sha256:queue_error_paths",
-        "sha256:queue_error_paths:findings",
+        "blake3:queue_error_paths",
+        "blake3:queue_error_paths:findings",
         claim.claim_fence_seq,
     );
 
@@ -454,7 +454,7 @@ fn apply_verification_requires_runtime_attestation(rig: Rig) {
     let (_orch, queue_id) = enqueue_ready_item(
         &rig,
         "queue_requires_runtime_attestation",
-        "sha256:queue_requires_runtime_attestation",
+        "blake3:queue_requires_runtime_attestation",
     );
     let gate = register(
         &rig.covey,
@@ -475,13 +475,13 @@ fn apply_verification_requires_runtime_attestation(rig: Rig) {
         rig.covey.record_apply_verification(RecordApplyVerificationReq {
             session_token: gate.clone(),
             queue_id,
-            artifact_digest: "sha256:queue_requires_runtime_attestation".into(),
+            artifact_digest: "blake3:queue_requires_runtime_attestation".into(),
             review_id: "review_queue_requires_runtime_attestation".into(),
-            findings_digest: "sha256:queue_requires_runtime_attestation:findings".into(),
+            findings_digest: "blake3:queue_requires_runtime_attestation:findings".into(),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: "sha256:queue_requires_runtime_attestation:verdict".into(),
-            seal_digest: "sha256:queue_requires_runtime_attestation:seal".into(),
+            verdict_digest: "blake3:queue_requires_runtime_attestation:verdict".into(),
+            seal_digest: "blake3:queue_requires_runtime_attestation:seal".into(),
             idempotency_key: id_key("record-apply-verification"),
         }),
         Err(CoveyError::RuntimeAttestationMissing { session_token }) if session_token == gate
@@ -491,20 +491,20 @@ fn apply_verification_requires_runtime_attestation(rig: Rig) {
 #[rstest]
 fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
     let subtask_id = "queue_shared_worker_reviewer_runtime";
-    let digest = "sha256:queue_shared_worker_reviewer_runtime";
+    let digest = "blake3:queue_shared_worker_reviewer_runtime";
     let (worker, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
     let reviewer = review_session_for(&rig, subtask_id);
     force_runtime_ref(
         &rig,
         &worker,
         "pid-shared-review",
-        "sha256:worker-transcript",
+        "blake3:worker-transcript",
     );
     force_runtime_ref(
         &rig,
         &reviewer,
         "pid-shared-review",
-        "sha256:reviewer-transcript",
+        "blake3:reviewer-transcript",
     );
     let gate = register(&rig.covey, "gate-shared-runtime", SessionRole::ApplyGate);
     attest(&rig.covey, &gate);
@@ -536,12 +536,12 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
     ));
 
     let subtask_id = "queue_shared_worker_gate_transcript";
-    let digest = "sha256:queue_shared_worker_gate_transcript";
+    let digest = "blake3:queue_shared_worker_gate_transcript";
     let (worker, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
     let gate = register(&rig.covey, "gate-shared-transcript", SessionRole::ApplyGate);
     attest(&rig.covey, &gate);
-    force_runtime_ref(&rig, &worker, "pid-worker", "sha256:shared-transcript");
-    force_runtime_ref(&rig, &gate, "pid-gate", "sha256:shared-transcript");
+    force_runtime_ref(&rig, &worker, "pid-worker", "blake3:shared-transcript");
+    force_runtime_ref(&rig, &gate, "pid-gate", "blake3:shared-transcript");
     let claim = rig
         .covey
         .mark_in_flight(MarkInFlightReq {
@@ -573,7 +573,7 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
 #[rstest]
 fn apply_verification_rejects_shared_provider_run_identity(rig: Rig) {
     let subtask_id = "queue_shared_provider_run";
-    let digest = "sha256:queue_shared_provider_run";
+    let digest = "blake3:queue_shared_provider_run";
     let (worker, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
     let reviewer = review_session_for(&rig, subtask_id);
     force_provider_run_ref(&rig, &worker, "codex-provider", "run-shared");
@@ -621,13 +621,13 @@ fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig
         &rig,
         &work_id,
         &orch,
-        "sha256:queue_evidence_required",
+        "blake3:queue_evidence_required",
     );
     let queue_id = rig
         .covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch.clone(),
-            artifact_digest: "sha256:queue_evidence_required".into(),
+            artifact_digest: "blake3:queue_evidence_required".into(),
             subtask_id: work_id,
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -659,12 +659,12 @@ fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig
         "gate-separation-producer",
         SessionRole::ApplyGate,
     );
-    prepare_approved_artifact(&rig, &work_id, &gate, "sha256:queue_apply_gate_separation");
+    prepare_approved_artifact(&rig, &work_id, &gate, "blake3:queue_apply_gate_separation");
     let queue_id = rig
         .covey
         .enqueue_for_apply(EnqueueForApplyReq {
             session_token: orch,
-            artifact_digest: "sha256:queue_apply_gate_separation".into(),
+            artifact_digest: "blake3:queue_apply_gate_separation".into(),
             subtask_id: work_id,
             settlement_target: SettlementTarget::Canonical,
             idempotency_key: id_key("enqueue-for-apply"),
@@ -697,7 +697,7 @@ fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig
 #[rstest]
 fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
     let subtask_id = "queue_landing_authorization";
-    let digest = "sha256:queue_landing_authorization";
+    let digest = "blake3:queue_landing_authorization";
     let (_orch, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
     let gate = register(
         &rig.covey,
@@ -758,7 +758,7 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
             verdict_digest: format!("{digest}:verdict"),
-            seal_digest: "sha256:wrong-apply-verification-seal".into(),
+            seal_digest: "blake3:wrong-apply-verification-seal".into(),
         }),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "accepted apply verifier verdict does not match landing authorization"
@@ -997,11 +997,11 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
             session_token: worker.clone(),
             claim_id: work_claim.claim_id.clone(),
             fence_seq: work_claim.fence_seq,
-            artifact_digest: "sha256:artifact_review_first".into(),
+            artifact_digest: "blake3:artifact_review_first".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base-1".into(),
             manifest_path: "artifacts/first.json".into(),
-            changed_paths_digest: "sha256:paths_first".into(),
+            changed_paths_digest: "blake3:paths_first".into(),
             idempotency_key: id_key("publish-first-artifact"),
         })
         .expect("publish first artifact");
@@ -1010,7 +1010,7 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: work_id.clone(),
-            artifact_digest: "sha256:artifact_review_first".into(),
+            artifact_digest: "blake3:artifact_review_first".into(),
             review_subtask_id: Some("review_cover_first".into()),
             priority: 5,
             idempotency_key: id_key("request-first-review"),
@@ -1023,11 +1023,11 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
             session_token: worker.clone(),
             claim_id: work_claim.claim_id.clone(),
             fence_seq: work_claim.fence_seq,
-            artifact_digest: "sha256:artifact_review_second".into(),
+            artifact_digest: "blake3:artifact_review_second".into(),
             artifact_kind: ArtifactKind::PatchBundle,
             base_rev: "base-2".into(),
             manifest_path: "artifacts/second.json".into(),
-            changed_paths_digest: "sha256:paths_second".into(),
+            changed_paths_digest: "blake3:paths_second".into(),
             idempotency_key: id_key("publish-second-artifact"),
         })
         .expect("publish second artifact and supersede the first review");
@@ -1036,7 +1036,7 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
         .request_review(RequestReviewReq {
             session_token: worker.clone(),
             subtask_id: work_id.clone(),
-            artifact_digest: "sha256:artifact_review_second".into(),
+            artifact_digest: "blake3:artifact_review_second".into(),
             review_subtask_id: Some("review_cover_second".into()),
             priority: 1,
             idempotency_key: id_key("request-second-review"),
@@ -1067,7 +1067,7 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
             claim_id: review_claim.claim_id,
             fence_seq: review_claim.fence_seq,
             verdict: ReviewVerdict::Approve,
-            findings_digest: "sha256:review_findings".into(),
+            findings_digest: "blake3:review_findings".into(),
             idempotency_key: id_key("decide-review"),
         })
         .expect("decide review");
@@ -1086,7 +1086,7 @@ proptest! {
     #[test]
     fn ready_queue_reclaim_fence_sequences_increase_after_expiry(reclaim_count in 1usize..6) {
         let rig = rig();
-        let (_orch, queue_id) = enqueue_ready_item(&rig, "queue_prop", "sha256:queue_prop");
+        let (_orch, queue_id) = enqueue_ready_item(&rig, "queue_prop", "blake3:queue_prop");
         let gate = register(&rig.covey, "gate-queue-prop", SessionRole::ApplyGate);
         let mut fences = Vec::new();
 
