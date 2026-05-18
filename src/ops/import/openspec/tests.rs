@@ -2,7 +2,7 @@ use super::{
     mission::load_mission_packet,
     parse::parse_openspec_tasks,
     source::load_openspec_source_snapshot,
-    util::{normalize_relative_path, blake3_digest},
+    util::{blake3_digest, normalize_relative_path},
 };
 use crate::better_droid::{CompileOptions, compile_change};
 use crate::error::CoveyError;

@@ -13,7 +13,7 @@ use crate::{
 
 use super::{
     OpenSpecSourceTask,
-    util::{normalize_relative_path, blake3_digest},
+    util::{blake3_digest, normalize_relative_path},
 };
 
 const REQUIRED_ARTIFACTS: &[&str] = &[

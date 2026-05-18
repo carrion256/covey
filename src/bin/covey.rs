@@ -185,7 +185,10 @@ fn run_digest_command(command: DigestCommand, mode: OutputMode) -> Result<ExitCo
             let bytes = digest_input(args).map_err(|message| {
                 OutputError::new(
                     mode,
-                    ReportableError::invalid_args(message, vec!["Pass exactly one of --file, --text, or --stdin.".into()]),
+                    ReportableError::invalid_args(
+                        message,
+                        vec!["Pass exactly one of --file, --text, or --stdin.".into()],
+                    ),
                 )
             })?;
             let digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());

@@ -13,7 +13,7 @@ use crate::{
 use super::{
     OpenSpecSourceSnapshot,
     mission::load_mission_packet,
-    util::{normalize_relative_path, blake3_digest},
+    util::{blake3_digest, normalize_relative_path},
 };
 
 pub(super) fn load_openspec_source_snapshot(
