@@ -148,7 +148,7 @@ Install them into a target repository with that template's installer script.
 Covey and its CLI remain transport-thin by design. The
 `integrations/codex-hooks/` template is a separate local execution wrapper that
 adapts Codex lifecycle and tool events into existing Covey CLI commands plus
-`mutai-rs` evidence contracts. Hooks may enforce before local Codex side
+Authority evidence contracts. Hooks may enforce before local Codex side
 effects, but they must not become scheduler, settlement, landing, or repoops
 authority. Covey remains the owner of `claim-next`, queue `claim-next`, claims,
 leases, fences, sessions, reservations, artifacts, reviews, review/apply queue
@@ -169,7 +169,7 @@ The design is only credible if the test suite proves the invariants above: legal
 Covey now ships a thin local CLI for direct SQLite-backed testing and exploratory work:
 
 ```bash
-cargo run --bin covey -- --db ./covey.db session register \
+covey --db ./covey.db session register \
   --agent-principal-id agent-a \
   --agent-instance-id run-1 \
   --role executor
@@ -184,33 +184,33 @@ The CLI is transport-thin by design:
 Short help:
 
 ```bash
-cargo run --bin covey -- --help
+covey --help
 ```
 
 Typical workflow:
 
 ```bash
 # Register sessions
-cargo run --bin covey -- session register --agent-principal-id orch --agent-instance-id orch-1 --role orchestrator
-cargo run --bin covey -- session register --agent-principal-id worker --agent-instance-id worker-1 --role executor
+covey session register --agent-principal-id orch --agent-instance-id orch-1 --role orchestrator
+covey session register --agent-principal-id worker --agent-instance-id worker-1 --role executor
 
 # Create work
-cargo run --bin covey -- meta submit --session-token <orch-session> --prompt-text "ship feature"
-cargo run --bin covey -- subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "implement" --kind work --priority 1
+covey meta submit --session-token <orch-session> --prompt-text "ship feature"
+covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "implement" --kind work --priority 1
 
 # Import OpenSpec planning artifacts without claiming or scheduling work
-cargo run --bin covey -- import openspec \
+covey import openspec \
   --change openspec-covey-importer \
   --project-root /path/to/project \
   --dry-run
-cargo run --bin covey -- import openspec \
+covey import openspec \
   --change openspec-covey-importer \
   --project-root /path/to/project \
   --session-token <orch-session>
 
 # Claim and publish
-cargo run --bin covey -- subtask claim-next --session-token <worker-session> --lease-duration-ms 30000
-cargo run --bin covey -- artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest sha256:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest sha256:paths
+covey subtask claim-next --session-token <worker-session> --lease-duration-ms 30000
+covey artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest sha256:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest sha256:paths
 ```
 
 ### OpenSpec Import
