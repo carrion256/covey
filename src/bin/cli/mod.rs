@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use covey::proof_apply::{ApplyProofBatchArgs, ApplyProofVerifyArgs};
 
 use crate::DEFAULT_DB_PATH;
 
@@ -92,4 +93,53 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: ImportCommand,
     },
+    Digest {
+        #[command(subcommand)]
+        command: DigestCommand,
+    },
+    Proof {
+        #[command(subcommand)]
+        command: ProofCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum DigestCommand {
+    /// Compute a BLAKE3 digest with a blake3: prefix.
+    Blake3(DigestBlake3Args),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DigestBlake3Args {
+    /// Read bytes from this file.
+    #[arg(long, conflicts_with_all = ["text", "stdin"])]
+    pub(crate) file: Option<PathBuf>,
+
+    /// Hash this UTF-8 string.
+    #[arg(long, conflicts_with_all = ["file", "stdin"])]
+    pub(crate) text: Option<String>,
+
+    /// Read bytes from stdin.
+    #[arg(long, conflicts_with_all = ["file", "text"])]
+    pub(crate) stdin: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ProofCommand {
+    Apply {
+        #[command(subcommand)]
+        command: ProofApplyCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ProofApplyCommand {
+    /// Verify and seal one Covey-bound apply proof.
+    Verify(ApplyProofVerifyArgs),
+    /// Verify and aggregate a batch of Covey-bound apply proofs.
+    #[command(name = "verify-batch")]
+    VerifyBatch(ApplyProofBatchArgs),
+    /// Print the reusable verifier request/output contract.
+    #[command(name = "print-contract")]
+    PrintContract,
 }

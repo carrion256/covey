@@ -4,12 +4,17 @@
 
 use std::{
     ffi::OsString,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
     process::ExitCode,
 };
 
 use clap::Parser;
-use covey::{Covey, CoveyError};
+use covey::{
+    Covey, CoveyError,
+    proof_apply::{
+        apply_proof_contract, emit_apply_proof_error, verify_apply_proof, verify_apply_proof_batch,
+    },
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -17,7 +22,7 @@ mod cli;
 mod dispatch_support;
 mod render_support;
 
-use cli::Cli;
+use cli::{Cli, Commands, DigestBlake3Args, DigestCommand, ProofApplyCommand, ProofCommand};
 use dispatch_support::dispatch;
 use render_support::{
     OutputError, OutputMode, Rendered, ReportableError, exit_code_for_clap_kind, help_payload,
@@ -40,6 +45,8 @@ const COMMAND_GROUPS: &[&str] = &[
     "conflict",
     "maint",
     "import",
+    "digest",
+    "proof",
 ];
 const EXAMPLES: &[&str] = &[
     "covey session register --agent-principal-id agent-a --agent-instance-id run-1 --role executor",
@@ -49,7 +56,9 @@ const EXAMPLES: &[&str] = &[
 ];
 const SHORT_HELP: &str = "\
 covey <group> <command> [flags]
-groups: session meta subtask claim artifact review queue reservation repoops events conflict maint import
+groups: session meta subtask claim artifact review queue reservation repoops events conflict maint import digest
+digest: covey digest blake3 --file PATH | --text TEXT | --stdin
+proof: covey proof apply verify | verify-batch | print-contract
 global: --db PATH --json
 examples:
   covey session register --agent-principal-id agent-a --agent-instance-id run-1 --role executor
@@ -131,10 +140,79 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
         }
     };
 
+    if let Commands::Proof { command } = cli.command {
+        return Ok(run_proof_command(command));
+    }
+    if let Commands::Digest { command } = cli.command {
+        return run_digest_command(command, mode);
+    }
+
     let store = Covey::open(&cli.db).map_err(|err| OutputError::from_covey(mode, err))?;
 
     let rendered =
         dispatch(&store, cli.command).map_err(|err| OutputError::from_covey(mode, err))?;
     render_success(mode, &rendered);
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_proof_command(command: ProofCommand) -> ExitCode {
+    let result = match command {
+        ProofCommand::Apply { command } => match command {
+            ProofApplyCommand::Verify(args) => verify_apply_proof(args),
+            ProofApplyCommand::VerifyBatch(args) => verify_apply_proof_batch(args),
+            ProofApplyCommand::PrintContract => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&apply_proof_contract())
+                        .expect("proof contract json")
+                );
+                Ok(0)
+            }
+        },
+    };
+    match result {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            let output = error.output_path();
+            ExitCode::from(emit_apply_proof_error(error, output.as_deref()))
+        }
+    }
+}
+
+fn run_digest_command(command: DigestCommand, mode: OutputMode) -> Result<ExitCode, OutputError> {
+    match command {
+        DigestCommand::Blake3(args) => {
+            let bytes = digest_input(args).map_err(|message| {
+                OutputError::new(
+                    mode,
+                    ReportableError::invalid_args(message, vec!["Pass exactly one of --file, --text, or --stdin.".into()]),
+                )
+            })?;
+            let digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+            render_success(
+                mode,
+                &Rendered::summary(
+                    serde_json::json!({ "algorithm": "blake3", "digest": digest }),
+                    digest,
+                ),
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn digest_input(args: DigestBlake3Args) -> Result<Vec<u8>, String> {
+    match (args.file, args.text, args.stdin) {
+        (Some(path), None, false) => std::fs::read(&path)
+            .map_err(|err| format!("failed to read `{}`: {err}", path.display())),
+        (None, Some(text), false) => Ok(text.into_bytes()),
+        (None, None, true) => {
+            let mut bytes = Vec::new();
+            io::stdin()
+                .read_to_end(&mut bytes)
+                .map_err(|err| format!("failed to read stdin: {err}"))?;
+            Ok(bytes)
+        }
+        _ => Err("digest input is ambiguous or missing".into()),
+    }
 }

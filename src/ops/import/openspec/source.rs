@@ -13,7 +13,7 @@ use crate::{
 use super::{
     OpenSpecSourceSnapshot,
     mission::load_mission_packet,
-    util::{normalize_relative_path, sha256_digest},
+    util::{normalize_relative_path, blake3_digest},
 };
 
 pub(super) fn load_openspec_source_snapshot(
@@ -43,9 +43,9 @@ pub(super) fn load_openspec_source_snapshot(
     let design_text = read_required_openspec_file(root, &design_path)?;
     let tasks_text = read_required_openspec_file(root, &tasks_path)?;
     let spec_digests = load_openspec_spec_digests(root, &change_path)?;
-    let proposal_digest = sha256_digest(proposal_text.as_bytes());
-    let design_digest = sha256_digest(design_text.as_bytes());
-    let tasks_digest = sha256_digest(tasks_text.as_bytes());
+    let proposal_digest = blake3_digest(proposal_text.as_bytes());
+    let design_digest = blake3_digest(design_text.as_bytes());
+    let tasks_digest = blake3_digest(tasks_text.as_bytes());
     let mission_packet = load_mission_packet(root, change_id, &change_path)?;
     validate_source_digest_binding(
         &mission_packet.source_digests,
@@ -154,7 +154,7 @@ fn load_openspec_spec_digests(
         let relative = spec_path.strip_prefix(root).unwrap_or(&spec_path);
         digests.push(OpenSpecSourceDigest::new(
             normalize_relative_path(relative),
-            sha256_digest(&bytes),
+            blake3_digest(&bytes),
         ));
     }
     Ok(digests)

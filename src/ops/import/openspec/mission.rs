@@ -13,7 +13,7 @@ use crate::{
 
 use super::{
     OpenSpecSourceTask,
-    util::{normalize_relative_path, sha256_digest},
+    util::{normalize_relative_path, blake3_digest},
 };
 
 const REQUIRED_ARTIFACTS: &[&str] = &[
@@ -370,7 +370,7 @@ fn array_is_empty(value: &Value, field: &str) -> bool {
 fn canonical_json_digest(value: &Value) -> Result<String> {
     let canonical = canonicalize_value(value);
     let bytes = serde_json::to_vec(&canonical).map_err(CoveyError::from)?;
-    Ok(sha256_digest(&bytes))
+    Ok(blake3_digest(&bytes))
 }
 
 fn canonicalize_value(value: &Value) -> Value {
@@ -406,8 +406,8 @@ fn compile_report_recorded_digest(report: &Value, self_path: &str) -> Result<Str
 
 fn validate_digest(digest: &str, artifact: &str) -> Result<()> {
     let hex = digest
-        .strip_prefix("sha256:")
-        .ok_or_else(|| invalid_artifact(artifact, "digest must start with lowercase sha256:"))?;
+        .strip_prefix("blake3:")
+        .ok_or_else(|| invalid_artifact(artifact, "digest must start with lowercase blake3:"))?;
     if hex.len() != 64
         || !hex
             .chars()
@@ -415,7 +415,7 @@ fn validate_digest(digest: &str, artifact: &str) -> Result<()> {
     {
         return Err(invalid_artifact(
             artifact,
-            "digest must be lowercase sha256 plus 64 hex characters",
+            "digest must be lowercase blake3 plus 64 hex characters",
         ));
     }
     Ok(())

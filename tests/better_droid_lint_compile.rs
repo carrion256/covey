@@ -302,7 +302,7 @@ fn better_droid_empty_assumptions_json_is_emitted() {
 }
 
 #[test]
-fn better_droid_compile_emits_mutai_mission_packet_v1() {
+fn better_droid_compile_emits_source_derived_mission_packet_v1() {
     let fixture = Fixture::passing();
 
     compile_change(&CompileOptions {
@@ -334,19 +334,8 @@ fn better_droid_compile_emits_mutai_mission_packet_v1() {
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
-    assert_eq!(
-        packet["scheduler"]["activation_result"]["Ready"]["classification"],
-        "AllowCurrent"
-    );
-    assert_eq!(
-        packet["scheduler"]["identity_refs"]["selected_attempt"]["attempt_id"],
-        "attempt-passing-fixture"
-    );
-    assert_eq!(
-        packet["scheduler"]["identity_refs"]["selected_attempt"]["evaluator_version"],
-        "better-droid:mission-packet"
-    );
-    assert_eq!(packet["runtime"]["provider_mode"], "FakeDeliver");
+    assert!(packet["scheduler"].is_null());
+    assert_eq!(packet["runtime"]["dispatch"], "external-orchestrator-owned");
     assert_eq!(
         packet["runtime"]["authority_boundary"]["covey_owns_lifecycle"],
         true
@@ -357,21 +346,22 @@ fn better_droid_compile_emits_mutai_mission_packet_v1() {
     );
     assert_eq!(packet["provider"]["provider_id"], "better-droid");
     assert_eq!(packet["provider"]["model_id"], "compiled-mission");
-    assert_eq!(packet["path_policy"]["mutation_allowed"], false);
-    let allowed_paths = packet["path_policy"]["allowed_paths"]
+    assert_eq!(packet["path_policy"]["mutation_allowed"], true);
+    let allowed_write_paths = packet["path_policy"]["allowed_write_paths"]
         .as_array()
-        .expect("allowed paths array");
-    assert!(!allowed_paths.is_empty());
-    assert!(allowed_paths.iter().all(|path| {
-        path.as_str()
-            .is_some_and(|path| !path.chars().any(char::is_whitespace))
-    }));
+        .expect("allowed write paths array");
+    assert!(
+        allowed_write_paths
+            .iter()
+            .any(|path| path == "covey/src/ops/better_droid/mod.rs")
+    );
     assert!(packet["repoops"].is_null());
     assert!(
         packet["validation"]
             .as_array()
             .is_some_and(|items| !items.is_empty())
     );
+    assert!(packet["validation"][0].get("working_directory").is_some());
     assert!(
         packet["review_rubric"]
             .as_array()
@@ -381,7 +371,7 @@ fn better_droid_compile_emits_mutai_mission_packet_v1() {
 }
 
 #[test]
-fn better_droid_packet_declares_promoted_fleet_identity_contract() {
+fn better_droid_packet_omits_fake_promoted_fleet_identity_contract() {
     let fixture = Fixture::passing();
 
     compile_change(&CompileOptions {
@@ -396,50 +386,15 @@ fn better_droid_packet_declares_promoted_fleet_identity_contract() {
             .mission_dir("passing-fixture")
             .join("mission-packet.json"),
     );
-    let contract = &packet["runtime"]["promoted_fleet_identity_contract"];
-    assert_eq!(contract["schema"], "mutai.runtime-identity-contract.v1");
-    let required_for = contract["required_for"].as_array().expect("required_for");
-    assert!(
-        required_for
-            .iter()
-            .any(|item| item == "promoted_fleet_proof")
-    );
-    assert!(required_for.iter().any(|item| item == "landing"));
-    assert!(
-        contract["actor_roles"]
-            .as_array()
-            .expect("actor roles")
-            .iter()
-            .any(|role| role == "reviewer")
-    );
-    assert!(
-        contract["required_provider_identity_fields"]
-            .as_array()
-            .expect("provider identity fields")
-            .iter()
-            .any(|field| field == "provider_run_id")
-    );
-    assert_eq!(contract["trusted_provider_run_id_issuer_required"], true);
-    assert!(
-        contract["forbidden_provider_run_id_issuers"]
-            .as_array()
-            .expect("forbidden issuers")
-            .iter()
-            .any(|issuer| issuer == "mutai-local-proof-runner")
-    );
-    assert!(
-        contract["separation_invariants"]
-            .as_array()
-            .expect("separation invariants")
-            .iter()
-            .any(|invariant| invariant == "executor.provider_run_id != reviewer.provider_run_id")
-    );
-    assert!(
-        contract["covey_binding_fields"]
-            .as_array()
-            .expect("covey binding fields")
-            .iter()
-            .any(|field| field == "claim_fence_seq")
+    let text = serde_json::to_string(&packet).expect("packet serializes");
+    assert!(!text.contains("landing_token"));
+    assert!(!text.contains("claim_fence_seq"));
+    assert!(!text.contains("provider_run_id"));
+    assert!(packet["scheduler"].is_null());
+    assert!(packet["runtime"]["promoted_fleet_identity_contract"].is_null());
+    assert_eq!(
+        packet["runtime"]["authority_boundary"]["covey_owns_lifecycle"],
+        true
     );
 }
 
@@ -748,14 +703,14 @@ fn better_droid_compile_accepts_custom_output_inside_mission_dir() {
 }
 
 #[test]
-fn better_droid_compile_uses_default_objective_and_default_allowed_packet_path() {
+fn better_droid_compile_derives_packet_metadata_from_source() {
     let fixture = Fixture::new();
     fixture.write_change("default-packet-fixture", NON_EXECUTABLE_TASK, PASSING_SPEC);
     fs::write(
         fixture
             .root()
             .join("openspec/changes/default-packet-fixture/proposal.md"),
-        "## Proposal\n\nNo explicit objective line here.\n",
+        "# Proposal: source derived packet fixture\n\nNo explicit objective line here.\n",
     )
     .expect("rewrite proposal without objective");
 
@@ -773,11 +728,21 @@ fn better_droid_compile_uses_default_objective_and_default_allowed_packet_path()
     );
     assert_eq!(
         packet["mission"]["title"],
-        "compile Better Droid OpenSpec source into canonical mission JSON"
+        "implement source derived packet fixture"
+    );
+    assert!(packet["scheduler"].is_null());
+    assert_eq!(packet["runtime"]["dispatch"], "external-orchestrator-owned");
+    assert_eq!(
+        packet["path_policy"]["allowed_read_paths"],
+        serde_json::json!([
+            "openspec/changes/default-packet-fixture/**",
+            "openspec/config.yaml",
+            "openspec/schemas/better-droid/**"
+        ])
     );
     assert_eq!(
-        packet["path_policy"]["allowed_paths"],
-        serde_json::json!(["openspec/changes/**"])
+        packet["path_policy"]["allowed_write_paths"],
+        serde_json::json!(["openspec/changes/default-packet-fixture/mission/*.json"])
     );
 }
 

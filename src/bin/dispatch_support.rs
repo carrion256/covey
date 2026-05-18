@@ -47,6 +47,8 @@ pub(crate) fn dispatch(store: &Covey, command: Commands) -> covey::Result<Render
         Commands::Conflict { command } => system::dispatch_conflict(store, command),
         Commands::Maint { command } => system::dispatch_maint(store, command),
         Commands::Import { command } => import::dispatch_import(store, command),
+        Commands::Digest { .. } => unreachable!("digest commands bypass Covey store dispatch"),
+        Commands::Proof { .. } => unreachable!("proof commands bypass Covey store dispatch"),
     }
 }
 

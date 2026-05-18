@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::error::{CoveyError, Result};
 
-use super::{OpenSpecSourceTask, util::sha256_digest};
+use super::{OpenSpecSourceTask, util::blake3_digest};
 
 pub(super) fn parse_openspec_tasks(
     tasks_text: &str,
@@ -51,7 +51,7 @@ pub(super) fn parse_openspec_tasks(
             task_id: task_id.to_owned(),
             title: title.to_owned(),
             source_path: source_path.to_owned(),
-            task_digest: sha256_digest(format!("{task_id}\n{title}").as_bytes()),
+            task_digest: blake3_digest(format!("{task_id}\n{title}").as_bytes()),
             task_type: None,
         });
     }

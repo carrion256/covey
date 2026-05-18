@@ -2,7 +2,7 @@ use super::{
     mission::load_mission_packet,
     parse::parse_openspec_tasks,
     source::load_openspec_source_snapshot,
-    util::{normalize_relative_path, sha256_digest},
+    util::{normalize_relative_path, blake3_digest},
 };
 use crate::better_droid::{CompileOptions, compile_change};
 use crate::error::CoveyError;
@@ -22,7 +22,7 @@ fn openspec_task_parser_accepts_stable_checklist_ids() {
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].task_id, "1.1");
     assert_eq!(tasks[0].title, "Add CLI");
-    assert!(tasks[0].task_digest.starts_with("sha256:"));
+    assert!(tasks[0].task_digest.starts_with("blake3:"));
     assert_eq!(tasks[0].task_digest.len(), 71);
 }
 
@@ -144,7 +144,7 @@ fn openspec_mission_packet_loader_accepts_compiled_better_droid_artifacts() {
     assert_eq!(source.tasks.len(), 1);
     assert_eq!(source.tasks[0].task_id, "1.1");
     assert_eq!(source.tasks[0].task_type.as_deref(), Some("implementation"));
-    assert!(source.tasks[0].task_digest.starts_with("sha256:"));
+    assert!(source.tasks[0].task_digest.starts_with("blake3:"));
     assert_eq!(source.tasks[0].task_digest.len(), 71);
     assert_eq!(source.mission_artifacts.len(), 8);
     assert_eq!(source.mission_artifact_digests.len(), 8);
@@ -259,7 +259,7 @@ fn openspec_mission_packet_loader_rejects_duplicate_ids_and_missing_task_digest(
     compile_better_droid_change(tmp.path(), "invalid-task-packet");
     mutate_compile_report_without_refresh(&mission_dir, |report| {
         report["task_classifications"][0]["task_digest"] = Value::String(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         );
     });
     let tampered_report = load_openspec_source_snapshot(
@@ -279,7 +279,7 @@ fn openspec_mission_packet_loader_rejects_duplicate_ids_and_missing_task_digest(
             "title": "Extra classification",
             "task_type": "implementation",
             "import_status": "importable",
-            "task_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "task_digest": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         });
         report["task_classifications"]
             .as_array_mut()
@@ -480,12 +480,12 @@ fn openspec_mission_packet_loader_rejects_corrupt_compiled_artifact_shapes() {
 
     let invalid_task_digest_dir = compiled_mission_dir(tmp.path(), "invalid-task-digest-packet");
     mutate_compile_report(&invalid_task_digest_dir, |report| {
-        report["task_classifications"][0]["task_digest"] = Value::String("sha256:ABC".to_owned());
+        report["task_classifications"][0]["task_digest"] = Value::String("blake3:ABC".to_owned());
     });
     assert_invalid_source_detail(
         tmp.path(),
         "invalid-task-digest-packet",
-        "digest must be lowercase sha256 plus 64 hex characters",
+        "digest must be lowercase blake3 plus 64 hex characters",
     );
 
     let title_mismatch_dir = compiled_mission_dir(tmp.path(), "title-mismatch-packet");
@@ -680,7 +680,7 @@ fn write_json(path: &Path, value: &Value) {
 
 fn canonical_json_digest(value: &Value) -> String {
     let canonical = canonicalize_value(value);
-    sha256_digest(&serde_json::to_vec(&canonical).expect("canonical json"))
+    blake3_digest(&serde_json::to_vec(&canonical).expect("canonical json"))
 }
 
 fn canonicalize_value(value: &Value) -> Value {

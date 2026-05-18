@@ -6,7 +6,6 @@ use std::{
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const REQUIRED_TASK_FIELDS: &[&str] = &[
@@ -424,7 +423,7 @@ fn read_source_file(project_root: &Path, path: &Path) -> Result<SourceFile> {
     Ok(SourceFile {
         relative_path: normalize_relative_path(path.strip_prefix(project_root).unwrap_or(path)),
         text,
-        digest: sha256_digest(&bytes),
+        digest: blake3_digest(&bytes),
     })
 }
 
@@ -625,6 +624,7 @@ fn parse_specs(specs: &[SourceFile]) -> (Vec<Requirement>, Vec<Scenario>) {
             if let Some(rest) = trimmed.strip_prefix("### Requirement:") {
                 let title = rest.trim().to_owned();
                 let id = extract_prefixed_id(&title, "REQ-")
+                    .or_else(|| extract_domain_requirement_id(&title))
                     .unwrap_or_else(|| stable_id("REQ-derived", &title));
                 current_requirement_id = Some(id.clone());
                 requirements.push(Requirement { id, title });
@@ -652,6 +652,25 @@ fn extract_prefixed_id(text: &str, prefix: &str) -> Option<String> {
         .find(|token| token.starts_with(prefix))
         .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-'))
         .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
+fn extract_domain_requirement_id(text: &str) -> Option<String> {
+    text.split(|ch: char| ch.is_whitespace() || ch == ':' || ch == ',' || ch == ';')
+        .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-'))
+        .find(|token| {
+            token.strip_prefix("NZM-").is_some_and(|rest| {
+                rest.split('-')
+                    .next()
+                    .is_some_and(|domain| !domain.is_empty())
+            })
+        })
+        .filter(|token| {
+            token
+                .rsplit('-')
+                .next()
+                .is_some_and(|suffix| suffix.chars().all(|ch| ch.is_ascii_digit()))
+        })
         .map(str::to_owned)
 }
 
@@ -776,7 +795,7 @@ fn lint_source(source: &SourceSnapshot) -> LintState {
             });
         }
 
-        let task_digest = sha256_digest(
+        let task_digest = blake3_digest(
             format!(
                 "{}\n{}\n{}\n{}",
                 task.id, task.title, task_type, task.raw_block
@@ -1063,17 +1082,20 @@ fn source_digest_map(source: &SourceSnapshot) -> BTreeMap<String, String> {
 
 fn build_artifacts(source: &SourceSnapshot, lint: &LintState) -> BTreeMap<&'static str, Value> {
     let tasks = compiled_tasks(source, lint);
-    let task_ids = tasks
-        .iter()
-        .map(|task| task.task_id.clone())
-        .collect::<Vec<_>>();
-    let validation_ids = validation_ids(source);
     let source_digests = source_digest_map(source);
     let source_digest = canonical_json_digest(
         &serde_json::to_value(&source_digests).expect("source digest map is serializable"),
     )
     .expect("source digest map canonicalization succeeds");
-    let objective = first_objective(&source.proposal.text);
+    let objective = mission_objective(source, &tasks);
+    let done_definition = mission_done_definition(source, &tasks);
+    let scope_in = mission_scope_in(source, &tasks);
+    let scope_out = mission_scope_out(source, &tasks);
+    let affected_capabilities = mission_affected_capabilities(source);
+    let risk_level = mission_risk_level(source, &tasks);
+    let operator_approval = operator_approval_from_source(source, &tasks);
+    let validation_checks = validation_checks_from_tasks(source, &tasks);
+    let path_policy = path_policy_from_tasks(source, &tasks);
 
     let mission = json!({
         "schema": "better-droid.mission.v1",
@@ -1082,16 +1104,12 @@ fn build_artifacts(source: &SourceSnapshot, lint: &LintState) -> BTreeMap<&'stat
         "source_digests": source_digests,
         "artifact_digests": {},
         "objective": objective,
-        "done_definition": ["lint rejects mission-incomplete source", "compile emits canonical JSON packet set", "deterministic digest checks pass"],
-        "scope_in": ["better-droid lint", "better-droid compile", "canonical JSON artifacts"],
-        "scope_out": ["Covey import", "live claims", "reviews", "apply queue", "settlement"],
-        "affected_capabilities": ["better-droid-lint-compile-first"],
-        "risk_level": "medium",
-        "operator_approval": {
-            "required": true,
-            "status": "pending",
-            "reason": "compiler output can gate future autonomous work"
-        },
+        "done_definition": done_definition,
+        "scope_in": scope_in,
+        "scope_out": scope_out,
+        "affected_capabilities": affected_capabilities,
+        "risk_level": risk_level,
+        "operator_approval": operator_approval,
         "tasks": tasks,
     });
 
@@ -1104,34 +1122,35 @@ fn build_artifacts(source: &SourceSnapshot, lint: &LintState) -> BTreeMap<&'stat
                 .filter(|task| task.scenario_ids.contains(&scenario.id))
                 .map(|task| task.task_id.clone())
                 .collect::<Vec<_>>();
+            let expected_paths = mapped_task_ids
+                .iter()
+                .filter_map(|task_id| tasks.iter().find(|task| &task.task_id == task_id))
+                .flat_map(|task| task.allowed_write_paths.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let validation_refs = validation_checks
+                .iter()
+                .filter(|check| {
+                    check
+                        .get("scenario_ids")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(scenario.id.as_str())))
+                })
+                .filter_map(|check| check.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>();
             json!({
                 "requirement_id": scenario.requirement_id,
                 "requirement_title": source.requirements.iter().find(|req| req.id == scenario.requirement_id).map(|req| req.title.as_str()).unwrap_or("unknown"),
                 "scenario_id": scenario.id,
                 "scenario_title": scenario.title,
                 "task_ids": mapped_task_ids,
-                "expected_paths": [],
-                "validation_refs": validation_ids,
+                "expected_paths": expected_paths,
+                "validation_refs": validation_refs,
                 "artifact_digest": null,
                 "review_verdict": null,
                 "status": if mapped_task_ids.is_empty() { "planned" } else { "covered" },
                 "deferral_reason": null
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let validation_checks = validation_ids
-        .iter()
-        .map(|id| {
-            json!({
-                "id": id,
-                "phase": "worker",
-                "task_ids": task_ids,
-                "scenario_ids": source.scenarios.iter().map(|scenario| scenario.id.clone()).collect::<Vec<_>>(),
-                "command": format!("cargo test {} --all-targets", id.trim_start_matches("VAL-BDLCF-")),
-                "working_directory": "covey",
-                "expected_exit_code": 0,
-                "evidence_required": ["command", "working_directory", "exit_code", "stdout_stderr", "source_revision"]
             })
         })
         .collect::<Vec<_>>();
@@ -1148,6 +1167,8 @@ fn build_artifacts(source: &SourceSnapshot, lint: &LintState) -> BTreeMap<&'stat
             &validation_checks,
             &review_items,
             &source_digest,
+            &path_policy,
+            &objective,
         ),
     );
     artifacts.insert(
@@ -1166,23 +1187,7 @@ fn build_artifacts(source: &SourceSnapshot, lint: &LintState) -> BTreeMap<&'stat
             "checks": validation_checks
         }),
     );
-    artifacts.insert(
-        "path-policy.json",
-        json!({
-            "schema": "better-droid.path-policy.v1",
-            "change_id": source.change_id,
-            "default_policy": "deny-write-unless-allowed",
-            "allowed_read_paths": ["openspec/changes/**", "openspec/config.yaml", "openspec/schemas/better-droid/**"],
-            "allowed_write_paths": [format!("{}/mission/*.json", source.relative_change_path)],
-            "forbidden_write_paths": CANONICAL_PROTECTED_FORBIDDEN_PATHS,
-            "generated_paths": [format!("{}/mission/*.json", source.relative_change_path)],
-            "task_overrides": [],
-            "reservation_policy": {
-                "required_for_autonomous_mutation": true,
-                "scope_class": "generated-set"
-            }
-        }),
-    );
+    artifacts.insert("path-policy.json", path_policy);
     artifacts.insert(
         "review-rubric.json",
         json!({
@@ -1229,11 +1234,11 @@ fn build_mission_packet(
     validation_checks: &[Value],
     review_items: &[Value],
     source_digest: &str,
+    path_policy: &Value,
+    objective: &str,
 ) -> Value {
     let change_id = source.change_id.as_str();
-    let objective = first_objective(&source.proposal.text);
-    let allowed_paths = mission_packet_allowed_paths(tasks);
-    let prompt = mission_packet_prompt(change_id, &objective, tasks);
+    let prompt = mission_packet_prompt(change_id, objective, tasks);
 
     json!({
         "schema_version": "mission_packet.v1",
@@ -1246,37 +1251,7 @@ fn build_mission_packet(
             "source_revision": "unknown",
             "source_digest": source_digest,
         },
-        "scheduler": {
-            "request_id": change_id,
-            "observed_at": "2026-04-26T00:00:00Z",
-            "identity_refs": {
-                "queue_item_ref": format!("queue/ref:{change_id}"),
-                "review_ref": format!("review/ref:{change_id}"),
-                "artifact_ref": format!("artifact/ref:{change_id}"),
-                "apply_gate_ref": format!("apply-gate/ref:{change_id}"),
-                "selected_attempt": {
-                    "subtask_ref": format!("covey:subtask:{change_id}"),
-                    "claim_ref": format!("covey:claim:{change_id}"),
-                    "fence_seq": 1,
-                    "attempt_id": format!("attempt-{change_id}"),
-                    "snapshot_digest": format!("blake3:snapshot:{change_id}"),
-                    "covey_event_watermark": "covey-event-seq:1",
-                    "evaluator_version": "better-droid:mission-packet",
-                },
-            },
-            "activation_result": {
-                "Ready": {
-                    "classification": "AllowCurrent",
-                    "lineage": {
-                        "artifact_digest": source_digest,
-                        "apply_attempt_id": format!("attempt-{change_id}"),
-                        "landing_token": format!("landing-{change_id}"),
-                        "repo_identity": "repo-main",
-                        "pending_commit_token": null,
-                    }
-                }
-            }
-        },
+        "scheduler": null,
         "runtime": {
             "authority_boundary": {
                 "better_droid_may_schedule_or_settle": false,
@@ -1284,67 +1259,7 @@ fn build_mission_packet(
                 "mutai_rs_evaluates_single_covey_selected_attempt": true,
                 "codex_hooks_enforce_side_effect_boundaries": true
             },
-            "promoted_fleet_identity_contract": {
-                "schema": "mutai.runtime-identity-contract.v1",
-                "required_for": ["promoted_fleet_proof", "landing"],
-                "actor_roles": ["executor", "reviewer", "apply_gate", "closer"],
-                "required_runtime_fields": [
-                    "session_token",
-                    "agent_principal_id",
-                    "agent_instance_id",
-                    "role",
-                    "provider",
-                    "model",
-                    "process_id_or_container_id",
-                    "command_transcript_digest",
-                    "started_at",
-                    "ended_at"
-                ],
-                "required_provider_identity_fields": [
-                    "provider_run_id",
-                    "provider_run_id_issuer"
-                ],
-                "trusted_provider_run_id_issuer_required": true,
-                "forbidden_provider_run_id_issuers": ["mutai-local-proof-runner", "codex-env"],
-                "separation_invariants": [
-                    "executor.agent_principal_id != reviewer.agent_principal_id",
-                    "executor.agent_principal_id != apply_gate.agent_principal_id",
-                    "reviewer.agent_principal_id != apply_gate.agent_principal_id",
-                    "executor.provider_run_id != reviewer.provider_run_id",
-                    "executor.provider_run_id != apply_gate.provider_run_id",
-                    "reviewer.provider_run_id != apply_gate.provider_run_id"
-                ],
-                "covey_binding_fields": [
-                    "queue_id",
-                    "artifact_digest",
-                    "review_id",
-                    "claim_fence_seq",
-                    "apply_verification_seal_digest"
-                ]
-            },
-            "fleet_snapshot": {
-                "observed_at": "2026-04-26T00:00:01Z",
-                "agents": [{
-                    "agent_id": format!("agent-{change_id}"),
-                    "agent_type": "codex:smart",
-                    "state": "Ready",
-                    "in_flight": 0,
-                    "max_in_flight": 1,
-                    "capabilities": ["rust", "better-droid", "mission-runner"],
-                    "retry_after_seconds": null,
-                    "rate_limit": null,
-                }],
-                "global_rate_limit": null,
-            },
-            "intent_available_at": "2026-04-26T00:00:02Z",
-            "executor_worker_id": format!("worker-{change_id}"),
-            "executor_lease_id": format!("lease-{change_id}"),
-            "executor_now": "2026-04-26T00:00:10Z",
-            "executor_lease_until": "2026-04-26T00:00:20Z",
-            "executor_max_attempts": 3,
-            "dispatch_observed_at": "2026-04-26T00:00:12Z",
-            "retry_available_at": "2026-04-26T00:01:00Z",
-            "provider_mode": "FakeDeliver",
+            "dispatch": "external-orchestrator-owned"
         },
         "provider": {
             "provider_id": "better-droid",
@@ -1369,15 +1284,13 @@ fn build_mission_packet(
             "temperature": null,
             "billing_identity_id": null,
         },
-        "path_policy": {
-            "mutation_allowed": false,
-            "allowed_paths": allowed_paths,
-        },
+        "path_policy": path_policy,
         "repoops": null,
         "validation": validation_checks.iter().map(|check| {
             json!({
                 "id": check.get("id").cloned().unwrap_or(Value::Null),
                 "command": check.get("command").cloned().unwrap_or(Value::Null),
+                "working_directory": check.get("working_directory").cloned().unwrap_or(Value::Null),
             })
         }).collect::<Vec<_>>(),
         "review_rubric": review_items.iter().map(|item| {
@@ -1390,31 +1303,6 @@ fn build_mission_packet(
     })
 }
 
-fn mission_packet_allowed_paths(tasks: &[CompiledTask]) -> Vec<String> {
-    let mut paths = BTreeSet::new();
-    for task in tasks {
-        paths.extend(
-            task.allowed_read_paths
-                .iter()
-                .chain(task.allowed_write_paths.iter())
-                .filter(|path| is_repo_path_pattern(path))
-                .cloned(),
-        );
-    }
-    if paths.is_empty() {
-        paths.insert("openspec/changes/**".to_owned());
-    }
-    paths.into_iter().collect()
-}
-
-fn is_repo_path_pattern(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.contains("..")
-        && !path.chars().any(char::is_whitespace)
-        && (path.contains('/') || path.contains('.') || path.contains('*'))
-}
-
 fn mission_packet_prompt(change_id: &str, objective: &str, tasks: &[CompiledTask]) -> String {
     let mut prompt = format!("Execute Better Droid mission {change_id}: {objective}\nTasks:");
     for task in tasks {
@@ -1424,6 +1312,313 @@ fn mission_packet_prompt(change_id: &str, objective: &str, tasks: &[CompiledTask
         ));
     }
     prompt
+}
+
+fn mission_objective(source: &SourceSnapshot, tasks: &[CompiledTask]) -> String {
+    if let Some(objective) = source.proposal.text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("- **Objective:**")
+            .or_else(|| trimmed.strip_prefix("Objective:"))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }) {
+        return objective;
+    }
+
+    if let Some(title) = source.proposal.text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("# Proposal:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("implement {value}"))
+    }) {
+        return title;
+    }
+
+    if let Some(sentence) = section_items(&source.proposal.text, "What Changes")
+        .into_iter()
+        .next()
+        .or_else(|| first_section_sentence(&source.proposal.text, "What Changes"))
+    {
+        return sentence;
+    }
+
+    tasks
+        .iter()
+        .find_map(|task| {
+            if task.purpose.is_empty() {
+                None
+            } else {
+                Some(task.purpose.clone())
+            }
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "compile OpenSpec change {} into mission artifacts",
+                source.change_id
+            )
+        })
+}
+
+fn mission_scope_in(source: &SourceSnapshot, tasks: &[CompiledTask]) -> Vec<String> {
+    let mut items = section_items(&source.proposal.text, "Scope In");
+    if items.is_empty() {
+        items.extend(
+            tasks
+                .iter()
+                .flat_map(|task| task.allowed_write_paths.iter().cloned()),
+        );
+    }
+    dedupe_or_default(items, vec![format!("{}/**", source.relative_change_path)])
+}
+
+fn mission_scope_out(source: &SourceSnapshot, tasks: &[CompiledTask]) -> Vec<String> {
+    let mut items = section_items(&source.proposal.text, "Scope Out");
+    if items.is_empty() {
+        items.extend(
+            tasks
+                .iter()
+                .flat_map(|task| task.forbidden_write_paths.iter().cloned()),
+        );
+    }
+    dedupe_or_default(
+        items,
+        CANONICAL_PROTECTED_FORBIDDEN_PATHS
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect(),
+    )
+}
+
+fn mission_done_definition(source: &SourceSnapshot, tasks: &[CompiledTask]) -> Vec<String> {
+    let mut items = section_items(&source.proposal.text, "Success Criteria");
+    if items.is_empty() {
+        items.extend(
+            tasks
+                .iter()
+                .flat_map(|task| task.acceptance_criteria.iter().cloned()),
+        );
+    }
+    dedupe_or_default(
+        items,
+        vec!["all task validation evidence passes".to_owned()],
+    )
+}
+
+fn mission_affected_capabilities(source: &SourceSnapshot) -> Vec<String> {
+    dedupe_or_default(
+        section_items(&source.proposal.text, "Affected Capabilities"),
+        vec![source.change_id.clone()],
+    )
+}
+
+fn mission_risk_level(source: &SourceSnapshot, tasks: &[CompiledTask]) -> String {
+    let text = format!("{}\n{}", source.proposal.text, source.tasks.text).to_ascii_lowercase();
+    if text.contains("critical") {
+        "critical".to_owned()
+    } else if text.contains("live zellij")
+        || text.contains("operator approval")
+        || tasks
+            .iter()
+            .any(|task| !task.allowed_write_paths.is_empty())
+    {
+        "high".to_owned()
+    } else {
+        "medium".to_owned()
+    }
+}
+
+fn operator_approval_from_source(source: &SourceSnapshot, tasks: &[CompiledTask]) -> Value {
+    let required = source
+        .proposal
+        .text
+        .to_ascii_lowercase()
+        .contains("operator approval")
+        || tasks
+            .iter()
+            .any(|task| !task.allowed_write_paths.is_empty());
+    json!({
+        "required": required,
+        "status": if required { "pending" } else { "not-required" },
+        "reason": if required {
+            "implementation may mutate source, tests, migrations, docs, or optionally exercise live local tooling"
+        } else {
+            "read-only mission projection"
+        }
+    })
+}
+
+fn validation_checks_from_tasks(source: &SourceSnapshot, tasks: &[CompiledTask]) -> Vec<Value> {
+    let mut checks = Vec::new();
+    for task in &source.tasks_parsed {
+        let Some(compiled) = tasks.iter().find(|candidate| candidate.task_id == task.id) else {
+            continue;
+        };
+        let Some(command) = task_field(task, "Command / Action") else {
+            continue;
+        };
+        if is_empty_or_none(command) {
+            continue;
+        }
+        let refs = if compiled.validation_refs.is_empty() {
+            vec![format!(
+                "VAL-{}-{}",
+                source.change_id.to_ascii_uppercase().replace('-', "_"),
+                task.id.replace('.', "_")
+            )]
+        } else {
+            compiled.validation_refs.clone()
+        };
+        for id in refs {
+            checks.push(json!({
+                "id": id,
+                "phase": "worker",
+                "task_ids": [task.id.clone()],
+                "scenario_ids": compiled.scenario_ids,
+                "command": command.trim(),
+                "working_directory": task_field(task, "Working Directory").unwrap_or("."),
+                "expected_exit_code": expected_exit_code(task_field(task, "Expected Exit Code / Observation")),
+                "evidence_required": evidence_required(compiled),
+            }));
+        }
+    }
+
+    if checks.is_empty() {
+        checks.push(json!({
+            "id": "VAL-BDLCF-openspec",
+            "phase": "worker",
+            "task_ids": tasks.iter().map(|task| task.task_id.clone()).collect::<Vec<_>>(),
+            "scenario_ids": source.scenarios.iter().map(|scenario| scenario.id.clone()).collect::<Vec<_>>(),
+            "command": format!("openspec validate {} --strict", source.change_id),
+            "working_directory": ".",
+            "expected_exit_code": 0,
+            "evidence_required": ["command", "working_directory", "exit_code", "stdout_stderr", "source_revision"]
+        }));
+    }
+
+    checks
+}
+
+fn expected_exit_code(value: Option<&str>) -> i32 {
+    value
+        .and_then(|value| {
+            value
+                .split(|ch: char| !ch.is_ascii_digit())
+                .find(|part| !part.is_empty())
+        })
+        .and_then(|digits| digits.parse::<i32>().ok())
+        .unwrap_or(0)
+}
+
+fn evidence_required(task: &CompiledTask) -> Vec<String> {
+    let mut evidence = BTreeSet::from([
+        "command".to_owned(),
+        "working_directory".to_owned(),
+        "exit_code".to_owned(),
+        "stdout_stderr".to_owned(),
+        "source_revision".to_owned(),
+    ]);
+    evidence.extend(task.expected_evidence.iter().cloned());
+    evidence.into_iter().collect()
+}
+
+fn path_policy_from_tasks(source: &SourceSnapshot, tasks: &[CompiledTask]) -> Value {
+    let mut reads = BTreeSet::from([
+        format!("{}/**", source.relative_change_path),
+        "openspec/config.yaml".to_owned(),
+        "openspec/schemas/better-droid/**".to_owned(),
+    ]);
+    let mut writes = BTreeSet::from([format!("{}/mission/*.json", source.relative_change_path)]);
+    let mut forbidden = CANONICAL_PROTECTED_FORBIDDEN_PATHS
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    for task in tasks {
+        reads.extend(task.allowed_read_paths.iter().cloned());
+        writes.extend(task.allowed_write_paths.iter().cloned());
+        forbidden.extend(task.forbidden_write_paths.iter().cloned());
+    }
+
+    let task_overrides = tasks
+        .iter()
+        .map(|task| {
+            json!({
+                "task_id": task.task_id,
+                "allowed_read_paths": task.allowed_read_paths,
+                "allowed_write_paths": task.allowed_write_paths,
+                "forbidden_write_paths": task.forbidden_write_paths,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mutation_allowed = writes
+        .iter()
+        .any(|path| !path.starts_with(&format!("{}/mission/", source.relative_change_path)));
+
+    json!({
+        "schema": "better-droid.path-policy.v1",
+        "change_id": source.change_id,
+        "default_policy": "deny-write-unless-allowed",
+        "allowed_read_paths": reads.into_iter().collect::<Vec<_>>(),
+        "allowed_write_paths": writes.into_iter().collect::<Vec<_>>(),
+        "forbidden_write_paths": forbidden.into_iter().collect::<Vec<_>>(),
+        "generated_paths": [format!("{}/mission/*.json", source.relative_change_path)],
+        "task_overrides": task_overrides,
+        "mutation_allowed": mutation_allowed,
+        "reservation_policy": {
+            "required_for_autonomous_mutation": true,
+            "scope_class": "task-scoped"
+        }
+    })
+}
+
+fn section_items(markdown: &str, heading: &str) -> Vec<String> {
+    let Some(section) = markdown_section(markdown, heading) else {
+        return Vec::new();
+    };
+    section
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- "))
+        .map(|line| line.trim().trim_matches('`').to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn first_section_sentence(markdown: &str, heading: &str) -> Option<String> {
+    markdown_section(markdown, heading).and_then(|section| {
+        section
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('-'))
+            .map(|line| line.split('.').next().unwrap_or(line).trim().to_owned())
+            .filter(|line| !line.is_empty())
+    })
+}
+
+fn markdown_section<'a>(markdown: &'a str, heading: &str) -> Option<&'a str> {
+    let marker = format!("## {heading}");
+    let start = markdown.find(&marker)?;
+    let body_start = markdown[start + marker.len()..]
+        .find('\n')
+        .map(|offset| start + marker.len() + offset + 1)?;
+    let body = &markdown[body_start..];
+    let end = body.find("\n## ").unwrap_or(body.len());
+    Some(&body[..end])
+}
+
+fn dedupe_or_default(items: Vec<String>, default: Vec<String>) -> Vec<String> {
+    let values = items
+        .into_iter()
+        .map(|item| item.trim().trim_matches('`').to_owned())
+        .filter(|item| !item.is_empty())
+        .collect::<BTreeSet<_>>();
+    if values.is_empty() {
+        default
+    } else {
+        values.into_iter().collect()
+    }
 }
 
 fn compiled_tasks(source: &SourceSnapshot, lint: &LintState) -> Vec<CompiledTask> {
@@ -1501,14 +1696,6 @@ fn ids_in_text(text: &str, prefix: &str) -> Vec<String> {
     ids.into_iter().collect()
 }
 
-fn validation_ids(source: &SourceSnapshot) -> Vec<String> {
-    let mut ids = ids_in_text(&source.tasks.text, "VAL-BDLCF-");
-    if ids.is_empty() {
-        ids.push("VAL-BDLCF-openspec".to_owned());
-    }
-    ids
-}
-
 fn review_rubric_items() -> Vec<Value> {
     vec![
         json!({
@@ -1533,22 +1720,6 @@ fn review_rubric_items() -> Vec<Value> {
             "evidence_refs": ["validation.json"]
         }),
     ]
-}
-
-fn first_objective(proposal: &str) -> String {
-    proposal
-        .lines()
-        .find(|line| line.contains("Objective:"))
-        .map(|line| {
-            line.trim()
-                .trim_start_matches("- **Objective:**")
-                .trim()
-                .to_owned()
-        })
-        .filter(|line| !line.is_empty())
-        .unwrap_or_else(|| {
-            "compile Better Droid OpenSpec source into canonical mission JSON".to_owned()
-        })
 }
 
 fn resolve_output_dir(
@@ -1593,7 +1764,7 @@ fn normalize_path_lossy(path: &Path) -> PathBuf {
 fn canonical_json_digest(value: &Value) -> Result<String> {
     let canonical = canonicalize_value(value);
     let bytes = serde_json::to_vec(&canonical)?;
-    Ok(sha256_digest(&bytes))
+    Ok(blake3_digest(&bytes))
 }
 
 fn canonicalize_value(value: &Value) -> Value {
@@ -1616,22 +1787,16 @@ fn canonicalize_value(value: &Value) -> Value {
 }
 
 fn stable_id(prefix: &str, text: &str) -> String {
-    let digest = Sha256::digest(text.as_bytes());
+    let digest = blake3::hash(text.as_bytes());
+    let bytes = digest.as_bytes();
     format!(
         "{prefix}-{:02x}{:02x}{:02x}{:02x}",
-        digest[0], digest[1], digest[2], digest[3]
+        bytes[0], bytes[1], bytes[2], bytes[3]
     )
 }
 
-fn sha256_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
+fn blake3_digest(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 fn normalize_relative_path(path: &Path) -> String {
@@ -1809,7 +1974,7 @@ intro
         SourceFile {
             relative_path: path.into(),
             text: text.into(),
-            digest: sha256_digest(text.as_bytes()),
+            digest: blake3_digest(text.as_bytes()),
         }
     }
 }

@@ -14,6 +14,7 @@ mod error;
 mod model;
 mod ops;
 mod overlap;
+pub mod proof_apply;
 mod queries;
 mod schema;
 mod store;
