@@ -189,8 +189,11 @@ impl TryFrom<RawSession> for Session {
     }
 }
 
+const MISSING_PROVIDER_RUN_ID: &str = "__covey_missing_provider_run_id__";
+const MISSING_PROVIDER_RUN_ID_ISSUER: &str = "__covey_missing_provider_run_id_issuer__";
+
 /// Runtime identity evidence bound to one Covey session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAttestation {
     pub session_token: SessionToken,
     pub agent_principal_id: String,
@@ -198,14 +201,438 @@ pub struct RuntimeAttestation {
     pub role: SessionRole,
     pub provider: ProviderId,
     pub model: ModelId,
-    pub provider_run_id: String,
-    pub provider_run_id_issuer: String,
-    pub process_id: Option<String>,
-    pub container_id: Option<String>,
+    provider_run_identity: ProviderRunIdentity,
+    runtime_identity: RuntimeIdentity,
     pub command_transcript_digest: CommandTranscriptDigest,
     pub started_at: TimestampMs,
     pub ended_at: TimestampMs,
     pub recorded_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeIdentity {
+    Process {
+        process_id: String,
+    },
+    Container {
+        container_id: String,
+    },
+    ProcessAndContainer {
+        process_id: String,
+        container_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderRunIdentity {
+    Observed {
+        provider_run_id: String,
+        provider_run_id_issuer: String,
+    },
+    MissingLegacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawRuntimeAttestation {
+    session_token: SessionToken,
+    agent_principal_id: String,
+    agent_instance_id: String,
+    role: SessionRole,
+    provider: ProviderId,
+    model: ModelId,
+    provider_run_id: String,
+    provider_run_id_issuer: String,
+    process_id: Option<String>,
+    container_id: Option<String>,
+    command_transcript_digest: CommandTranscriptDigest,
+    started_at: TimestampMs,
+    ended_at: TimestampMs,
+    recorded_at: TimestampMs,
+}
+
+impl RuntimeAttestation {
+    /// Builds one runtime attestation from the flat DB/API shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_parts(
+        session_token: SessionToken,
+        agent_principal_id: impl Into<String>,
+        agent_instance_id: impl Into<String>,
+        role: SessionRole,
+        provider: ProviderId,
+        model: ModelId,
+        provider_run_id: impl Into<String>,
+        provider_run_id_issuer: impl Into<String>,
+        process_id: Option<String>,
+        container_id: Option<String>,
+        command_transcript_digest: CommandTranscriptDigest,
+        started_at: TimestampMs,
+        ended_at: TimestampMs,
+        recorded_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let provider_run_identity =
+            ProviderRunIdentity::from_parts(provider_run_id.into(), provider_run_id_issuer.into())?;
+        let runtime_identity = RuntimeIdentity::from_parts(process_id, container_id)?;
+        if ended_at < started_at {
+            return Err("ended_at must be greater than or equal to started_at".to_owned());
+        }
+        Ok(Self {
+            session_token,
+            agent_principal_id: agent_principal_id.into(),
+            agent_instance_id: agent_instance_id.into(),
+            role,
+            provider,
+            model,
+            provider_run_identity,
+            runtime_identity,
+            command_transcript_digest,
+            started_at,
+            ended_at,
+            recorded_at,
+        })
+    }
+
+    /// Returns the observed provider run id when this row is not a legacy placeholder.
+    #[must_use]
+    pub fn provider_run_id(&self) -> Option<&str> {
+        self.provider_run_identity.provider_run_id()
+    }
+
+    /// Returns the observed provider run issuer when this row is not a legacy placeholder.
+    #[must_use]
+    pub fn provider_run_id_issuer(&self) -> Option<&str> {
+        self.provider_run_identity.provider_run_id_issuer()
+    }
+
+    /// Returns true for old migrated rows that predate provider run identity.
+    #[must_use]
+    pub const fn provider_run_identity_missing(&self) -> bool {
+        matches!(
+            self.provider_run_identity,
+            ProviderRunIdentity::MissingLegacy
+        )
+    }
+
+    /// Returns the observed process id, when present.
+    #[must_use]
+    pub fn process_id(&self) -> Option<&str> {
+        self.runtime_identity.process_id()
+    }
+
+    /// Returns the observed container id, when present.
+    #[must_use]
+    pub fn container_id(&self) -> Option<&str> {
+        self.runtime_identity.container_id()
+    }
+
+    /// Returns the runtime identity tuple used for actor separation checks.
+    #[must_use]
+    pub fn runtime_ref(&self) -> (Option<&str>, Option<&str>) {
+        (self.process_id(), self.container_id())
+    }
+
+    /// Returns the provider run identity tuple used for actor separation checks.
+    #[must_use]
+    pub fn provider_run_ref(&self) -> Option<(&str, &str)> {
+        self.provider_run_identity.provider_run_ref()
+    }
+}
+
+impl RuntimeIdentity {
+    fn from_parts(
+        process_id: Option<String>,
+        container_id: Option<String>,
+    ) -> Result<Self, String> {
+        let process_id = normalize_optional(process_id, "process_id")?;
+        let container_id = normalize_optional(container_id, "container_id")?;
+        match (process_id, container_id) {
+            (Some(process_id), Some(container_id)) => Ok(Self::ProcessAndContainer {
+                process_id,
+                container_id,
+            }),
+            (Some(process_id), None) => Ok(Self::Process { process_id }),
+            (None, Some(container_id)) => Ok(Self::Container { container_id }),
+            (None, None) => Err("process_id or container_id is required".to_owned()),
+        }
+    }
+
+    fn process_id(&self) -> Option<&str> {
+        match self {
+            Self::Process { process_id } | Self::ProcessAndContainer { process_id, .. } => {
+                Some(process_id)
+            }
+            Self::Container { .. } => None,
+        }
+    }
+
+    fn container_id(&self) -> Option<&str> {
+        match self {
+            Self::Container { container_id } | Self::ProcessAndContainer { container_id, .. } => {
+                Some(container_id)
+            }
+            Self::Process { .. } => None,
+        }
+    }
+}
+
+impl ProviderRunIdentity {
+    fn from_parts(provider_run_id: String, provider_run_id_issuer: String) -> Result<Self, String> {
+        let provider_run_id = normalize_required(provider_run_id, "provider_run_id")?;
+        let provider_run_id_issuer =
+            normalize_required(provider_run_id_issuer, "provider_run_id_issuer")?;
+        match (
+            provider_run_id.as_str() == MISSING_PROVIDER_RUN_ID,
+            provider_run_id_issuer.as_str() == MISSING_PROVIDER_RUN_ID_ISSUER,
+        ) {
+            (true, true) => Ok(Self::MissingLegacy),
+            (false, false) => Ok(Self::Observed {
+                provider_run_id,
+                provider_run_id_issuer,
+            }),
+            _ => Err("provider run identity must include both id and issuer".to_owned()),
+        }
+    }
+
+    fn provider_run_id(&self) -> Option<&str> {
+        match self {
+            Self::Observed {
+                provider_run_id, ..
+            } => Some(provider_run_id),
+            Self::MissingLegacy => None,
+        }
+    }
+
+    fn provider_run_id_issuer(&self) -> Option<&str> {
+        match self {
+            Self::Observed {
+                provider_run_id_issuer,
+                ..
+            } => Some(provider_run_id_issuer),
+            Self::MissingLegacy => None,
+        }
+    }
+
+    fn provider_run_ref(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Observed {
+                provider_run_id,
+                provider_run_id_issuer,
+            } => Some((provider_run_id_issuer, provider_run_id)),
+            Self::MissingLegacy => None,
+        }
+    }
+}
+
+impl Serialize for RuntimeAttestation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawRuntimeAttestation::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeAttestation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawRuntimeAttestation::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<&RuntimeAttestation> for RawRuntimeAttestation {
+    fn from(attestation: &RuntimeAttestation) -> Self {
+        Self {
+            session_token: attestation.session_token.clone(),
+            agent_principal_id: attestation.agent_principal_id.clone(),
+            agent_instance_id: attestation.agent_instance_id.clone(),
+            role: attestation.role,
+            provider: attestation.provider.clone(),
+            model: attestation.model.clone(),
+            provider_run_id: attestation
+                .provider_run_id()
+                .unwrap_or(MISSING_PROVIDER_RUN_ID)
+                .to_owned(),
+            provider_run_id_issuer: attestation
+                .provider_run_id_issuer()
+                .unwrap_or(MISSING_PROVIDER_RUN_ID_ISSUER)
+                .to_owned(),
+            process_id: attestation.process_id().map(ToOwned::to_owned),
+            container_id: attestation.container_id().map(ToOwned::to_owned),
+            command_transcript_digest: attestation.command_transcript_digest.clone(),
+            started_at: attestation.started_at,
+            ended_at: attestation.ended_at,
+            recorded_at: attestation.recorded_at,
+        }
+    }
+}
+
+impl TryFrom<RawRuntimeAttestation> for RuntimeAttestation {
+    type Error = String;
+
+    fn try_from(raw: RawRuntimeAttestation) -> Result<Self, Self::Error> {
+        Self::try_from_parts(
+            raw.session_token,
+            raw.agent_principal_id,
+            raw.agent_instance_id,
+            raw.role,
+            raw.provider,
+            raw.model,
+            raw.provider_run_id,
+            raw.provider_run_id_issuer,
+            raw.process_id,
+            raw.container_id,
+            raw.command_transcript_digest,
+            raw.started_at,
+            raw.ended_at,
+            raw.recorded_at,
+        )
+    }
+}
+
+fn normalize_optional(value: Option<String>, field: &str) -> Result<Option<String>, String> {
+    value
+        .map(|value| normalize_required(value, field))
+        .transpose()
+}
+
+fn normalize_required(value: String, field: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err(format!("{field} must not be empty"))
+    } else {
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod runtime_attestation_tests {
+    use super::*;
+
+    fn valid_runtime_attestation() -> RuntimeAttestation {
+        RuntimeAttestation::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "agent-1",
+            "instance-1",
+            SessionRole::Executor,
+            ProviderId::parse("provider-1").expect("valid provider"),
+            ModelId::parse("model-1").expect("valid model"),
+            "provider-run-1",
+            "provider-issuer-1",
+            Some("1234".to_owned()),
+            None,
+            CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(11).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        )
+        .expect("valid runtime attestation")
+    }
+
+    #[test]
+    fn runtime_attestation_serializes_flat_storage_shape() {
+        let attestation = valid_runtime_attestation();
+        let value = serde_json::to_value(&attestation).expect("serialize runtime attestation");
+
+        assert_eq!(value["provider_run_id"], "provider-run-1");
+        assert_eq!(value["provider_run_id_issuer"], "provider-issuer-1");
+        assert_eq!(value["process_id"], "1234");
+        assert_eq!(value["container_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn runtime_attestation_rejects_missing_runtime_identity() {
+        let err = RuntimeAttestation::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "agent-1",
+            "instance-1",
+            SessionRole::Executor,
+            ProviderId::parse("provider-1").expect("valid provider"),
+            ModelId::parse("model-1").expect("valid model"),
+            "provider-run-1",
+            "provider-issuer-1",
+            None,
+            None,
+            CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(11).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        )
+        .expect_err("runtime identity should be required");
+
+        assert_eq!(err, "process_id or container_id is required");
+    }
+
+    #[test]
+    fn runtime_attestation_rejects_partial_legacy_provider_run_identity() {
+        let err = RuntimeAttestation::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "agent-1",
+            "instance-1",
+            SessionRole::Executor,
+            ProviderId::parse("provider-1").expect("valid provider"),
+            ModelId::parse("model-1").expect("valid model"),
+            MISSING_PROVIDER_RUN_ID,
+            "provider-issuer-1",
+            Some("1234".to_owned()),
+            None,
+            CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(11).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        )
+        .expect_err("partial provider run identity should be rejected");
+
+        assert_eq!(err, "provider run identity must include both id and issuer");
+    }
+
+    #[test]
+    fn runtime_attestation_rejects_ended_before_started() {
+        let err = RuntimeAttestation::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "agent-1",
+            "instance-1",
+            SessionRole::Executor,
+            ProviderId::parse("provider-1").expect("valid provider"),
+            ModelId::parse("model-1").expect("valid model"),
+            "provider-run-1",
+            "provider-issuer-1",
+            Some("1234".to_owned()),
+            None,
+            CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+            TimestampMs::parse(11).expect("valid started_at"),
+            TimestampMs::parse(10).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        )
+        .expect_err("runtime attestation time range should be ordered");
+
+        assert_eq!(err, "ended_at must be greater than or equal to started_at");
+    }
+
+    #[test]
+    fn runtime_attestation_models_legacy_missing_provider_run_identity_explicitly() {
+        let attestation = RuntimeAttestation::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "agent-1",
+            "instance-1",
+            SessionRole::Executor,
+            ProviderId::parse("provider-1").expect("valid provider"),
+            ModelId::parse("model-1").expect("valid model"),
+            MISSING_PROVIDER_RUN_ID,
+            MISSING_PROVIDER_RUN_ID_ISSUER,
+            Some("1234".to_owned()),
+            None,
+            CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(11).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        )
+        .expect("legacy provider run placeholders remain explicit");
+
+        assert!(attestation.provider_run_identity_missing());
+        assert_eq!(attestation.provider_run_ref(), None);
+    }
 }
 
 /// Persisted meta-task row.

@@ -109,50 +109,52 @@ impl Covey {
                     let session = require_active_session(tx, &req.session_token)?;
                     let session_token = session.session_token.clone();
                     validate_runtime_attestation_req(&req, &session_token)?;
-                    let attestation =
-                        RuntimeAttestation {
-                            session_token: session.session_token.clone(),
-                            agent_principal_id: session.agent_principal_id.clone(),
-                            agent_instance_id: session.agent_instance_id.clone(),
-                            role: session.role,
-                            provider: ProviderId::parse(req.provider.clone()).map_err(|err| {
-                                CoveyError::InvalidRuntimeAttestation {
-                                    session_token: session_token.clone(),
-                                    reason: err.to_string(),
-                                }
-                            })?,
-                            model: ModelId::parse(req.model.clone()).map_err(|err| {
-                                CoveyError::InvalidRuntimeAttestation {
-                                    session_token: session_token.clone(),
-                                    reason: err.to_string(),
-                                }
-                            })?,
-                            provider_run_id: req.provider_run_id.clone(),
-                            provider_run_id_issuer: req.provider_run_id_issuer.clone(),
-                            process_id: req.process_id.clone(),
-                            container_id: req.container_id.clone(),
-                            command_transcript_digest: CommandTranscriptDigest::parse(
-                                req.command_transcript_digest.clone(),
-                            )
+                    let attestation = RuntimeAttestation::try_from_parts(
+                        session.session_token.clone(),
+                        session.agent_principal_id.clone(),
+                        session.agent_instance_id.clone(),
+                        session.role,
+                        ProviderId::parse(req.provider.clone()).map_err(|err| {
+                            CoveyError::InvalidRuntimeAttestation {
+                                session_token: session_token.clone(),
+                                reason: err.to_string(),
+                            }
+                        })?,
+                        ModelId::parse(req.model.clone()).map_err(|err| {
+                            CoveyError::InvalidRuntimeAttestation {
+                                session_token: session_token.clone(),
+                                reason: err.to_string(),
+                            }
+                        })?,
+                        req.provider_run_id.clone(),
+                        req.provider_run_id_issuer.clone(),
+                        req.process_id.clone(),
+                        req.container_id.clone(),
+                        CommandTranscriptDigest::parse(req.command_transcript_digest.clone())
                             .map_err(|err| CoveyError::InvalidRuntimeAttestation {
                                 session_token: session_token.clone(),
                                 reason: err.to_string(),
                             })?,
-                            started_at: TimestampMs::parse(req.started_at).map_err(|err| {
-                                CoveyError::InvalidRuntimeAttestation {
-                                    session_token: session_token.clone(),
-                                    reason: err.to_string(),
-                                }
-                            })?,
-                            ended_at: TimestampMs::parse(req.ended_at).map_err(|err| {
-                                CoveyError::InvalidRuntimeAttestation {
-                                    session_token: session_token.clone(),
-                                    reason: err.to_string(),
-                                }
-                            })?,
-                            recorded_at: TimestampMs::parse(now)
-                                .expect("wall clock timestamps are non-negative"),
-                        };
+                        TimestampMs::parse(req.started_at).map_err(|err| {
+                            CoveyError::InvalidRuntimeAttestation {
+                                session_token: session_token.clone(),
+                                reason: err.to_string(),
+                            }
+                        })?,
+                        TimestampMs::parse(req.ended_at).map_err(|err| {
+                            CoveyError::InvalidRuntimeAttestation {
+                                session_token: session_token.clone(),
+                                reason: err.to_string(),
+                            }
+                        })?,
+                        TimestampMs::parse(now).expect("wall clock timestamps are non-negative"),
+                    )
+                    .map_err(|reason| {
+                        CoveyError::InvalidRuntimeAttestation {
+                            session_token: session_token.clone(),
+                            reason,
+                        }
+                    })?;
                     tx.execute(
                         r#"
                         INSERT INTO runtime_attestations (
@@ -169,10 +171,14 @@ impl Covey {
                             attestation.role.to_string(),
                             attestation.provider.as_str(),
                             attestation.model.as_str(),
-                            attestation.provider_run_id.as_str(),
-                            attestation.provider_run_id_issuer.as_str(),
-                            attestation.process_id.as_deref(),
-                            attestation.container_id.as_deref(),
+                            attestation
+                                .provider_run_id()
+                                .expect("new attestations include provider run id"),
+                            attestation
+                                .provider_run_id_issuer()
+                                .expect("new attestations include provider run issuer"),
+                            attestation.process_id(),
+                            attestation.container_id(),
                             attestation.command_transcript_digest.as_str(),
                             attestation.started_at,
                             attestation.ended_at,

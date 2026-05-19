@@ -880,17 +880,11 @@ fn require_runtime_actor_separation(
 }
 
 fn runtime_ref(attestation: &RuntimeAttestation) -> (Option<&str>, Option<&str>) {
-    (
-        attestation.process_id.as_deref(),
-        attestation.container_id.as_deref(),
-    )
+    attestation.runtime_ref()
 }
 
-fn provider_run_ref(attestation: &RuntimeAttestation) -> (&str, &str) {
-    (
-        attestation.provider_run_id_issuer.as_str(),
-        attestation.provider_run_id.as_str(),
-    )
+fn provider_run_ref(attestation: &RuntimeAttestation) -> Option<(&str, &str)> {
+    attestation.provider_run_ref()
 }
 
 fn require_recorded_apply_verification(
