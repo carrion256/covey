@@ -137,7 +137,7 @@ impl From<CoveyError> for ReportableError {
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, StaleFenceToken, SubtaskAlreadyClaimed, SubtaskNotFound,
-            UnknownArtifactDigest, WrongRole,
+            TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match error {
@@ -164,7 +164,8 @@ impl From<CoveyError> for ReportableError {
             | InvalidIdempotencyKey { .. }
             | InvalidSourceSchema { .. }
             | InvalidImportDestination { .. }
-            | InvalidImportRow { .. } => Self {
+            | InvalidImportRow { .. }
+            | TypeValidationError(_) => Self {
                 exit_code: 2,
                 code: "invalid_args",
                 message: error.to_string(),

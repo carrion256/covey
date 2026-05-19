@@ -41,7 +41,7 @@ impl Covey {
                 "register_session",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     ensure_no_other_active_session(tx, &req.agent_principal_id)?;
                     let session_token = crate::model::make_id("session");
@@ -104,10 +104,11 @@ impl Covey {
                 "record_runtime_attestation",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
-                    validate_runtime_attestation_req(&req)?;
+                    let session_token = session.session_token.clone();
+                    validate_runtime_attestation_req(&req, &session_token)?;
                     let attestation =
                         RuntimeAttestation {
                             session_token: session.session_token.clone(),
@@ -116,13 +117,13 @@ impl Covey {
                             role: session.role,
                             provider: ProviderId::parse(req.provider.clone()).map_err(|err| {
                                 CoveyError::InvalidRuntimeAttestation {
-                                    session_token: req.session_token.clone(),
+                                    session_token: session_token.clone(),
                                     reason: err.to_string(),
                                 }
                             })?,
                             model: ModelId::parse(req.model.clone()).map_err(|err| {
                                 CoveyError::InvalidRuntimeAttestation {
-                                    session_token: req.session_token.clone(),
+                                    session_token: session_token.clone(),
                                     reason: err.to_string(),
                                 }
                             })?,
@@ -134,18 +135,18 @@ impl Covey {
                                 req.command_transcript_digest.clone(),
                             )
                             .map_err(|err| CoveyError::InvalidRuntimeAttestation {
-                                session_token: req.session_token.clone(),
+                                session_token: session_token.clone(),
                                 reason: err.to_string(),
                             })?,
                             started_at: TimestampMs::parse(req.started_at).map_err(|err| {
                                 CoveyError::InvalidRuntimeAttestation {
-                                    session_token: req.session_token.clone(),
+                                    session_token: session_token.clone(),
                                     reason: err.to_string(),
                                 }
                             })?,
                             ended_at: TimestampMs::parse(req.ended_at).map_err(|err| {
                                 CoveyError::InvalidRuntimeAttestation {
-                                    session_token: req.session_token.clone(),
+                                    session_token: session_token.clone(),
                                     reason: err.to_string(),
                                 }
                             })?,
@@ -212,14 +213,14 @@ impl Covey {
                 "heartbeat",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_session(tx, &req.session_token)?;
                     ensure_transition(
-                        session.state,
+                        session.state(),
                         SessionState::Active,
                         ObjectType::Session,
-                        session.state == SessionState::Active,
+                        session.state() == SessionState::Active,
                     )?;
                     tx.execute(
                         "UPDATE sessions SET last_heartbeat_at = ?2, last_heartbeat_tick = ?3, updated_at = ?2 WHERE session_token = ?1",
@@ -254,17 +255,17 @@ impl Covey {
                 "exit_session",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_session(tx, &req.session_token)?;
                     ensure_transition(
-                        session.state,
+                        session.state(),
                         SessionState::Exited,
                         ObjectType::Session,
-                        matches!(session.state, SessionState::Active | SessionState::Stale),
+                        matches!(session.state(), SessionState::Active | SessionState::Stale),
                     )?;
                     let updated = tx.execute(
-                        "UPDATE sessions SET state = ?2, updated_at = ?3 WHERE session_token = ?1 AND state IN (?4, ?5)",
+                        "UPDATE sessions SET state = ?2, active_subtask_id = NULL, updated_at = ?3 WHERE session_token = ?1 AND state IN (?4, ?5)",
                         params![
                             req.session_token,
                             SessionState::Exited.to_string(),
@@ -275,7 +276,7 @@ impl Covey {
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: session.state.into(),
+                            from: session.state().into(),
                             to: SessionState::Exited.into(),
                             object: ObjectType::Session,
                         });
@@ -309,8 +310,7 @@ impl Covey {
         let result = self.with_read_tx(|tx| {
             let session = load_session_tx(tx, session_token)?;
             let active_subtask = session
-                .active_subtask_id
-                .as_deref()
+                .active_subtask_id()
                 .map(|subtask_id| load_subtask_tx(tx, subtask_id))
                 .transpose()?
                 .map(crate::model::SubtaskView::try_from)
@@ -328,7 +328,10 @@ impl Covey {
     }
 }
 
-fn validate_runtime_attestation_req(req: &RecordRuntimeAttestationReq) -> Result<()> {
+fn validate_runtime_attestation_req(
+    req: &RecordRuntimeAttestationReq,
+    session_token: &crate::model::SessionToken,
+) -> Result<()> {
     ensure_length("provider", &req.provider, MAX_RUNTIME_FIELD_LEN)?;
     ensure_length("model", &req.model, MAX_RUNTIME_FIELD_LEN)?;
     ensure_length(
@@ -346,36 +349,36 @@ fn validate_runtime_attestation_req(req: &RecordRuntimeAttestationReq) -> Result
         &req.command_transcript_digest,
         MAX_RUNTIME_FIELD_LEN,
     )?;
-    ensure_non_empty("provider", &req.provider, &req.session_token)?;
-    ensure_non_empty("model", &req.model, &req.session_token)?;
-    ensure_non_empty("provider_run_id", &req.provider_run_id, &req.session_token)?;
+    ensure_non_empty("provider", &req.provider, session_token)?;
+    ensure_non_empty("model", &req.model, session_token)?;
+    ensure_non_empty("provider_run_id", &req.provider_run_id, session_token)?;
     ensure_non_empty(
         "provider_run_id_issuer",
         &req.provider_run_id_issuer,
-        &req.session_token,
+        session_token,
     )?;
     ensure_non_empty(
         "command_transcript_digest",
         &req.command_transcript_digest,
-        &req.session_token,
+        session_token,
     )?;
     if let Some(process_id) = req.process_id.as_deref() {
         ensure_length("process_id", process_id, MAX_RUNTIME_FIELD_LEN)?;
-        ensure_non_empty("process_id", process_id, &req.session_token)?;
+        ensure_non_empty("process_id", process_id, session_token)?;
     }
     if let Some(container_id) = req.container_id.as_deref() {
         ensure_length("container_id", container_id, MAX_RUNTIME_FIELD_LEN)?;
-        ensure_non_empty("container_id", container_id, &req.session_token)?;
+        ensure_non_empty("container_id", container_id, session_token)?;
     }
     if req.process_id.is_none() && req.container_id.is_none() {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: req.session_token.clone(),
+            session_token: session_token.clone(),
             reason: "process_id or container_id is required".to_owned(),
         });
     }
     if req.ended_at < req.started_at {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: req.session_token.clone(),
+            session_token: session_token.clone(),
             reason: "ended_at must be greater than or equal to started_at".to_owned(),
         });
     }

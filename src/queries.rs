@@ -107,7 +107,7 @@ pub(crate) fn load_runtime_attestation_tx(
             deserialize_row::<RuntimeAttestation>,
         ),
         CoveyError::RuntimeAttestationMissing {
-            session_token: session_token.to_owned(),
+            session_token: SessionToken::parse(session_token)?,
         },
     )
 }
@@ -341,17 +341,18 @@ fn map_reservation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reservation> {
     let generated = row
         .get::<_, Option<String>>(4)?
         .unwrap_or_else(|| "[]".to_owned());
-    Ok(Reservation {
-        reservation_id: row.get(0)?,
-        owner_subtask_id: row.get(1)?,
-        scope_class: parse_enum(row.get::<_, String>(2)?)?,
-        scope_key: row.get(3)?,
-        generated_members: parse_generated_members(&generated).map_err(to_sql_err)?,
-        lease_deadline: row.get(5)?,
-        state: parse_enum(row.get::<_, String>(6)?)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-    })
+    Reservation::try_from_parts(
+        row.get(0)?,
+        row.get(1)?,
+        parse_enum(row.get::<_, String>(2)?)?,
+        row.get::<_, String>(3)?,
+        parse_generated_members(&generated).map_err(to_sql_err)?,
+        row.get(5)?,
+        parse_enum(row.get::<_, String>(6)?)?,
+        row.get(7)?,
+        row.get(8)?,
+    )
+    .map_err(to_sql_err)
 }
 
 fn map_import_provenance(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenSpecImportProvenance> {

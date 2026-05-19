@@ -140,8 +140,8 @@ pub(crate) fn record_reservation_overlap_conflicts(
             overlapping_owner_subtask_id: overlap.owner_subtask_id.to_string(),
             scope_class: req.scope_class,
             scope_key: req.scope_key.clone(),
-            overlapping_scope_class: overlap.scope_class,
-            overlapping_scope_key: overlap.scope_key.clone(),
+            overlapping_scope_class: overlap.scope_class(),
+            overlapping_scope_key: overlap.scope_key().to_owned(),
         };
         let (left, right) = ordered_pair(reservation_id, &overlap.reservation_id);
         let conflict_id = format!("conflict_reservation_overlap_{left}_{right}");
@@ -352,18 +352,18 @@ fn load_reservations_by_ids<E: ReservationExecutor>(
 }
 
 fn map_reservation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reservation> {
-    Ok(Reservation {
-        reservation_id: row.get(0)?,
-        owner_subtask_id: row.get(1)?,
-        scope_class: row.get::<_, String>(2)?.parse().map_err(to_sql_err)?,
-        scope_key: row.get(3)?,
-        generated_members: parse_generated_members(&row.get::<_, String>(4)?)
-            .map_err(to_sql_err)?,
-        lease_deadline: row.get(5)?,
-        state: row.get::<_, String>(6)?.parse().map_err(to_sql_err)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-    })
+    Reservation::try_from_parts(
+        row.get(0)?,
+        row.get(1)?,
+        row.get::<_, String>(2)?.parse().map_err(to_sql_err)?,
+        row.get::<_, String>(3)?,
+        parse_generated_members(&row.get::<_, String>(4)?).map_err(to_sql_err)?,
+        row.get(5)?,
+        row.get::<_, String>(6)?.parse().map_err(to_sql_err)?,
+        row.get(7)?,
+        row.get(8)?,
+    )
+    .map_err(to_sql_err)
 }
 
 fn collect_id_rows(
@@ -396,7 +396,8 @@ mod tests {
     use crate::{
         CoveyError,
         model::{
-            OverlapCandidate, RequestReservationReq, Reservation, ReservationState, ScopeClass,
+            LeaseDeadlineMs, OverlapCandidate, RequestReservationReq, Reservation,
+            ReservationState, ScopeClass, TimestampMs,
         },
         schema::{apply_migrations, apply_pragmas},
     };
@@ -473,25 +474,41 @@ mod tests {
     #[test]
     fn overlap_queries_cover_scope_classes_and_active_lease_filtering() {
         let conn = overlap_conn();
-        insert_reservation(&conn, "repo", ScopeClass::RepoGlobal, "repo", &[], 10, 1);
+        insert_reservation(
+            &conn,
+            "repo",
+            ScopeClass::RepoGlobal,
+            "repo",
+            &[],
+            lease_deadline(10),
+            timestamp(1),
+        );
         insert_reservation(
             &conn,
             "exact",
             ScopeClass::ExactPath,
             "src/lib.rs",
             &[],
-            10,
-            2,
+            lease_deadline(10),
+            timestamp(2),
         );
-        insert_reservation(&conn, "tree", ScopeClass::Subtree, "src", &[], 10, 3);
+        insert_reservation(
+            &conn,
+            "tree",
+            ScopeClass::Subtree,
+            "src",
+            &[],
+            lease_deadline(10),
+            timestamp(3),
+        );
         insert_reservation(
             &conn,
             "generated",
             ScopeClass::GeneratedSet,
             "generated-key",
             &["src/generated.rs", "docs/generated.md"],
-            10,
-            4,
+            lease_deadline(10),
+            timestamp(4),
         );
         insert_reservation(
             &conn,
@@ -499,8 +516,8 @@ mod tests {
             ScopeClass::ExactPath,
             "src/lib.rs",
             &[],
-            0,
-            5,
+            lease_deadline(0),
+            timestamp(5),
         );
 
         let exact = find_overlapping_reservations_conn(
@@ -556,10 +573,18 @@ mod tests {
             ScopeClass::ExactPath,
             "src/lib.rs",
             &[],
-            10,
-            1,
+            lease_deadline(10),
+            timestamp(1),
         );
-        insert_reservation(&conn, "right", ScopeClass::Subtree, "src", &[], 10, 2);
+        insert_reservation(
+            &conn,
+            "right",
+            ScopeClass::Subtree,
+            "src",
+            &[],
+            lease_deadline(10),
+            timestamp(2),
+        );
         let overlaps = find_overlapping_reservations_conn(
             &conn,
             &OverlapCandidate::new(
@@ -642,8 +667,8 @@ mod tests {
         scope_class: ScopeClass,
         scope_key: &str,
         members: &[&str],
-        lease_deadline: i64,
-        created_at: i64,
+        lease_deadline: LeaseDeadlineMs,
+        created_at: TimestampMs,
     ) {
         conn.execute(
             "INSERT INTO reservations (
@@ -654,9 +679,9 @@ mod tests {
                 reservation_id,
                 scope_class.to_string(),
                 scope_key,
-                lease_deadline,
+                lease_deadline.get(),
                 ReservationState::Active.to_string(),
-                created_at
+                created_at.get()
             ],
         )
         .expect("insert reservation");
@@ -674,5 +699,13 @@ mod tests {
             .iter()
             .map(|reservation| reservation.reservation_id.as_str())
             .collect()
+    }
+
+    fn lease_deadline(value: i64) -> LeaseDeadlineMs {
+        LeaseDeadlineMs::parse(value).expect("test lease deadline must be valid")
+    }
+
+    fn timestamp(value: i64) -> TimestampMs {
+        TimestampMs::parse(value).expect("test timestamp must be valid")
     }
 }

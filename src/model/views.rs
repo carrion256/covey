@@ -1,5 +1,6 @@
 use derive_new::new;
 use serde::{Deserialize, Serialize};
+use strum::Display;
 
 use super::{
     Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask, MetaTaskId,
@@ -126,9 +127,18 @@ pub struct LandingAuthorizationStatus {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct RepoopsAuthorityPolicyFact {
-    pub mode: String,
+    pub mode: RepoopsAuthorityPolicyMode,
     pub phase: u8,
     pub denied_rule_id: Option<String>,
+}
+
+/// Repoops policy enforcement mode exposed to mutAI authority.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum RepoopsAuthorityPolicyMode {
+    Enforce,
 }
 
 /// Claim facts passed through to mutAI repoops preflight.
@@ -136,12 +146,22 @@ pub struct RepoopsAuthorityPolicyFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct RepoopsAuthorityClaimFact {
     pub claim_id: ClaimId,
-    pub status: String,
+    pub status: RepoopsAuthorityClaimStatus,
     pub owner: String,
     pub scope_in: Vec<String>,
     pub scope_out: Vec<String>,
     pub has_required_contract_fields: bool,
     pub active_ownership_token: Option<String>,
+}
+
+/// Claim lifecycle status exposed to mutAI repoops authority.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum RepoopsAuthorityClaimStatus {
+    InProgress,
+    Open,
 }
 
 /// Scope facts derived from Covey lifecycle and reservation state.
@@ -161,7 +181,17 @@ pub struct RepoopsAuthorityLockFact {
     pub path: String,
     pub owner: String,
     pub claim_id: RepoopsClaimRef,
-    pub status: String,
+    pub status: RepoopsAuthorityLockStatus,
+}
+
+/// Path lock ownership status exposed to mutAI repoops authority.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum RepoopsAuthorityLockStatus {
+    Owned,
+    ForeignOwner,
 }
 
 /// Git context facts known to Covey for repoops preflight.

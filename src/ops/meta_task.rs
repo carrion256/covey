@@ -30,7 +30,7 @@ impl Covey {
                 "submit_meta_task",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || submit_meta_task_tx(tx, &req.session_token, &req.prompt_text, &req, now),
             )
         });
@@ -54,7 +54,7 @@ impl Covey {
                 "cancel_meta_task",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("meta_task_id", &req.meta_task_id, MAX_OBJECT_ID_LEN)?;

@@ -9,7 +9,7 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ClaimState, DecideReviewReq, EventType, ObjectType, PublishArtifactReq, ReviewState,
-        ReviewVerdict, SessionRole, SubtaskKind, SubtaskState,
+        ReviewVerdict, SessionRole, SubtaskId, SubtaskKind, SubtaskState,
     },
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
@@ -36,7 +36,7 @@ impl Covey {
                 "publish_artifact",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
                     ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
@@ -51,7 +51,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        req.fence_seq,
+                        crate::model::FenceSeq::parse(req.fence_seq)?,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -164,7 +164,7 @@ impl Covey {
                 "request_review",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
                     require_session_can_request_review(&session)?;
@@ -193,9 +193,10 @@ impl Covey {
                         .clone()
                         .unwrap_or_else(|| crate::model::make_id("subtask"));
                     ensure_length("review_subtask_id", &review_subtask_id, MAX_OBJECT_ID_LEN)?;
+                    let review_subtask_id = SubtaskId::parse(review_subtask_id)?;
                     if subtask_exists(tx, &review_subtask_id)? {
                         return Err(CoveyError::DuplicateSubtaskId {
-                            subtask_id: review_subtask_id,
+                            subtask_id: review_subtask_id.clone(),
                         });
                     }
                     tx.execute(
@@ -207,7 +208,7 @@ impl Covey {
                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)
                         "#,
                         params![
-                            review_subtask_id,
+                            review_subtask_id.as_str(),
                             subtask.meta_task_id,
                             format!("review {}", req.artifact_digest),
                             SubtaskKind::Review.to_string(),
@@ -296,7 +297,7 @@ impl Covey {
                 "decide_review",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = crate::validators::require_role(
                         tx,
@@ -310,7 +311,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        req.fence_seq,
+                        crate::model::FenceSeq::parse(req.fence_seq)?,
                         lease_now,
                     )?;
                     let review = load_review_tx(tx, &req.review_id)?;

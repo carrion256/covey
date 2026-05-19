@@ -1,4 +1,7 @@
-use crate::model::{ClaimState, MetaTaskState, ObjectType, SessionRole, SessionState, StateValue};
+use crate::model::{
+    ArtifactDigest, ClaimId, ClaimState, CoveyTypeValidationError, MetaTaskState, ObjectType,
+    QueueId, SessionRole, SessionState, SessionToken, StateValue, SubtaskId,
+};
 use thiserror::Error;
 
 /// Errors returned by the Covey coordination substrate.
@@ -30,24 +33,27 @@ pub enum CoveyError {
         object: ObjectType,
     },
     #[error("subtask {subtask_id} is already claimed by {held_by}")]
-    SubtaskAlreadyClaimed { subtask_id: String, held_by: String },
+    SubtaskAlreadyClaimed {
+        subtask_id: SubtaskId,
+        held_by: SessionToken,
+    },
     #[error("session already active for principal {agent_principal_id}")]
     SessionAlreadyActive { agent_principal_id: String },
     #[error("session {session_token} is not active; current state is {state}")]
     SessionNotActive {
-        session_token: String,
+        session_token: SessionToken,
         state: SessionState,
     },
     #[error("session {session_token} already has active subtask {active_subtask_id}")]
     SessionAlreadyHasActiveSubtask {
-        session_token: String,
-        active_subtask_id: String,
+        session_token: SessionToken,
+        active_subtask_id: SubtaskId,
     },
     #[error("runtime attestation missing for session {session_token}")]
-    RuntimeAttestationMissing { session_token: String },
+    RuntimeAttestationMissing { session_token: SessionToken },
     #[error("invalid runtime attestation for session {session_token}: {reason}")]
     InvalidRuntimeAttestation {
-        session_token: String,
+        session_token: SessionToken,
         reason: String,
     },
     #[error("invalid session token {session_token}")]
@@ -66,17 +72,20 @@ pub enum CoveyError {
     #[error("fence token mismatch")]
     FenceTokenMismatch,
     #[error("claim {claim_id} is not held; current state is {state}")]
-    ClaimNotHeld { claim_id: String, state: ClaimState },
+    ClaimNotHeld {
+        claim_id: ClaimId,
+        state: ClaimState,
+    },
 
     #[error("session {session_token} does not own the claim; owner is {claim_owner}")]
     NotClaimOwner {
-        session_token: String,
-        claim_owner: String,
+        session_token: SessionToken,
+        claim_owner: SessionToken,
     },
     #[error("session {session_token} does not own the ready-queue claim; owner is {queue_owner}")]
     NotQueueClaimOwner {
-        session_token: String,
-        queue_owner: String,
+        session_token: SessionToken,
+        queue_owner: SessionToken,
     },
     #[error("wrong role: expected one of {expected:?}, actual {actual}")]
     WrongRole {
@@ -87,7 +96,7 @@ pub enum CoveyError {
     #[error("artifact digest collision for {digest}")]
     ArtifactDigestCollision { digest: String },
     #[error("duplicate subtask id {subtask_id}")]
-    DuplicateSubtaskId { subtask_id: String },
+    DuplicateSubtaskId { subtask_id: SubtaskId },
 
     #[error("lease expired for {object_id}")]
     LeaseExpired { object_id: String },
@@ -96,8 +105,8 @@ pub enum CoveyError {
     ReviewKindMismatch,
     #[error("review already open for subtask {subtask_id} and artifact {artifact_digest}")]
     ReviewAlreadyOpen {
-        subtask_id: String,
-        artifact_digest: String,
+        subtask_id: SubtaskId,
+        artifact_digest: ArtifactDigest,
     },
     #[error(
         "review separation of duties violated: reviewer principal {reviewer_principal_id} matches producer principal {producer_principal_id}"
@@ -107,7 +116,7 @@ pub enum CoveyError {
         producer_principal_id: String,
     },
     #[error("apply gate evidence missing for queue item {queue_id}: {reason}")]
-    ApplyGateEvidenceMissing { queue_id: String, reason: String },
+    ApplyGateEvidenceMissing { queue_id: QueueId, reason: String },
     #[error(
         "apply gate separation of duties violated: apply gate principal {apply_gate_principal_id} matches {conflicting_role} principal {conflicting_principal_id}"
     )]
@@ -150,7 +159,7 @@ pub enum CoveyError {
     )]
     ImportDuplicate {
         source_issue_id: String,
-        subtask_id: String,
+        subtask_id: SubtaskId,
     },
 
     #[error(transparent)]
@@ -159,6 +168,8 @@ pub enum CoveyError {
     MigrationError(#[from] rusqlite_migration::Error),
     #[error(transparent)]
     SerializationError(#[from] serde_json::Error),
+    #[error(transparent)]
+    TypeValidationError(#[from] CoveyTypeValidationError),
 }
 
 impl PartialEq for CoveyError {
@@ -176,7 +187,7 @@ impl PartialEq for CoveyError {
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, StaleFenceToken, SubtaskAlreadyClaimed, SubtaskNotFound,
-            UnknownArtifactDigest, WrongRole,
+            TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match (self, other) {
@@ -503,6 +514,7 @@ impl PartialEq for CoveyError {
             (SerializationError(left), SerializationError(right)) => {
                 left.to_string() == right.to_string()
             }
+            (TypeValidationError(left), TypeValidationError(right)) => left == right,
             _ => false,
         }
     }
@@ -517,7 +529,8 @@ pub type Result<T> = std::result::Result<T, CoveyError>;
 mod tests {
     use super::CoveyError;
     use crate::model::{
-        ClaimState, MetaTaskState, ObjectType, SessionRole, SessionState, StateValue, SubtaskState,
+        ArtifactDigest, ClaimId, ClaimState, MetaTaskState, ObjectType, QueueId, SessionRole,
+        SessionState, SessionToken, StateValue, SubtaskId, SubtaskState,
     };
     use rstest::rstest;
 
@@ -540,11 +553,11 @@ mod tests {
     #[test]
     fn partial_eq_distinguishes_structured_error_differences() {
         let left = CoveyError::SessionNotActive {
-            session_token: "session-1".to_owned(),
+            session_token: session_token("session-1"),
             state: SessionState::Exited,
         };
         let right = CoveyError::SessionNotActive {
-            session_token: "session-1".to_owned(),
+            session_token: session_token("session-1"),
             state: SessionState::Stale,
         };
 
@@ -599,9 +612,9 @@ mod tests {
         CoveyError::SessionNotFound
     )]
     #[case::subtask_claimed(
-        CoveyError::SubtaskAlreadyClaimed { subtask_id: "subtask-1".into(), held_by: "session-1".into() },
-        CoveyError::SubtaskAlreadyClaimed { subtask_id: "subtask-1".into(), held_by: "session-1".into() },
-        CoveyError::SubtaskAlreadyClaimed { subtask_id: "subtask-2".into(), held_by: "session-1".into() }
+        CoveyError::SubtaskAlreadyClaimed { subtask_id: subtask_id("subtask-1"), held_by: session_token("session-1") },
+        CoveyError::SubtaskAlreadyClaimed { subtask_id: subtask_id("subtask-1"), held_by: session_token("session-1") },
+        CoveyError::SubtaskAlreadyClaimed { subtask_id: subtask_id("subtask-2"), held_by: session_token("session-1") }
     )]
     #[case::session_already_active(
         CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into() },
@@ -609,9 +622,9 @@ mod tests {
         CoveyError::SessionAlreadyActive { agent_principal_id: "agent-2".into() }
     )]
     #[case::session_has_active_subtask(
-        CoveyError::SessionAlreadyHasActiveSubtask { session_token: "session-1".into(), active_subtask_id: "subtask-1".into() },
-        CoveyError::SessionAlreadyHasActiveSubtask { session_token: "session-1".into(), active_subtask_id: "subtask-1".into() },
-        CoveyError::SessionAlreadyHasActiveSubtask { session_token: "session-1".into(), active_subtask_id: "subtask-2".into() }
+        CoveyError::SessionAlreadyHasActiveSubtask { session_token: session_token("session-1"), active_subtask_id: subtask_id("subtask-1") },
+        CoveyError::SessionAlreadyHasActiveSubtask { session_token: session_token("session-1"), active_subtask_id: subtask_id("subtask-1") },
+        CoveyError::SessionAlreadyHasActiveSubtask { session_token: session_token("session-1"), active_subtask_id: subtask_id("subtask-2") }
     )]
     #[case::invalid_session_token(
         CoveyError::InvalidSessionToken { session_token: "session-1".into() },
@@ -634,19 +647,19 @@ mod tests {
         CoveyError::StaleFenceToken { expected: 3, provided: 1 }
     )]
     #[case::claim_not_held(
-        CoveyError::ClaimNotHeld { claim_id: "claim-1".into(), state: ClaimState::Released },
-        CoveyError::ClaimNotHeld { claim_id: "claim-1".into(), state: ClaimState::Released },
-        CoveyError::ClaimNotHeld { claim_id: "claim-1".into(), state: ClaimState::Expired }
+        CoveyError::ClaimNotHeld { claim_id: claim_id("claim-1"), state: ClaimState::Released },
+        CoveyError::ClaimNotHeld { claim_id: claim_id("claim-1"), state: ClaimState::Released },
+        CoveyError::ClaimNotHeld { claim_id: claim_id("claim-1"), state: ClaimState::Expired }
     )]
     #[case::not_claim_owner(
-        CoveyError::NotClaimOwner { session_token: "session-1".into(), claim_owner: "session-2".into() },
-        CoveyError::NotClaimOwner { session_token: "session-1".into(), claim_owner: "session-2".into() },
-        CoveyError::NotClaimOwner { session_token: "session-1".into(), claim_owner: "session-3".into() }
+        CoveyError::NotClaimOwner { session_token: session_token("session-1"), claim_owner: session_token("session-2") },
+        CoveyError::NotClaimOwner { session_token: session_token("session-1"), claim_owner: session_token("session-2") },
+        CoveyError::NotClaimOwner { session_token: session_token("session-1"), claim_owner: session_token("session-3") }
     )]
     #[case::not_queue_claim_owner(
-        CoveyError::NotQueueClaimOwner { session_token: "session-1".into(), queue_owner: "session-2".into() },
-        CoveyError::NotQueueClaimOwner { session_token: "session-1".into(), queue_owner: "session-2".into() },
-        CoveyError::NotQueueClaimOwner { session_token: "session-1".into(), queue_owner: "session-3".into() }
+        CoveyError::NotQueueClaimOwner { session_token: session_token("session-1"), queue_owner: session_token("session-2") },
+        CoveyError::NotQueueClaimOwner { session_token: session_token("session-1"), queue_owner: session_token("session-2") },
+        CoveyError::NotQueueClaimOwner { session_token: session_token("session-1"), queue_owner: session_token("session-3") }
     )]
     #[case::wrong_role(
         CoveyError::WrongRole { expected: vec![SessionRole::Executor, SessionRole::Reviewer], actual: SessionRole::Orchestrator },
@@ -664,19 +677,24 @@ mod tests {
         CoveyError::UnknownArtifactDigest { digest: "digest-2".into() }
     )]
     #[case::duplicate_subtask_id(
-        CoveyError::DuplicateSubtaskId { subtask_id: "subtask-1".into() },
-        CoveyError::DuplicateSubtaskId { subtask_id: "subtask-1".into() },
-        CoveyError::DuplicateSubtaskId { subtask_id: "subtask-2".into() }
+        CoveyError::DuplicateSubtaskId { subtask_id: subtask_id("subtask-1") },
+        CoveyError::DuplicateSubtaskId { subtask_id: subtask_id("subtask-1") },
+        CoveyError::DuplicateSubtaskId { subtask_id: subtask_id("subtask-2") }
     )]
     #[case::review_already_open(
-        CoveyError::ReviewAlreadyOpen { subtask_id: "subtask-1".into(), artifact_digest: "digest-1".into() },
-        CoveyError::ReviewAlreadyOpen { subtask_id: "subtask-1".into(), artifact_digest: "digest-1".into() },
-        CoveyError::ReviewAlreadyOpen { subtask_id: "subtask-1".into(), artifact_digest: "digest-2".into() }
+        CoveyError::ReviewAlreadyOpen { subtask_id: subtask_id("subtask-1"), artifact_digest: artifact_digest("blake3:digest1") },
+        CoveyError::ReviewAlreadyOpen { subtask_id: subtask_id("subtask-1"), artifact_digest: artifact_digest("blake3:digest1") },
+        CoveyError::ReviewAlreadyOpen { subtask_id: subtask_id("subtask-1"), artifact_digest: artifact_digest("blake3:digest2") }
     )]
     #[case::separation_of_duties(
         CoveyError::SeparationOfDutiesViolation { reviewer_principal_id: "principal-1".into(), producer_principal_id: "principal-1".into() },
         CoveyError::SeparationOfDutiesViolation { reviewer_principal_id: "principal-1".into(), producer_principal_id: "principal-1".into() },
         CoveyError::SeparationOfDutiesViolation { reviewer_principal_id: "principal-1".into(), producer_principal_id: "principal-2".into() }
+    )]
+    #[case::apply_gate_evidence_missing(
+        CoveyError::ApplyGateEvidenceMissing { queue_id: queue_id("queue-1"), reason: "missing verification".into() },
+        CoveyError::ApplyGateEvidenceMissing { queue_id: queue_id("queue-1"), reason: "missing verification".into() },
+        CoveyError::ApplyGateEvidenceMissing { queue_id: queue_id("queue-2"), reason: "missing verification".into() }
     )]
     #[case::meta_task_unavailable(
         CoveyError::MetaTaskUnavailable { meta_task_id: "meta-1".into(), state: MetaTaskState::Cancelled },
@@ -724,9 +742,9 @@ mod tests {
         CoveyError::InvalidImportRow { source_issue_id: "43".into(), reason: "empty title".into() }
     )]
     #[case::import_duplicate(
-        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: "subtask-1".into() },
-        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: "subtask-1".into() },
-        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: "subtask-2".into() }
+        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: subtask_id("subtask-1") },
+        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: subtask_id("subtask-1") },
+        CoveyError::ImportDuplicate { source_issue_id: "42".into(), subtask_id: subtask_id("subtask-2") }
     )]
     fn partial_eq_covers_structured_error_variants(
         #[case] left: CoveyError,
@@ -735,5 +753,25 @@ mod tests {
     ) {
         assert_eq!(left, same);
         assert_ne!(left, different);
+    }
+
+    fn claim_id(value: &str) -> ClaimId {
+        ClaimId::parse(value).expect("test claim id must be valid")
+    }
+
+    fn session_token(value: &str) -> SessionToken {
+        SessionToken::parse(value).expect("test session token must be valid")
+    }
+
+    fn queue_id(value: &str) -> QueueId {
+        QueueId::parse(value).expect("test queue id must be valid")
+    }
+
+    fn subtask_id(value: &str) -> SubtaskId {
+        SubtaskId::parse(value).expect("test subtask id must be valid")
+    }
+
+    fn artifact_digest(value: &str) -> ArtifactDigest {
+        ArtifactDigest::parse(value).expect("test artifact digest must be valid")
     }
 }

@@ -12,6 +12,8 @@ mod types;
 mod views;
 
 pub use imports::*;
+#[allow(unused_imports)]
+pub use records::ReservationScope;
 pub use records::{
     AppliedReadyQueueItem, ApplyVerification, Artifact, CancelledReadyQueueItem, Claim, Conflict,
     DecidedReview, Event, EventPayload, ExpiredCountPayload, InFlightReadyQueueItem,

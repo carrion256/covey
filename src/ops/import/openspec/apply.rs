@@ -4,7 +4,7 @@ use rusqlite::{Transaction, params};
 
 use crate::{
     error::{CoveyError, Result},
-    model::{CreateSubtaskRequest, ImportOpenSpecAction, ObjectType, SubtaskState},
+    model::{CreateSubtaskRequest, ImportOpenSpecAction, ObjectType, SubtaskId, SubtaskState},
     ops::workflow::create_subtask_tx,
 };
 
@@ -108,7 +108,7 @@ pub(super) fn apply_openspec_import_diff_tx(
                 if updated != 1 {
                     return Err(CoveyError::ImportDuplicate {
                         source_issue_id: record.openspec_task_id.clone().unwrap_or_default(),
-                        subtask_id: record.object_id.clone(),
+                        subtask_id: SubtaskId::parse(record.object_id.clone())?,
                     });
                 }
                 upsert_openspec_provenance_tx(tx, &record.provenance, now)?;

@@ -9,10 +9,10 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
-        LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, ObjectType, ReadyQueueClaim,
-        ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, ReviewId,
-        RuntimeAttestation, Session, SessionRole, SessionToken, SubtaskState,
-        SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+        LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, ObjectType, QueueId,
+        ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
+        RecordApplyVerificationReq, ReviewId, RuntimeAttestation, Session, SessionRole,
+        SessionToken, SubtaskState, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
     },
     queries::{
         collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
@@ -41,7 +41,7 @@ impl Covey {
                 "enqueue_for_apply",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
                     require_session_can_enqueue(&session)?;
@@ -193,7 +193,7 @@ impl Covey {
                 "claim_next_ready_queue_item",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
                     ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
@@ -203,7 +203,7 @@ impl Covey {
                             tx,
                             &queue_id,
                             &req.session_token,
-                            req.lease_duration_ms,
+                            crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
                             lease_now,
                             now,
                         )? {
@@ -249,7 +249,7 @@ impl Covey {
                 "mark_in_flight",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
                     ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
@@ -260,7 +260,7 @@ impl Covey {
                         tx,
                         &req.queue_id,
                         &req.session_token,
-                        req.lease_duration_ms,
+                        crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
                         lease_now,
                         now,
                     )?
@@ -302,7 +302,7 @@ impl Covey {
                 "record_apply_verification",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
                     require_runtime_attestation(tx, &session)?;
@@ -315,12 +315,13 @@ impl Covey {
                     ensure_length("seal_digest", &req.seal_digest, MAX_DIGEST_LEN)?;
 
                     let item = load_queue_item_tx(tx, &req.queue_id)?;
+                    let queue_id = QueueId::parse(item.queue_id())?;
                     if item.state() != ReadyQueueState::InFlight
                         || item.artifact_digest() != req.artifact_digest
                         || item.claim_fence_seq() != Some(req.claim_fence_seq)
                     {
                         return Err(CoveyError::ApplyGateEvidenceMissing {
-                            queue_id: req.queue_id.clone(),
+                            queue_id,
                             reason:
                                 "apply verification must target the current in-flight queue fence"
                                     .to_owned(),
@@ -331,7 +332,7 @@ impl Covey {
                         || live_evidence.findings_digest != req.findings_digest
                     {
                         return Err(CoveyError::ApplyGateEvidenceMissing {
-                            queue_id: req.queue_id.clone(),
+                            queue_id,
                             reason: "apply verification does not match the live approved review"
                                 .to_owned(),
                         });
@@ -392,22 +393,25 @@ impl Covey {
                 "mark_applied",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
-                    require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
+                    let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
                     ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
                     let item = load_queue_item_tx(tx, &req.queue_id)?;
                     ensure_ready_queue_transition(item.state(), ReadyQueueState::Applied)?;
                     let queue_owner = item
-                        .claimed_by_session_token().map(ToOwned::to_owned)
+                        .claimed_by_session_token()
+                        .map(crate::model::SessionToken::parse)
+                        .transpose()?
                         .ok_or(CoveyError::IllegalTransition {
                             from: item.state().into(),
                             to: ReadyQueueState::Applied.into(),
                             object: ObjectType::ReadyQueue,
                         })?;
-                    if queue_owner != req.session_token {
+                    let session_token = session.session_token;
+                    if queue_owner != session_token {
                         return Err(CoveyError::NotQueueClaimOwner {
-                            session_token: req.session_token.clone(),
+                            session_token,
                             queue_owner,
                         });
                     }
@@ -448,8 +452,8 @@ impl Covey {
                     let apply_gate_session = load_session_tx(tx, &req.session_token)?;
                     let live_evidence =
                         require_live_apply_gate_evidence(tx, &item, &apply_gate_session)?;
-                    let claim_fence_seq =
-                        parse_landing_value(&req.queue_id, req.claim_fence_seq)?;
+                    let queue_id = QueueId::parse(item.queue_id())?;
+                    let claim_fence_seq = parse_landing_value(&queue_id, req.claim_fence_seq)?;
                     require_recorded_apply_verification(
                         tx,
                         &item,
@@ -525,7 +529,7 @@ impl Covey {
                 "supersede_queue_item",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(
                         tx,
@@ -629,22 +633,23 @@ impl Covey {
             ensure_length("seal_digest", &req.seal_digest, MAX_DIGEST_LEN)?;
 
             let item = load_queue_item_tx(tx, &req.queue_id)?;
+            let queue_id = QueueId::parse(item.queue_id())?;
             if item.state() != ReadyQueueState::Applied {
                 return Err(CoveyError::ApplyGateEvidenceMissing {
-                    queue_id: req.queue_id.clone(),
+                    queue_id,
                     reason: "landing authorization queue item is not applied".to_owned(),
                 });
             }
             if item.artifact_digest() != req.artifact_digest {
                 return Err(CoveyError::ApplyGateEvidenceMissing {
-                    queue_id: req.queue_id.clone(),
+                    queue_id,
                     reason: "landing authorization artifact digest does not match queue item"
                         .to_owned(),
                 });
             }
             if item.claim_fence_seq() != Some(req.claim_fence_seq) {
                 return Err(CoveyError::ApplyGateEvidenceMissing {
-                    queue_id: req.queue_id.clone(),
+                    queue_id,
                     reason: "landing authorization claim fence does not match queue item"
                         .to_owned(),
                 });
@@ -679,21 +684,21 @@ impl Covey {
                 )
                 .optional()?
                 .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
-                    queue_id: req.queue_id.clone(),
+                    queue_id: queue_id.clone(),
                     reason: "accepted apply verifier verdict does not match landing authorization"
                         .to_owned(),
                 })?;
 
             Ok(LandingAuthorizationStatus::new(
                 true,
-                parse_landing_value(&req.queue_id, req.queue_id.clone())?,
-                parse_landing_value(&req.queue_id, req.artifact_digest.clone())?,
-                parse_landing_value(&req.queue_id, req.review_id.clone())?,
-                parse_landing_value(&req.queue_id, req.findings_digest.clone())?,
-                parse_landing_value(&req.queue_id, req.claim_fence_seq)?,
+                parse_landing_value(&queue_id, req.queue_id.clone())?,
+                parse_landing_value(&queue_id, req.artifact_digest.clone())?,
+                parse_landing_value(&queue_id, req.review_id.clone())?,
+                parse_landing_value(&queue_id, req.findings_digest.clone())?,
+                parse_landing_value(&queue_id, req.claim_fence_seq)?,
                 req.verifier,
-                parse_landing_value(&req.queue_id, req.verdict_digest.clone())?,
-                parse_landing_value(&req.queue_id, req.seal_digest.clone())?,
+                parse_landing_value(&queue_id, req.verdict_digest.clone())?,
+                parse_landing_value(&queue_id, req.seal_digest.clone())?,
                 recorded_by_session,
             ))
         });
@@ -708,13 +713,13 @@ impl Covey {
     }
 }
 
-fn parse_landing_value<T, V>(queue_id: &str, value: V) -> Result<T>
+fn parse_landing_value<T, V>(queue_id: &QueueId, value: V) -> Result<T>
 where
     T: TryFrom<V>,
     T::Error: std::fmt::Display,
 {
     T::try_from(value).map_err(|err| CoveyError::ApplyGateEvidenceMissing {
-        queue_id: queue_id.to_owned(),
+        queue_id: queue_id.clone(),
         reason: format!("invalid landing authorization value: {err}"),
     })
 }
@@ -733,6 +738,7 @@ fn require_live_apply_gate_evidence(
     item: &ReadyQueueItem,
     apply_gate_session: &Session,
 ) -> Result<LiveApplyGateEvidence> {
+    let queue_id = QueueId::parse(item.queue_id())?;
     let (
         review_id,
         findings_digest,
@@ -785,21 +791,21 @@ fn require_live_apply_gate_evidence(
         )
         .optional()?
         .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
-            queue_id: item.queue_id().to_owned(),
+            queue_id: queue_id.clone(),
             reason: "approved review with findings digest not found for queued artifact".to_owned(),
         })?;
     let evidence = LiveApplyGateEvidence {
-        review_id: parse_landing_value(item.queue_id(), review_id)?,
-        findings_digest: parse_landing_value(item.queue_id(), findings_digest)?,
-        producer_session_token: parse_landing_value(item.queue_id(), producer_session_token)?,
-        reviewer_session_token: parse_landing_value(item.queue_id(), reviewer_session_token)?,
+        review_id: parse_landing_value(&queue_id, review_id)?,
+        findings_digest: parse_landing_value(&queue_id, findings_digest)?,
+        producer_session_token: parse_landing_value(&queue_id, producer_session_token)?,
+        reviewer_session_token: parse_landing_value(&queue_id, reviewer_session_token)?,
         producer_principal_id,
         reviewer_principal_id,
     };
 
     if evidence.producer_principal_id == evidence.reviewer_principal_id {
         return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id: item.queue_id().to_owned(),
+            queue_id,
             reason: "producer and reviewer principals are not separated".to_owned(),
         });
     }
@@ -823,21 +829,21 @@ fn require_live_apply_gate_evidence(
     let reviewer_attestation = require_runtime_attestation(tx, &reviewer_session)?;
     let apply_gate_attestation = require_runtime_attestation(tx, apply_gate_session)?;
     require_runtime_actor_separation(
-        item.queue_id(),
+        &queue_id,
         "producer",
         &producer_attestation,
         "reviewer",
         &reviewer_attestation,
     )?;
     require_runtime_actor_separation(
-        item.queue_id(),
+        &queue_id,
         "producer",
         &producer_attestation,
         "apply_gate",
         &apply_gate_attestation,
     )?;
     require_runtime_actor_separation(
-        item.queue_id(),
+        &queue_id,
         "reviewer",
         &reviewer_attestation,
         "apply_gate",
@@ -847,7 +853,7 @@ fn require_live_apply_gate_evidence(
 }
 
 fn require_runtime_actor_separation(
-    queue_id: &str,
+    queue_id: &QueueId,
     left_role: &str,
     left: &RuntimeAttestation,
     right_role: &str,
@@ -855,19 +861,19 @@ fn require_runtime_actor_separation(
 ) -> Result<()> {
     if runtime_ref(left) == runtime_ref(right) {
         return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id: queue_id.to_owned(),
+            queue_id: queue_id.clone(),
             reason: format!("{left_role} and {right_role} runtime refs are not separated"),
         });
     }
     if provider_run_ref(left) == provider_run_ref(right) {
         return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id: queue_id.to_owned(),
+            queue_id: queue_id.clone(),
             reason: format!("{left_role} and {right_role} provider run ids are not separated"),
         });
     }
     if left.command_transcript_digest == right.command_transcript_digest {
         return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id: queue_id.to_owned(),
+            queue_id: queue_id.clone(),
             reason: format!("{left_role} and {right_role} transcript digests are not separated"),
         });
     }
@@ -894,6 +900,7 @@ fn require_recorded_apply_verification(
     evidence: &LiveApplyGateEvidence,
     claim_fence_seq: FenceSeq,
 ) -> Result<()> {
+    let queue_id = QueueId::parse(item.queue_id())?;
     let exists = tx
         .query_row(
             r#"
@@ -918,7 +925,7 @@ fn require_recorded_apply_verification(
         .optional()?;
     if exists.is_none() {
         return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id: item.queue_id().to_owned(),
+            queue_id,
             reason:
                 "accepted apply verifier verdict not recorded for queue artifact review and fence"
                     .to_owned(),

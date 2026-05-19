@@ -8,7 +8,7 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         CreateSubtaskRequest, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
-        ImportBdV1SkipReason, bd_import_v1_subtask_id,
+        ImportBdV1SkipReason, SessionToken, bd_import_v1_subtask_id,
     },
     ops::meta_task::submit_meta_task_tx,
     ops::workflow::create_subtask_tx,
@@ -60,7 +60,7 @@ enum SourceIssueEligibility {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ImportBdV1WorkSubtaskReq {
-    session_token: String,
+    session_token: SessionToken,
     meta_task_id: Option<String>,
     prompt_text: Option<String>,
     source_issue_id: String,
@@ -98,7 +98,7 @@ impl Covey {
     ) -> Result<String> {
         let started_at = Instant::now();
         let req = ImportBdV1WorkSubtaskReq {
-            session_token: session_token.to_owned(),
+            session_token: SessionToken::parse(session_token)?,
             meta_task_id: meta_task_id.map(str::to_owned),
             prompt_text: prompt_text.map(str::to_owned),
             source_issue_id: source_issue_id.to_owned(),
@@ -110,18 +110,18 @@ impl Covey {
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
-                session_token,
+                req.session_token.as_str(),
                 "import_bd_v1_work_subtask",
                 idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || import_bd_v1_work_subtask_tx(tx, &req, now),
             )
         });
 
         self.log_operation(
             "import_bd_v1_work_subtask",
-            session_token,
+            req.session_token.as_str(),
             started_at,
             &result,
             |subtask_id| vec![format!("subtask:{subtask_id}")],
@@ -153,7 +153,7 @@ impl Covey {
                 "import_bd_v1",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     let destination_meta_task_id = resolve_import_bd_v1_destination(
@@ -191,26 +191,28 @@ fn import_bd_v1_work_subtask_tx(
     req: &ImportBdV1WorkSubtaskReq,
     now: i64,
 ) -> Result<String> {
-    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
+    require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
     ensure_length("source_issue_id", &req.source_issue_id, MAX_OBJECT_ID_LEN)?;
     ensure_length("title", &req.title, MAX_TITLE_LEN)?;
     let destination =
         parse_import_bd_v1_destination(req.meta_task_id.as_deref(), req.prompt_text.as_deref())?;
     let destination_meta_task_id =
-        resolve_import_bd_v1_destination(tx, &req.session_token, destination, req, now)?;
+        resolve_import_bd_v1_destination(tx, req.session_token.as_str(), destination, req, now)?;
     let subtask_id = bd_import_v1_subtask_id(&req.source_issue_id);
 
     if subtask_exists(tx, &subtask_id)? {
         let existing = load_subtask_tx(tx, &subtask_id)?;
         if existing.meta_task_id != destination_meta_task_id {
-            return Err(CoveyError::DuplicateSubtaskId { subtask_id });
+            return Err(CoveyError::DuplicateSubtaskId {
+                subtask_id: crate::model::SubtaskId::parse(&subtask_id)?,
+            });
         }
 
         return Ok(subtask_id);
     }
 
     let create_req = CreateSubtaskRequest {
-        session_token: req.session_token.clone(),
+        session_token: req.session_token.to_string(),
         meta_task_id: destination_meta_task_id.clone(),
         subtask_id: Some(subtask_id.clone()),
         title: req.title.clone(),
@@ -259,7 +261,7 @@ fn import_bd_v1_source_rows_tx(
                 let subtask_id = import_bd_v1_work_subtask_tx(
                     tx,
                     &ImportBdV1WorkSubtaskReq {
-                        session_token: req.session_token.clone(),
+                        session_token: SessionToken::parse(req.session_token.as_str())?,
                         meta_task_id: Some(destination_meta_task_id.to_owned()),
                         prompt_text: None,
                         source_issue_id: issue.id.clone(),
@@ -319,7 +321,7 @@ fn existing_subtask_matches_destination(
     if existing.meta_task_id != destination_meta_task_id {
         return Err(CoveyError::ImportDuplicate {
             source_issue_id: source_issue_id.to_owned(),
-            subtask_id,
+            subtask_id: crate::model::SubtaskId::parse(&subtask_id)?,
         });
     }
 

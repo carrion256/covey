@@ -138,8 +138,8 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
     let stale_session = covey
         .session_status(&disappeared_codex)
         .expect("stale session status");
-    assert_eq!(stale_session.session.state, SessionState::Stale);
-    assert!(stale_session.session.active_subtask_id.is_none());
+    assert_eq!(stale_session.session.state(), SessionState::Stale);
+    assert!(stale_session.session.active_subtask_id().is_none());
 
     let resumed_worker = register(&covey, "worker-after-disappear", SessionRole::Executor);
     let resumed_claim = covey
@@ -252,7 +252,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
             .session_status(&dead_worker)
             .expect("dead worker session status")
             .session
-            .active_subtask_id
+            .active_subtask_id()
             .is_none()
     );
     assert_eq!(

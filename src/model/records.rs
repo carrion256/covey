@@ -15,18 +15,178 @@ use super::{
 };
 
 /// Persisted session row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub session_token: SessionToken,
     pub agent_principal_id: String,
     pub agent_instance_id: String,
     pub role: SessionRole,
-    pub state: SessionState,
-    pub active_subtask_id: Option<SubtaskId>,
+    lifecycle: SessionLifecycle,
     pub last_heartbeat_at: TimestampMs,
     pub last_heartbeat_tick: i64,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionLifecycle {
+    Active {
+        active_subtask_id: Option<SubtaskId>,
+    },
+    Stale,
+    Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawSession {
+    session_token: SessionToken,
+    agent_principal_id: String,
+    agent_instance_id: String,
+    role: SessionRole,
+    state: SessionState,
+    active_subtask_id: Option<SubtaskId>,
+    last_heartbeat_at: TimestampMs,
+    last_heartbeat_tick: i64,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+impl Session {
+    /// Builds one session from the flat storage shape, rejecting invalid lifecycle fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_parts(
+        session_token: SessionToken,
+        agent_principal_id: impl Into<String>,
+        agent_instance_id: impl Into<String>,
+        role: SessionRole,
+        state: SessionState,
+        active_subtask_id: Option<SubtaskId>,
+        last_heartbeat_at: TimestampMs,
+        last_heartbeat_tick: i64,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let lifecycle = SessionLifecycle::from_parts(state, active_subtask_id)?;
+        Ok(Self {
+            session_token,
+            agent_principal_id: agent_principal_id.into(),
+            agent_instance_id: agent_instance_id.into(),
+            role,
+            lifecycle,
+            last_heartbeat_at,
+            last_heartbeat_tick,
+            created_at,
+            updated_at,
+        })
+    }
+
+    /// Returns the persisted session lifecycle state.
+    #[must_use]
+    pub const fn state(&self) -> SessionState {
+        self.lifecycle.state()
+    }
+
+    /// Returns the active subtask id for active sessions that are currently occupied.
+    #[must_use]
+    pub const fn active_subtask_id(&self) -> Option<&SubtaskId> {
+        self.lifecycle.active_subtask_id()
+    }
+}
+
+impl SessionLifecycle {
+    fn from_parts(
+        state: SessionState,
+        active_subtask_id: Option<SubtaskId>,
+    ) -> Result<Self, String> {
+        match state {
+            SessionState::Active => Ok(Self::Active { active_subtask_id }),
+            SessionState::Stale => {
+                if active_subtask_id.is_some() {
+                    Err("stale session must not include active_subtask_id".to_owned())
+                } else {
+                    Ok(Self::Stale)
+                }
+            }
+            SessionState::Exited => {
+                if active_subtask_id.is_some() {
+                    Err("exited session must not include active_subtask_id".to_owned())
+                } else {
+                    Ok(Self::Exited)
+                }
+            }
+        }
+    }
+
+    const fn state(&self) -> SessionState {
+        match self {
+            Self::Active { .. } => SessionState::Active,
+            Self::Stale => SessionState::Stale,
+            Self::Exited => SessionState::Exited,
+        }
+    }
+
+    const fn active_subtask_id(&self) -> Option<&SubtaskId> {
+        match self {
+            Self::Active { active_subtask_id } => active_subtask_id.as_ref(),
+            Self::Stale | Self::Exited => None,
+        }
+    }
+}
+
+impl Serialize for Session {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawSession::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Session {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawSession::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<&Session> for RawSession {
+    fn from(session: &Session) -> Self {
+        Self {
+            session_token: session.session_token.clone(),
+            agent_principal_id: session.agent_principal_id.clone(),
+            agent_instance_id: session.agent_instance_id.clone(),
+            role: session.role,
+            state: session.state(),
+            active_subtask_id: session.active_subtask_id().cloned(),
+            last_heartbeat_at: session.last_heartbeat_at,
+            last_heartbeat_tick: session.last_heartbeat_tick,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+        }
+    }
+}
+
+impl TryFrom<RawSession> for Session {
+    type Error = String;
+
+    fn try_from(raw: RawSession) -> Result<Self, Self::Error> {
+        Self::try_from_parts(
+            raw.session_token,
+            raw.agent_principal_id,
+            raw.agent_instance_id,
+            raw.role,
+            raw.state,
+            raw.active_subtask_id,
+            raw.last_heartbeat_at,
+            raw.last_heartbeat_tick,
+            raw.created_at,
+            raw.updated_at,
+        )
+    }
 }
 
 /// Runtime identity evidence bound to one Covey session.
@@ -534,17 +694,241 @@ pub enum Review {
 }
 
 /// Persisted reservation row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reservation {
     pub reservation_id: ReservationId,
     pub owner_subtask_id: SubtaskId,
-    pub scope_class: ScopeClass,
-    pub scope_key: String,
-    pub generated_members: Vec<String>,
+    scope: ReservationScope,
     pub lease_deadline: LeaseDeadlineMs,
     pub state: ReservationState,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
+}
+
+/// Scope covered by a persisted reservation.
+///
+/// The enum prevents mixing generated-set members with exact, subtree, or
+/// repo-global scopes, and prevents generated-set reservations with no members.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReservationScope {
+    ExactPath {
+        scope_key: String,
+    },
+    Subtree {
+        scope_key: String,
+    },
+    RepoGlobal,
+    GeneratedSet {
+        scope_key: String,
+        generated_members: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawReservation {
+    reservation_id: ReservationId,
+    owner_subtask_id: SubtaskId,
+    scope_class: ScopeClass,
+    scope_key: String,
+    generated_members: Vec<String>,
+    lease_deadline: LeaseDeadlineMs,
+    state: ReservationState,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+impl Reservation {
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_parts(
+        reservation_id: ReservationId,
+        owner_subtask_id: SubtaskId,
+        scope_class: ScopeClass,
+        scope_key: impl Into<String>,
+        generated_members: Vec<String>,
+        lease_deadline: LeaseDeadlineMs,
+        state: ReservationState,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let scope = ReservationScope::from_parts(scope_class, scope_key.into(), generated_members)?;
+        Ok(Self {
+            reservation_id,
+            owner_subtask_id,
+            scope,
+            lease_deadline,
+            state,
+            created_at,
+            updated_at,
+        })
+    }
+
+    #[must_use]
+    pub const fn scope(&self) -> &ReservationScope {
+        &self.scope
+    }
+
+    #[must_use]
+    pub const fn scope_class(&self) -> ScopeClass {
+        self.scope.scope_class()
+    }
+
+    #[must_use]
+    pub fn scope_key(&self) -> &str {
+        self.scope.scope_key()
+    }
+
+    #[must_use]
+    pub fn generated_members(&self) -> &[String] {
+        self.scope.generated_members()
+    }
+}
+
+impl ReservationScope {
+    fn from_parts(
+        scope_class: ScopeClass,
+        scope_key: String,
+        generated_members: Vec<String>,
+    ) -> Result<Self, String> {
+        match scope_class {
+            ScopeClass::ExactPath => {
+                reject_generated_members(scope_class, &generated_members)?;
+                require_non_empty_scope_key(scope_class, &scope_key)?;
+                Ok(Self::ExactPath { scope_key })
+            }
+            ScopeClass::Subtree => {
+                reject_generated_members(scope_class, &generated_members)?;
+                require_non_empty_scope_key(scope_class, &scope_key)?;
+                Ok(Self::Subtree { scope_key })
+            }
+            ScopeClass::RepoGlobal => {
+                reject_generated_members(scope_class, &generated_members)?;
+                if scope_key != "repo" {
+                    return Err("repo-global reservations require scope_key `repo`".to_owned());
+                }
+                Ok(Self::RepoGlobal)
+            }
+            ScopeClass::GeneratedSet => {
+                require_non_empty_scope_key(scope_class, &scope_key)?;
+                if generated_members.is_empty() {
+                    return Err("generated-set reservations require generated_members".to_owned());
+                }
+                if generated_members
+                    .iter()
+                    .any(|member| member.trim().is_empty())
+                {
+                    return Err(
+                        "generated-set reservations require non-empty generated_members".to_owned(),
+                    );
+                }
+                Ok(Self::GeneratedSet {
+                    scope_key,
+                    generated_members,
+                })
+            }
+        }
+    }
+
+    const fn scope_class(&self) -> ScopeClass {
+        match self {
+            Self::ExactPath { .. } => ScopeClass::ExactPath,
+            Self::Subtree { .. } => ScopeClass::Subtree,
+            Self::RepoGlobal => ScopeClass::RepoGlobal,
+            Self::GeneratedSet { .. } => ScopeClass::GeneratedSet,
+        }
+    }
+
+    fn scope_key(&self) -> &str {
+        match self {
+            Self::ExactPath { scope_key }
+            | Self::Subtree { scope_key }
+            | Self::GeneratedSet { scope_key, .. } => scope_key,
+            Self::RepoGlobal => "repo",
+        }
+    }
+
+    fn generated_members(&self) -> &[String] {
+        match self {
+            Self::GeneratedSet {
+                generated_members, ..
+            } => generated_members,
+            Self::ExactPath { .. } | Self::Subtree { .. } | Self::RepoGlobal => &[],
+        }
+    }
+}
+
+fn require_non_empty_scope_key(scope_class: ScopeClass, scope_key: &str) -> Result<(), String> {
+    if scope_key.trim().is_empty() {
+        Err(format!("{scope_class} reservations require scope_key"))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_generated_members(
+    scope_class: ScopeClass,
+    generated_members: &[String],
+) -> Result<(), String> {
+    if generated_members.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{scope_class} reservations must not include generated_members"
+        ))
+    }
+}
+
+impl Serialize for Reservation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawReservation::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Reservation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawReservation::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<&Reservation> for RawReservation {
+    fn from(reservation: &Reservation) -> Self {
+        Self {
+            reservation_id: reservation.reservation_id.clone(),
+            owner_subtask_id: reservation.owner_subtask_id.clone(),
+            scope_class: reservation.scope_class(),
+            scope_key: reservation.scope_key().to_owned(),
+            generated_members: reservation.generated_members().to_vec(),
+            lease_deadline: reservation.lease_deadline,
+            state: reservation.state,
+            created_at: reservation.created_at,
+            updated_at: reservation.updated_at,
+        }
+    }
+}
+
+impl TryFrom<RawReservation> for Reservation {
+    type Error = String;
+
+    fn try_from(raw: RawReservation) -> Result<Self, Self::Error> {
+        Self::try_from_parts(
+            raw.reservation_id,
+            raw.owner_subtask_id,
+            raw.scope_class,
+            raw.scope_key,
+            raw.generated_members,
+            raw.lease_deadline,
+            raw.state,
+            raw.created_at,
+            raw.updated_at,
+        )
+    }
 }
 
 /// Fields shared by every persisted ready-queue state.

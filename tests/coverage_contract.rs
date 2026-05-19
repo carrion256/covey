@@ -803,7 +803,7 @@ fn reservation_success_error_and_conflict_paths_use_public_contract(rig: Rig) {
             owner_subtask_id: work_id.clone(),
             scope_class: ScopeClass::Subtree,
             scope_key: "src/reservation".into(),
-            generated_members: vec!["generated/reservation.rs".into()],
+            generated_members: vec![],
             lease_duration_ms: 60_000,
             idempotency_key: id_key("request-reservation"),
         })

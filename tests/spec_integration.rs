@@ -21,8 +21,8 @@ use covey::{
     PublishArtifactReq, ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
     RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RequestReservationReq, RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq,
-    ScopeClass, SessionRole, SessionState, SettlementTarget, StartSubtaskReq, StateValue,
-    SubmitMetaTaskReq, SubtaskKind, SubtaskState,
+    ScopeClass, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
+    StateValue, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState,
 };
 use rusqlite::ffi::{SQLITE_TESTCTRL_FAULT_INSTALL, sqlite3_test_control};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -38,6 +38,14 @@ static SQLITE_FAULT_TARGET_CODE: AtomicI32 = AtomicI32::new(-1);
 static SQLITE_FAULT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static SQLITE_FAULT_SEEN_TARGET: AtomicBool = AtomicBool::new(false);
 static NEXT_IDEMPOTENCY_KEY: AtomicUsize = AtomicUsize::new(1);
+
+fn session_token(value: &str) -> SessionToken {
+    SessionToken::parse(value).expect("test session token must be valid")
+}
+
+fn subtask_id(value: &str) -> SubtaskId {
+    SubtaskId::parse(value).expect("test subtask id must be valid")
+}
 
 struct Rig {
     _dir: TempDir,
@@ -1179,7 +1187,7 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
     }
 
     let session_status = covey.session_status(&orch).expect("session status");
-    assert!(session_status.session.active_subtask_id.is_none());
+    assert!(session_status.session.active_subtask_id().is_none());
     assert!(session_status.active_subtask.is_none());
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1227,7 +1235,7 @@ fn import_bd_empty_source_creates_destination_without_subtasks_or_side_effects()
     assert!(meta_status.subtasks.is_empty());
 
     let session_status = covey.session_status(&orch).expect("session status");
-    assert!(session_status.session.active_subtask_id.is_none());
+    assert!(session_status.session.active_subtask_id().is_none());
     assert!(session_status.active_subtask.is_none());
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1299,7 +1307,7 @@ fn import_bd_invalid_rows_are_reported_without_creating_subtasks_or_claims() {
     assert!(meta_status.subtasks.is_empty());
 
     let session_status = covey.session_status(&orch).expect("session status");
-    assert!(session_status.session.active_subtask_id.is_none());
+    assert!(session_status.session.active_subtask_id().is_none());
     assert!(session_status.active_subtask.is_none());
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1713,8 +1721,8 @@ fn claim_subtask_error_surface_smoke() {
     assert!(matches!(subtask_not_found, CoveyError::SubtaskNotFound));
 
     let session_occupied = CoveyError::SessionAlreadyHasActiveSubtask {
-        session_token: "session_1".to_owned(),
-        active_subtask_id: "subtask_1".to_owned(),
+        session_token: session_token("session_1"),
+        active_subtask_id: subtask_id("subtask_1"),
     };
     assert!(matches!(
         session_occupied,
@@ -1737,8 +1745,8 @@ fn claim_subtask_error_surface_smoke() {
     ));
 
     let already_claimed = CoveyError::SubtaskAlreadyClaimed {
-        subtask_id: "subtask_1".to_owned(),
-        held_by: "session_other".to_owned(),
+        subtask_id: subtask_id("subtask_1"),
+        held_by: session_token("session_other"),
     };
     assert!(matches!(
         already_claimed,
@@ -1756,8 +1764,8 @@ fn claim_subtask_error_surface_smoke() {
     ));
 
     let already_claimed = CoveyError::SubtaskAlreadyClaimed {
-        subtask_id: "subtask_1".to_owned(),
-        held_by: "session_other".to_owned(),
+        subtask_id: subtask_id("subtask_1"),
+        held_by: session_token("session_other"),
     };
     assert!(matches!(
         already_claimed,
@@ -1847,7 +1855,10 @@ fn claim_subtask_claims_known_available_work_subtask() {
         .session_status(&held_claim.owner_session_token)
         .expect("session status");
     assert_eq!(
-        session_status.session.active_subtask_id.as_deref(),
+        session_status
+            .session
+            .active_subtask_id()
+            .map(|subtask_id| subtask_id.as_str()),
         Some(subtask_id.as_str())
     );
 
@@ -1899,8 +1910,8 @@ fn claim_subtask_claims_changes_requested_work_subtask() {
             .session_status(&worker)
             .expect("session status")
             .session
-            .active_subtask_id
-            .as_deref(),
+            .active_subtask_id()
+            .map(|subtask_id| subtask_id.as_str()),
         Some(claim.subtask_id.as_str())
     );
 }
@@ -2183,12 +2194,15 @@ fn claim_subtask_expires_stale_held_claim_on_target() {
     let stale_session = covey
         .session_status(&first_worker)
         .expect("stale owner session");
-    assert!(stale_session.session.active_subtask_id.is_none());
+    assert!(stale_session.session.active_subtask_id().is_none());
     let fresh_session = covey
         .session_status(&second_worker)
         .expect("fresh owner session");
     assert_eq!(
-        fresh_session.session.active_subtask_id.as_deref(),
+        fresh_session
+            .session
+            .active_subtask_id()
+            .map(|subtask_id| subtask_id.as_str()),
         Some(second_claim.subtask_id.as_str())
     );
 
@@ -2423,12 +2437,14 @@ fn claim_subtask_matches_claim_next_for_changes_requested_work() {
             .session_status(&targeted_worker)
             .expect("targeted worker status")
             .session
-            .active_subtask_id,
+            .active_subtask_id()
+            .cloned(),
         next_covey
             .session_status(&next_worker)
             .expect("next worker status")
             .session
-            .active_subtask_id
+            .active_subtask_id()
+            .cloned()
     );
 }
 
@@ -3363,8 +3379,8 @@ fn stale_reap_immediately_expires_orphaned_claims_and_clears_session_and_subtask
     let _reap_result = covey.reap_stale_sessions(45_000).expect("reap stale");
 
     let stale_session = covey.session_status(&worker).expect("session");
-    assert_eq!(stale_session.session.state, SessionState::Stale);
-    assert!(stale_session.session.active_subtask_id.is_none());
+    assert_eq!(stale_session.session.state(), SessionState::Stale);
+    assert!(stale_session.session.active_subtask_id().is_none());
     let before_expire = covey.subtask_status(&subtask_id).expect("subtask");
     assert!(before_expire.claim.is_none());
     assert_eq!(before_expire.subtask.state, SubtaskState::Available);
@@ -3375,8 +3391,8 @@ fn stale_reap_immediately_expires_orphaned_claims_and_clears_session_and_subtask
     assert!(after_expire.claim.is_none());
     assert_eq!(after_expire.subtask.state, SubtaskState::Available);
     let session = covey.session_status(&worker).expect("session after expire");
-    assert_eq!(session.session.state, SessionState::Stale);
-    assert!(session.session.active_subtask_id.is_none());
+    assert_eq!(session.session.state(), SessionState::Stale);
+    assert!(session.session.active_subtask_id().is_none());
 }
 
 #[test]
@@ -4439,7 +4455,7 @@ fn concurrent_heartbeats_succeed_for_all_sessions() {
         let status = covey
             .session_status(&session_token)
             .expect("session status");
-        assert_eq!(status.session.state, SessionState::Active);
+        assert_eq!(status.session.state(), SessionState::Active);
         assert!(status.session.last_heartbeat_at >= status.session.created_at);
     }
 }

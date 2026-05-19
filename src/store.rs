@@ -16,8 +16,8 @@ use crate::{
     clock::{Clock, SystemClock},
     error::{CoveyError, Result},
     model::{
-        Claim, ClaimState, EventType, MetaTaskState, ObjectType, ReadyQueueClaim, ReadyQueueState,
-        SessionState, SubtaskKind, SubtaskState,
+        Claim, ClaimState, EventType, LeaseDeadlineMs, LeaseDurationMs, MetaTaskState, ObjectType,
+        ReadyQueueClaim, ReadyQueueState, SessionState, SubtaskKind, SubtaskState, TimestampMs,
     },
     queries::{
         collect_rows, deserialize_row, load_meta_task_tx, load_mutation_idempotency_record_tx,
@@ -158,7 +158,7 @@ pub(crate) fn with_idempotent_mutation<T, Req, F>(
     operation: &str,
     idempotency_key: &str,
     request: &Req,
-    created_at: i64,
+    created_at: TimestampMs,
     f: F,
 ) -> Result<T>
 where
@@ -438,7 +438,7 @@ pub(crate) fn claim_ready_queue_item(
     tx: &Transaction<'_>,
     queue_id: &str,
     session_token: &str,
-    lease_duration_ms: i64,
+    lease_duration_ms: LeaseDurationMs,
     lease_now: i64,
     now: i64,
 ) -> Result<Option<ReadyQueueClaim>> {
@@ -477,7 +477,7 @@ pub(crate) fn claim_ready_queue_item(
         return Ok(None);
     }
 
-    let lease_deadline = lease_now + lease_duration_ms;
+    let lease_deadline = LeaseDeadlineMs::parse(lease_now + lease_duration_ms.get())?;
     let claim_fence_seq = tx
         .query_row(
             r#"
@@ -511,7 +511,7 @@ pub(crate) fn claim_ready_queue_item(
         item.subtask_id().to_owned(),
         item.settlement_target(),
         claim_fence_seq,
-        lease_deadline,
+        lease_deadline.get(),
     )))
 }
 

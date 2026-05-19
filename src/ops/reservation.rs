@@ -7,7 +7,7 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         Conflict, Event, EventType, ObjectType, OverlapCandidate, OverlapQueryReq, Reservation,
-        ReservationState, ResolveConflictReq, SessionRole,
+        ReservationState, ResolveConflictReq, ScopeClass, SessionRole,
     },
     overlap::{
         find_overlapping_reservations_conn, find_overlapping_reservations_tx,
@@ -36,7 +36,7 @@ impl Covey {
                 "request_reservation",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
@@ -46,6 +46,11 @@ impl Covey {
                     let normalized_scope_key = normalize_scope_key(req.scope_class, &req.scope_key)?;
                     ensure_length("reservation_scope_key", &normalized_scope_key, MAX_PATH_LEN)?;
                     let normalized_members = normalize_generated_members(&req.generated_members)?;
+                    ensure_reservation_scope_shape(
+                        req.scope_class,
+                        &normalized_scope_key,
+                        &normalized_members,
+                    )?;
                     for member in &normalized_members {
                         ensure_length("generated_member", member, MAX_PATH_LEN)?;
                     }
@@ -119,7 +124,7 @@ impl Covey {
                 "release_reservation",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("reservation_id", &req.reservation_id, MAX_OBJECT_ID_LEN)?;
@@ -142,24 +147,29 @@ impl Covey {
                         });
                     }
                     resolve_reservation_overlap_conflicts(tx, &req.reservation_id, now)?;
+                    let scope_class = reservation.scope_class();
+                    let scope_key = reservation.scope_key().to_owned();
+                    let generated_members = reservation.generated_members().to_vec();
+                    let released = Reservation::try_from_parts(
+                        reservation.reservation_id,
+                        reservation.owner_subtask_id,
+                        scope_class,
+                        scope_key,
+                        generated_members,
+                        reservation.lease_deadline,
+                        ReservationState::Released,
+                        reservation.created_at,
+                        crate::model::TimestampMs::parse(now)
+                            .expect("wall clock timestamps are non-negative"),
+                    )
+                    .expect("existing reservation scope remains valid after release");
                     append_session_event(
                         tx,
                         EventType::ReservationReleased,
                         ObjectType::Reservation,
                         &req.reservation_id,
                         &req.session_token,
-                        &Reservation {
-                            reservation_id: reservation.reservation_id,
-                            owner_subtask_id: reservation.owner_subtask_id,
-                            scope_class: reservation.scope_class,
-                            scope_key: reservation.scope_key,
-                            generated_members: reservation.generated_members,
-                            lease_deadline: reservation.lease_deadline,
-                            state: ReservationState::Released,
-                            created_at: reservation.created_at,
-                            updated_at: crate::model::TimestampMs::parse(now)
-                                .expect("wall clock timestamps are non-negative"),
-                        },
+                        &released,
                         now,
                     )?;
                     Ok(())
@@ -187,7 +197,7 @@ impl Covey {
                 "renew_reservation",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms)?;
@@ -223,19 +233,23 @@ impl Covey {
                             object: ObjectType::Reservation,
                         });
                     }
-                    let renewed = Reservation {
-                        reservation_id: reservation.reservation_id,
-                        owner_subtask_id: reservation.owner_subtask_id,
-                        scope_class: reservation.scope_class,
-                        scope_key: reservation.scope_key,
-                        generated_members: reservation.generated_members,
-                        lease_deadline: crate::model::LeaseDeadlineMs::parse(renewed_deadline)
+                    let scope_class = reservation.scope_class();
+                    let scope_key = reservation.scope_key().to_owned();
+                    let generated_members = reservation.generated_members().to_vec();
+                    let renewed = Reservation::try_from_parts(
+                        reservation.reservation_id,
+                        reservation.owner_subtask_id,
+                        scope_class,
+                        scope_key,
+                        generated_members,
+                        crate::model::LeaseDeadlineMs::parse(renewed_deadline)
                             .expect("renewed lease deadlines are non-negative"),
-                        state: ReservationState::Active,
-                        created_at: reservation.created_at,
-                        updated_at: crate::model::TimestampMs::parse(now)
+                        ReservationState::Active,
+                        reservation.created_at,
+                        crate::model::TimestampMs::parse(now)
                             .expect("wall clock timestamps are non-negative"),
-                    };
+                    )
+                    .expect("existing reservation scope remains valid after renewal");
                     append_session_event(
                         tx,
                         EventType::ReservationRenewed,
@@ -266,6 +280,11 @@ impl Covey {
         ensure_length("reservation_scope_key", &normalized_scope_key, MAX_PATH_LEN)?;
         ensure_generated_member_count(req.generated_members.len())?;
         let normalized_members = normalize_generated_members(&req.generated_members)?;
+        ensure_reservation_scope_shape(
+            req.scope_class,
+            &normalized_scope_key,
+            &normalized_members,
+        )?;
         for member in &normalized_members {
             ensure_length("generated_member", member, MAX_PATH_LEN)?;
         }
@@ -356,7 +375,7 @@ impl Covey {
                 "resolve_conflict",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("conflict_id", &req.conflict_id, MAX_OBJECT_ID_LEN)?;
@@ -388,5 +407,37 @@ impl Covey {
             |_| vec![format!("conflict:{}", req.conflict_id)],
         );
         result
+    }
+}
+
+fn ensure_reservation_scope_shape(
+    scope_class: ScopeClass,
+    scope_key: &str,
+    generated_members: &[String],
+) -> Result<()> {
+    if scope_key.trim().is_empty() {
+        return Err(CoveyError::InvalidPath {
+            path: scope_key.to_owned(),
+        });
+    }
+    match scope_class {
+        ScopeClass::ExactPath | ScopeClass::Subtree | ScopeClass::RepoGlobal => {
+            if generated_members.is_empty() {
+                Ok(())
+            } else {
+                Err(CoveyError::InvalidPath {
+                    path: format!("{scope_class} reservation must not include generated_members"),
+                })
+            }
+        }
+        ScopeClass::GeneratedSet => {
+            if generated_members.is_empty() {
+                Err(CoveyError::InvalidPath {
+                    path: "generated_set reservation requires generated_members".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
     }
 }

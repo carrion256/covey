@@ -3,9 +3,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::{
     error::{CoveyError, Result},
     model::{
-        Claim, ClaimState, MetaTaskState, ObjectType, ReadyQueueState, ReservationState,
-        ReviewState, RuntimeAttestation, Session, SessionRole, SessionState, StateValue,
-        SubtaskKind, SubtaskState,
+        ArtifactDigest, Claim, ClaimState, FenceSeq, MetaTaskState, ObjectType, ReadyQueueState,
+        ReservationState, ReviewState, RuntimeAttestation, Session, SessionRole, SessionState,
+        SessionToken, StateValue, SubtaskId, SubtaskKind, SubtaskState,
     },
     queries::{
         load_artifact_tx, load_claim_tx, load_meta_task_tx, load_runtime_attestation_tx,
@@ -52,12 +52,13 @@ pub(crate) fn require_session(tx: &Transaction<'_>, session_token: &str) -> Resu
 
 pub(crate) fn require_active_session(tx: &Transaction<'_>, session_token: &str) -> Result<Session> {
     let session = require_session(tx, session_token)?;
-    if session.state == SessionState::Active {
+    if session.state() == SessionState::Active {
         Ok(session)
     } else {
+        let state = session.state();
         Err(CoveyError::SessionNotActive {
-            session_token: session_token.to_owned(),
-            state: session.state,
+            session_token: session.session_token,
+            state,
         })
     }
 }
@@ -88,7 +89,7 @@ pub(crate) fn require_runtime_attestation(
         || attestation.role != session.role
     {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: session.session_token.to_string(),
+            session_token: session.session_token.clone(),
             reason: "attestation identity does not match the session identity".to_owned(),
         });
     }
@@ -96,7 +97,7 @@ pub(crate) fn require_runtime_attestation(
         || attestation.provider_run_id_issuer == MISSING_PROVIDER_RUN_ID_ISSUER
     {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: session.session_token.to_string(),
+            session_token: session.session_token.clone(),
             reason: "provider run identity is required".to_owned(),
         });
     }
@@ -169,11 +170,14 @@ pub(crate) fn subtask_exists(tx: &Transaction<'_>, subtask_id: &str) -> Result<b
     Ok(exists.is_some())
 }
 
-pub(crate) fn held_claim_owner(tx: &Transaction<'_>, subtask_id: &str) -> Result<Option<String>> {
+pub(crate) fn held_claim_owner(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+) -> Result<Option<SessionToken>> {
     tx.query_row(
         "SELECT owner_session_token FROM claims WHERE subtask_id = ?1 AND state = ?2",
         params![subtask_id, ClaimState::Held.to_string()],
-        |row| row.get::<_, String>(0),
+        |row| row.get(0),
     )
     .optional()
     .map_err(Into::into)
@@ -218,7 +222,7 @@ pub(crate) fn require_session_can_enqueue(session: &Session) -> Result<()> {
     }
 }
 
-pub(crate) fn issue_fence_seq(tx: &Transaction<'_>, subtask_id: &str) -> Result<i64> {
+pub(crate) fn issue_fence_seq(tx: &Transaction<'_>, subtask_id: &str) -> Result<FenceSeq> {
     tx.query_row(
         r#"
         INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq)
@@ -236,26 +240,26 @@ pub(crate) fn require_current_claim(
     tx: &Transaction<'_>,
     session_token: &str,
     claim_id: &str,
-    fence_seq: i64,
+    fence_seq: FenceSeq,
     now: i64,
 ) -> Result<Claim> {
-    require_active_session(tx, session_token)?;
+    let session = require_active_session(tx, session_token)?;
     let claim = load_claim_tx(tx, claim_id)?;
-    if claim.owner_session_token != session_token {
+    if claim.owner_session_token != session.session_token {
         return Err(CoveyError::NotClaimOwner {
-            session_token: session_token.to_owned(),
-            claim_owner: claim.owner_session_token.to_string(),
+            session_token: session.session_token,
+            claim_owner: claim.owner_session_token,
         });
     }
     if claim.fence_seq != fence_seq {
         return Err(CoveyError::StaleFenceToken {
             expected: claim.fence_seq.get(),
-            provided: fence_seq,
+            provided: fence_seq.get(),
         });
     }
     if claim.state != ClaimState::Held {
         return Err(CoveyError::ClaimNotHeld {
-            claim_id: claim_id.to_owned(),
+            claim_id: claim.claim_id,
             state: claim.state,
         });
     }
@@ -326,10 +330,14 @@ pub(crate) fn ensure_length(field: &str, value: &str, max: usize) -> Result<()> 
     Ok(())
 }
 
-pub(crate) fn ensure_non_empty(field: &str, value: &str, session_token: &str) -> Result<()> {
+pub(crate) fn ensure_non_empty(
+    field: &str,
+    value: &str,
+    session_token: &SessionToken,
+) -> Result<()> {
     if value.trim().is_empty() {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: session_token.to_owned(),
+            session_token: session_token.clone(),
             reason: format!("{field} must not be empty"),
         });
     }
@@ -382,8 +390,8 @@ pub(crate) fn ensure_no_open_review_round(
         .optional()?;
     if existing.is_some() {
         Err(CoveyError::ReviewAlreadyOpen {
-            subtask_id: subtask_id.to_owned(),
-            artifact_digest: artifact_digest.to_owned(),
+            subtask_id: SubtaskId::parse(subtask_id)?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest)?,
         })
     } else {
         Ok(())
@@ -495,19 +503,19 @@ mod tests {
     };
 
     fn session(role: SessionRole) -> Session {
-        Session {
-            session_token: SessionToken::parse(format!("session-{role}"))
-                .expect("valid session token"),
-            agent_principal_id: "principal-1".to_owned(),
-            agent_instance_id: "instance-1".to_owned(),
+        Session::try_from_parts(
+            SessionToken::parse(format!("session-{role}")).expect("valid session token"),
+            "principal-1",
+            "instance-1",
             role,
-            state: SessionState::Active,
-            active_subtask_id: None,
-            last_heartbeat_at: TimestampMs::parse(0).expect("valid timestamp"),
-            last_heartbeat_tick: 0,
-            created_at: TimestampMs::parse(0).expect("valid timestamp"),
-            updated_at: TimestampMs::parse(0).expect("valid timestamp"),
-        }
+            SessionState::Active,
+            None,
+            TimestampMs::parse(0).expect("valid timestamp"),
+            0,
+            TimestampMs::parse(0).expect("valid timestamp"),
+            TimestampMs::parse(0).expect("valid timestamp"),
+        )
+        .expect("valid session fixture")
     }
 
     #[test]

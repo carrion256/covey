@@ -6,9 +6,11 @@ use crate::{
     Covey,
     error::Result,
     model::{
-        Claim, RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
-        RepoopsAuthorityPolicyFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshot,
-        RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation, ScopeClass, Session,
+        Claim, RepoopsAuthorityClaimFact, RepoopsAuthorityClaimStatus,
+        RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthorityLockStatus,
+        RepoopsAuthorityPolicyFact, RepoopsAuthorityPolicyMode, RepoopsAuthorityScopeFact,
+        RepoopsAuthoritySnapshot, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation,
+        ScopeClass, Session, SubtaskState,
     },
     queries::{load_active_reservations_tx, load_subtask_tx},
     validators::require_current_claim,
@@ -29,8 +31,13 @@ impl Covey {
         let started_at = Instant::now();
         let now = self.clock.wall_now_ms();
         let result = self.with_read_tx(|tx| {
-            let claim =
-                require_current_claim(tx, &req.session_token, &req.claim_id, req.fence_seq, now)?;
+            let claim = require_current_claim(
+                tx,
+                &req.session_token,
+                &req.claim_id,
+                crate::model::FenceSeq::parse(req.fence_seq)?,
+                now,
+            )?;
             let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
             let reservations = load_active_reservations_tx(tx, now)?;
             let session = crate::queries::load_session_tx(tx, &req.session_token)?;
@@ -48,7 +55,7 @@ impl Covey {
             ];
             let claim_fact = RepoopsAuthorityClaimFact::new(
                 claim.claim_id.clone(),
-                subtask.state.to_string(),
+                repoops_claim_status_for_subtask(subtask.state),
                 session.agent_principal_id.clone(),
                 scope_in.clone(),
                 Vec::new(),
@@ -61,7 +68,7 @@ impl Covey {
                 Some(claim.claim_id.clone()),
                 Some(caller_ownership_token),
                 None,
-                RepoopsAuthorityPolicyFact::new("enforce".to_owned(), 2, None),
+                RepoopsAuthorityPolicyFact::new(RepoopsAuthorityPolicyMode::Enforce, 2, None),
                 Some(claim_fact),
                 RepoopsAuthorityScopeFact::new(scope_in, Vec::new()),
                 locks,
@@ -87,6 +94,22 @@ impl Covey {
             },
         );
         result
+    }
+}
+
+fn repoops_claim_status_for_subtask(state: SubtaskState) -> RepoopsAuthorityClaimStatus {
+    match state {
+        SubtaskState::InProgress => RepoopsAuthorityClaimStatus::InProgress,
+        SubtaskState::Available
+        | SubtaskState::Claimed
+        | SubtaskState::ArtifactPublished
+        | SubtaskState::ReviewPending
+        | SubtaskState::ChangesRequested
+        | SubtaskState::Approved
+        | SubtaskState::Decided
+        | SubtaskState::ReadyForApply
+        | SubtaskState::Applied
+        | SubtaskState::Abandoned => RepoopsAuthorityClaimStatus::Open,
     }
 }
 
@@ -146,17 +169,17 @@ fn scope_patterns_for_subtask(reservations: &[Reservation], subtask_id: &str) ->
 }
 
 fn scope_patterns_for_reservation(reservation: &Reservation) -> Vec<String> {
-    match reservation.scope_class {
+    match reservation.scope_class() {
         ScopeClass::RepoGlobal => vec!["**".to_owned()],
-        ScopeClass::ExactPath => normalize_repo_relative_path(&reservation.scope_key)
+        ScopeClass::ExactPath => normalize_repo_relative_path(reservation.scope_key())
             .into_iter()
             .collect(),
-        ScopeClass::Subtree => normalize_repo_relative_path(&reservation.scope_key)
+        ScopeClass::Subtree => normalize_repo_relative_path(reservation.scope_key())
             .map(|path| format!("{path}/**"))
             .into_iter()
             .collect(),
         ScopeClass::GeneratedSet => reservation
-            .generated_members
+            .generated_members()
             .iter()
             .filter_map(|member| normalize_repo_relative_path(member))
             .collect(),
@@ -180,14 +203,14 @@ fn lock_facts_for_paths(
                     path.clone(),
                     session.agent_principal_id.clone(),
                     repoops_claim_ref(claim.claim_id.as_str()),
-                    "owned".to_owned(),
+                    RepoopsAuthorityLockStatus::Owned,
                 ));
             } else {
                 locks.push(RepoopsAuthorityLockFact::new(
                     path.clone(),
                     format!("subtask:{}", reservation.owner_subtask_id),
                     repoops_claim_ref(format!("unknown:{}", reservation.owner_subtask_id)),
-                    "foreign_owner".to_owned(),
+                    RepoopsAuthorityLockStatus::ForeignOwner,
                 ));
             }
         }
@@ -204,15 +227,15 @@ fn repoops_claim_ref(value: impl Into<String>) -> RepoopsClaimRef {
 }
 
 fn reservation_covers_path(reservation: &Reservation, path: &str) -> bool {
-    match reservation.scope_class {
+    match reservation.scope_class() {
         ScopeClass::RepoGlobal => true,
         ScopeClass::ExactPath => {
-            normalize_repo_relative_path(&reservation.scope_key).as_deref() == Some(path)
+            normalize_repo_relative_path(reservation.scope_key()).as_deref() == Some(path)
         }
-        ScopeClass::Subtree => normalize_repo_relative_path(&reservation.scope_key)
+        ScopeClass::Subtree => normalize_repo_relative_path(reservation.scope_key())
             .is_some_and(|base| path == base || path.starts_with(&format!("{base}/"))),
         ScopeClass::GeneratedSet => reservation
-            .generated_members
+            .generated_members()
             .iter()
             .any(|member| normalize_repo_relative_path(member).as_deref() == Some(path)),
     }
@@ -231,17 +254,18 @@ mod tests {
         scope_key: &str,
         owner_subtask_id: &str,
     ) -> Reservation {
-        Reservation {
-            reservation_id: ReservationId::parse("reservation-1").expect("valid reservation id"),
-            owner_subtask_id: SubtaskId::parse(owner_subtask_id).expect("valid subtask id"),
+        Reservation::try_from_parts(
+            ReservationId::parse("reservation-1").expect("valid reservation id"),
+            SubtaskId::parse(owner_subtask_id).expect("valid subtask id"),
             scope_class,
-            scope_key: scope_key.to_owned(),
-            generated_members: Vec::new(),
-            lease_deadline: LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
-            state: ReservationState::Active,
-            created_at: TimestampMs::parse(1).expect("valid timestamp"),
-            updated_at: TimestampMs::parse(1).expect("valid timestamp"),
-        }
+            scope_key,
+            Vec::new(),
+            LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
+            ReservationState::Active,
+            TimestampMs::parse(1).expect("valid timestamp"),
+            TimestampMs::parse(1).expect("valid timestamp"),
+        )
+        .expect("valid reservation fixture")
     }
 
     #[test]
@@ -268,30 +292,78 @@ mod tests {
             created_at: TimestampMs::parse(1).expect("valid timestamp"),
             updated_at: TimestampMs::parse(1).expect("valid timestamp"),
         };
-        let session = Session {
-            session_token: SessionToken::parse("session-1").expect("valid session token"),
-            agent_principal_id: "worker-1".to_owned(),
-            agent_instance_id: "worker-1-instance".to_owned(),
-            role: crate::model::SessionRole::Executor,
-            state: crate::model::SessionState::Active,
-            active_subtask_id: Some(SubtaskId::parse("task-1").expect("valid subtask id")),
-            last_heartbeat_at: TimestampMs::parse(1).expect("valid timestamp"),
-            last_heartbeat_tick: 1,
-            created_at: TimestampMs::parse(1).expect("valid timestamp"),
-            updated_at: TimestampMs::parse(1).expect("valid timestamp"),
-        };
+        let session = Session::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "worker-1",
+            "worker-1-instance",
+            crate::model::SessionRole::Executor,
+            crate::model::SessionState::Active,
+            Some(SubtaskId::parse("task-1").expect("valid subtask id")),
+            TimestampMs::parse(1).expect("valid timestamp"),
+            1,
+            TimestampMs::parse(1).expect("valid timestamp"),
+            TimestampMs::parse(1).expect("valid timestamp"),
+        )
+        .expect("valid active session fixture");
         let reservations = vec![
             reservation(ScopeClass::ExactPath, "src/lib.rs", "task-1"),
             reservation(ScopeClass::ExactPath, "src/lib.rs", "task-2"),
         ];
         let locks =
             lock_facts_for_paths(&["src/lib.rs".to_owned()], &reservations, &claim, &session);
-        assert!(locks.iter().any(|lock| lock.status == "owned"));
-        assert!(locks.iter().any(|lock| lock.status == "foreign_owner"));
+        assert!(
+            locks
+                .iter()
+                .any(|lock| lock.status == RepoopsAuthorityLockStatus::Owned)
+        );
+        assert!(
+            locks
+                .iter()
+                .any(|lock| lock.status == RepoopsAuthorityLockStatus::ForeignOwner)
+        );
     }
 
     #[test]
-    fn subtask_state_string_matches_repoops_claim_status() {
-        assert_eq!(SubtaskState::InProgress.to_string(), "in_progress");
+    fn subtask_state_maps_to_repoops_claim_status() {
+        assert_eq!(
+            repoops_claim_status_for_subtask(SubtaskState::InProgress),
+            RepoopsAuthorityClaimStatus::InProgress
+        );
+        assert_eq!(
+            repoops_claim_status_for_subtask(SubtaskState::Claimed),
+            RepoopsAuthorityClaimStatus::Open
+        );
+    }
+
+    #[test]
+    fn repoops_authority_snapshot_statuses_reject_unknown_strings() {
+        let unknown_claim_status = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "mystery",
+            "owner": "worker-1",
+            "scope_in": ["src/**"],
+            "scope_out": [],
+            "has_required_contract_fields": true,
+            "active_ownership_token": "token-ref"
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(unknown_claim_status)
+            .expect_err("unknown claim status must be rejected");
+
+        let unknown_lock_status = serde_json::json!({
+            "path": "src/lib.rs",
+            "owner": "worker-1",
+            "claim_id": "claim-1",
+            "status": "maybe_owned"
+        });
+        serde_json::from_value::<RepoopsAuthorityLockFact>(unknown_lock_status)
+            .expect_err("unknown lock status must be rejected");
+
+        let unknown_policy_mode = serde_json::json!({
+            "mode": "observe",
+            "phase": 2,
+            "denied_rule_id": null
+        });
+        serde_json::from_value::<RepoopsAuthorityPolicyFact>(unknown_policy_mode)
+            .expect_err("unknown policy mode must be rejected");
     }
 }

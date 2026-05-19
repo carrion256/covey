@@ -10,7 +10,7 @@ use crate::{
     model::{
         AbandonSubtaskReq, ClaimNextReq, ClaimResult, ClaimState, ClaimSubtaskReq,
         CreateSubtaskRequest, EventType, ObjectType, ReviewState, Session, SessionRole,
-        SessionState, StartSubtaskReq, SubtaskKind, SubtaskState,
+        SessionState, StartSubtaskReq, SubtaskId, SubtaskKind, SubtaskState,
     },
     queries::load_subtask_tx,
     schema::advance_lease_clock,
@@ -38,7 +38,7 @@ impl Covey {
                 "create_subtask",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || create_subtask_tx(tx, &req, now),
             )
         });
@@ -63,14 +63,14 @@ impl Covey {
                 "claim_next_subtask",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
                     ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
-                    if let Some(active_subtask_id) = session.active_subtask_id {
+                    if let Some(active_subtask_id) = session.active_subtask_id().cloned() {
                         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
-                            session_token: req.session_token.clone(),
-                            active_subtask_id: active_subtask_id.to_string(),
+                            session_token: session.session_token,
+                            active_subtask_id,
                         });
                     }
                     let (kind, candidate_states) = match session.role {
@@ -96,7 +96,7 @@ impl Covey {
                             &session,
                             &req.session_token,
                             &subtask_id,
-                            req.lease_duration_ms,
+                            crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
                             lease_now,
                             now,
                         ) {
@@ -147,14 +147,14 @@ impl Covey {
                 "claim_subtask",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
                     ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
-                    if let Some(active_subtask_id) = session.active_subtask_id {
+                    if let Some(active_subtask_id) = session.active_subtask_id().cloned() {
                         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
-                            session_token: req.session_token.clone(),
-                            active_subtask_id: active_subtask_id.to_string(),
+                            session_token: session.session_token,
+                            active_subtask_id,
                         });
                     }
                     if !subtask_exists(tx, &req.subtask_id)? {
@@ -166,7 +166,7 @@ impl Covey {
                         &session,
                         &req.session_token,
                         &req.subtask_id,
-                        req.lease_duration_ms,
+                        crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
                         lease_now,
                         now,
                     )
@@ -199,14 +199,14 @@ impl Covey {
                 "start_subtask",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
                     let claim = require_current_claim(
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        req.fence_seq,
+                        crate::model::FenceSeq::parse(req.fence_seq)?,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -296,14 +296,14 @@ impl Covey {
                 "abandon_subtask",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
                     let claim = require_current_claim(
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        req.fence_seq,
+                        crate::model::FenceSeq::parse(req.fence_seq)?,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -368,14 +368,14 @@ impl Covey {
                 "release_claim",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
                     let claim = require_current_claim(
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        req.fence_seq,
+                        crate::model::FenceSeq::parse(req.fence_seq)?,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -437,7 +437,7 @@ impl Covey {
                 "renew_claim",
                 &req.idempotency_key,
                 &req,
-                now,
+                crate::model::TimestampMs::parse(now)?,
                 || {
                     ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms)?;
                     ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
@@ -445,7 +445,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        req.fence_seq,
+                        crate::model::FenceSeq::parse(req.fence_seq)?,
                         lease_now,
                     )?;
                     let renewed_deadline = claim.lease_deadline.get().max(lease_now) + req.extend_by_ms;
@@ -502,7 +502,7 @@ fn claim_selected_subtask_tx(
     session: &Session,
     session_token: &str,
     subtask_id: &str,
-    lease_duration_ms: i64,
+    lease_duration_ms: crate::model::LeaseDurationMs,
     lease_now: i64,
     now: i64,
 ) -> Result<ClaimResult> {
@@ -513,7 +513,7 @@ fn claim_selected_subtask_tx(
     require_session_can_claim_kind(session, subtask.kind)?;
     if let Some(held_by) = held_claim_owner(tx, subtask_id)? {
         return Err(CoveyError::SubtaskAlreadyClaimed {
-            subtask_id: subtask_id.to_owned(),
+            subtask_id: subtask.subtask_id.clone(),
             held_by,
         });
     }
@@ -521,7 +521,7 @@ fn claim_selected_subtask_tx(
 
     let fence_seq = issue_fence_seq(tx, subtask_id)?;
     let claim_id = crate::model::make_id("claim");
-    let lease_deadline = lease_now + lease_duration_ms;
+    let lease_deadline = crate::model::LeaseDeadlineMs::parse(lease_now + lease_duration_ms.get())?;
     tx.execute(
         r#"
         INSERT INTO claims (
@@ -569,16 +569,23 @@ fn claim_selected_subtask_tx(
         ],
     )?;
     if session_updated != 1 {
+        let current_session = crate::validators::require_session(tx, session_token)?;
+        let active_subtask_id = current_session
+            .active_subtask_id()
+            .cloned()
+            .unwrap_or_else(|| subtask.subtask_id.clone());
         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
-            session_token: session_token.to_owned(),
-            active_subtask_id: crate::validators::require_session(tx, session_token)?
-                .active_subtask_id
-                .map(|active_subtask_id| active_subtask_id.to_string())
-                .unwrap_or_else(|| subtask_id.to_owned()),
+            session_token: current_session.session_token,
+            active_subtask_id,
         });
     }
 
-    let result = ClaimResult::new(claim_id, subtask_id.to_owned(), fence_seq, lease_deadline);
+    let result = ClaimResult::new(
+        claim_id,
+        subtask_id.to_owned(),
+        fence_seq.get(),
+        lease_deadline.get(),
+    );
     append_session_event(
         tx,
         EventType::SubtaskClaimed,
@@ -607,8 +614,11 @@ pub(crate) fn create_subtask_tx(
         .clone()
         .unwrap_or_else(|| crate::model::make_id("subtask"));
     ensure_length("subtask_id", &subtask_id, MAX_OBJECT_ID_LEN)?;
+    let subtask_id = SubtaskId::parse(subtask_id)?;
     if subtask_exists(tx, &subtask_id)? {
-        return Err(CoveyError::DuplicateSubtaskId { subtask_id });
+        return Err(CoveyError::DuplicateSubtaskId {
+            subtask_id: subtask_id.clone(),
+        });
     }
 
     tx.execute(
@@ -620,7 +630,7 @@ pub(crate) fn create_subtask_tx(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)
         "#,
         params![
-            subtask_id,
+            subtask_id.as_str(),
             req.meta_task_id,
             req.title,
             SubtaskKind::Work.to_string(),
@@ -633,17 +643,17 @@ pub(crate) fn create_subtask_tx(
     )?;
     tx.execute(
         "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES (?1, 1)",
-        params![subtask_id],
+        params![subtask_id.as_str()],
     )?;
     append_session_event(
         tx,
         EventType::SubtaskCreated,
         ObjectType::Subtask,
-        &subtask_id,
+        subtask_id.as_str(),
         &req.session_token,
         req,
         now,
     )?;
     refresh_meta_task_state(tx, &req.meta_task_id, now)?;
-    Ok(subtask_id)
+    Ok(subtask_id.to_string())
 }

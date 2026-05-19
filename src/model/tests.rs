@@ -6,13 +6,14 @@ use super::{
     MetaTaskId, ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, PublishArtifactReq,
     ReadyQueueClaim, ReadyQueueItem, ReadyQueueState, ReleaseClaimReq, RequestReservationReq,
     RequestReviewReq, Reservation, ReservationId, ReservationState, ResolveConflictReq, Review,
-    ReviewTarget, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SessionToken,
-    SettlementTarget, StaleSessionsPayload, StartSubtaskReq, SubmitMetaTaskReq, Subtask, SubtaskId,
-    SubtaskKind, SubtaskRow, SubtaskState, SubtaskView, SupersedeQueueItemReq, TimestampMs,
-    bd_import_v1_subtask_id, make_id, parse_generated_members,
+    ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
+    SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq, SubmitMetaTaskReq,
+    Subtask, SubtaskId, SubtaskKind, SubtaskRow, SubtaskState, SubtaskView, SupersedeQueueItemReq,
+    TimestampMs, bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
+use serde_json::json;
 
 #[test]
 fn make_id_uses_prefix_and_uuid_suffix() {
@@ -58,6 +59,41 @@ fn parse_generated_members_rejects_non_array_payloads() {
         err.to_string().contains("sequence"),
         "unexpected error message: {err}"
     );
+}
+
+fn session_json(state: SessionState, active_subtask_id: Option<SubtaskId>) -> serde_json::Value {
+    json!({
+        "session_token": "session-1",
+        "agent_principal_id": "principal-1",
+        "agent_instance_id": "instance-1",
+        "role": SessionRole::Executor,
+        "state": state,
+        "active_subtask_id": active_subtask_id,
+        "last_heartbeat_at": 1,
+        "last_heartbeat_tick": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    })
+}
+
+#[test]
+fn session_lifecycle_rejects_terminal_active_subtask_fields() {
+    let subtask_id = SubtaskId::parse("subtask-1").expect("valid subtask id");
+    let active: Session =
+        serde_json::from_value(session_json(SessionState::Active, Some(subtask_id.clone())))
+            .expect("active session may carry an active subtask");
+    assert_eq!(active.state(), SessionState::Active);
+    assert_eq!(active.active_subtask_id(), Some(&subtask_id));
+
+    for state in [SessionState::Stale, SessionState::Exited] {
+        let err = serde_json::from_value::<Session>(session_json(state, Some(subtask_id.clone())))
+            .expect_err("inactive session with active subtask must be rejected");
+        assert!(
+            err.to_string()
+                .contains("session must not include active_subtask_id"),
+            "unexpected error: {err}"
+        );
+    }
 }
 
 #[test]
@@ -331,6 +367,85 @@ fn ready_queue_domain_preserves_applied_fence_without_active_claim() {
 }
 
 #[test]
+fn reservation_scope_rejects_invalid_scope_shapes() {
+    let exact_with_generated_members = serde_json::json!({
+        "reservation_id": "reservation-1",
+        "owner_subtask_id": "subtask-1",
+        "scope_class": "exact_path",
+        "scope_key": "src/lib.rs",
+        "generated_members": ["generated.rs"],
+        "lease_deadline": 200,
+        "state": "active",
+        "created_at": 10,
+        "updated_at": 11
+    });
+    let err = serde_json::from_value::<Reservation>(exact_with_generated_members)
+        .expect_err("exact-path reservation with generated members must be rejected");
+    assert!(
+        err.to_string()
+            .contains("exact_path reservations must not include generated_members"),
+        "unexpected error: {err}"
+    );
+
+    let repo_global_wrong_key = serde_json::json!({
+        "reservation_id": "reservation-1",
+        "owner_subtask_id": "subtask-1",
+        "scope_class": "repo_global",
+        "scope_key": "src",
+        "generated_members": [],
+        "lease_deadline": 200,
+        "state": "active",
+        "created_at": 10,
+        "updated_at": 11
+    });
+    let err = serde_json::from_value::<Reservation>(repo_global_wrong_key)
+        .expect_err("repo-global reservation must use canonical scope key");
+    assert!(
+        err.to_string()
+            .contains("repo-global reservations require scope_key `repo`"),
+        "unexpected error: {err}"
+    );
+
+    let generated_set_without_members = serde_json::json!({
+        "reservation_id": "reservation-1",
+        "owner_subtask_id": "subtask-1",
+        "scope_class": "generated_set",
+        "scope_key": "artifact-manifest",
+        "generated_members": [],
+        "lease_deadline": 200,
+        "state": "active",
+        "created_at": 10,
+        "updated_at": 11
+    });
+    let err = serde_json::from_value::<Reservation>(generated_set_without_members)
+        .expect_err("generated-set reservation without members must be rejected");
+    assert!(
+        err.to_string()
+            .contains("generated-set reservations require generated_members"),
+        "unexpected error: {err}"
+    );
+
+    let valid_generated_set: Reservation = serde_json::from_value(serde_json::json!({
+        "reservation_id": "reservation-1",
+        "owner_subtask_id": "subtask-1",
+        "scope_class": "generated_set",
+        "scope_key": "artifact-manifest",
+        "generated_members": ["src/generated.rs"],
+        "lease_deadline": 200,
+        "state": "active",
+        "created_at": 10,
+        "updated_at": 11
+    }))
+    .expect("valid generated-set reservation should deserialize");
+    assert_eq!(valid_generated_set.scope_class(), ScopeClass::GeneratedSet);
+    assert_eq!(valid_generated_set.scope_key(), "artifact-manifest");
+    assert_eq!(
+        valid_generated_set.generated_members(),
+        ["src/generated.rs"]
+    );
+}
+
+#[test]
 fn event_payload_from_json_decodes_typed_payloads() {
     let payload = SessionHandle::new(
         "session-1".to_owned(),
@@ -414,17 +529,18 @@ fn payload_json<T: Serialize>(payload: &T) -> String {
 }
 
 fn sample_reservation() -> Reservation {
-    Reservation {
-        reservation_id: ReservationId::parse("reservation-1").expect("valid reservation id"),
-        owner_subtask_id: SubtaskId::parse("subtask-1").expect("valid subtask id"),
-        scope_class: ScopeClass::ExactPath,
-        scope_key: "src/lib.rs".to_owned(),
-        generated_members: vec![],
-        lease_deadline: LeaseDeadlineMs::parse(200).expect("valid lease deadline"),
-        state: ReservationState::Active,
-        created_at: TimestampMs::parse(10).expect("valid timestamp"),
-        updated_at: TimestampMs::parse(11).expect("valid timestamp"),
-    }
+    Reservation::try_from_parts(
+        ReservationId::parse("reservation-1").expect("valid reservation id"),
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        ScopeClass::ExactPath,
+        "src/lib.rs",
+        vec![],
+        LeaseDeadlineMs::parse(200).expect("valid lease deadline"),
+        ReservationState::Active,
+        TimestampMs::parse(10).expect("valid timestamp"),
+        TimestampMs::parse(11).expect("valid timestamp"),
+    )
+    .expect("valid reservation fixture")
 }
 
 fn sample_openspec_event() -> ImportOpenSpecEvent {
