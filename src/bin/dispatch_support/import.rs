@@ -3,46 +3,54 @@ use super::*;
 pub(super) fn dispatch_import(store: &Covey, command: ImportCommand) -> covey::Result<Rendered> {
     match command {
         ImportCommand::Bd(args) => {
-            let result = store.import_bd_v1(ImportBdV1Req {
-                session_token: args.session_token.clone(),
-                beads_db_path: args.beads_db,
-                meta_task_id: args.meta_task_id,
-                prompt_text: args.prompt_text,
-                idempotency_key: args
-                    .idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("import-bd")),
-            })?;
+            let result = store.import_bd_v1(
+                ImportBdV1Req::from_flat_selectors(
+                    args.session_token.clone(),
+                    args.beads_db,
+                    args.meta_task_id,
+                    args.prompt_text,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("import-bd")),
+                )
+                .map_err(|path| covey::CoveyError::InvalidPath { path })?,
+            )?;
             let human = result.human_summary();
+            let (meta_task_id, imported_count, skipped_count, items) = result.into_flat_parts();
             Ok(Rendered::summary(
                 ImportBdV1Ack {
                     operation: "import_bd",
-                    meta_task_id: result.meta_task_id.clone(),
-                    imported_count: result.imported_count,
-                    skipped_count: result.skipped_count,
-                    items: result.items,
+                    meta_task_id,
+                    imported_count,
+                    skipped_count,
+                    items,
                 },
                 human,
             ))
         }
         ImportCommand::Openspec(args) => {
-            let result = store.import_openspec(ImportOpenSpecReq {
-                session_token: args.session_token,
-                change_id: args.change,
-                project_root: args.project_root.to_string_lossy().to_string(),
-                dry_run: args.dry_run,
-            })?;
+            let result = store.import_openspec(
+                ImportOpenSpecReq::from_flat_mode(
+                    args.session_token,
+                    args.change,
+                    args.project_root.to_string_lossy().to_string(),
+                    args.dry_run,
+                )
+                .map_err(|reason| covey::CoveyError::InvalidImportDestination { reason })?,
+            )?;
             let human = result.human_summary();
+            let (change_id, meta_task_id, dry_run, created, updated, unchanged, conflicts, items) =
+                result.into_flat_parts();
             Ok(Rendered::summary(
                 ImportOpenSpecAck {
                     operation: "import_openspec",
-                    change_id: result.change_id,
-                    meta_task_id: result.meta_task_id,
-                    dry_run: result.dry_run,
-                    created: result.created,
-                    updated: result.updated,
-                    unchanged: result.unchanged,
-                    conflicts: result.conflicts,
-                    items: result.items,
+                    change_id,
+                    meta_task_id,
+                    dry_run,
+                    created,
+                    updated,
+                    unchanged,
+                    conflicts,
+                    items,
                 },
                 human,
             ))

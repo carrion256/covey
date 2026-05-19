@@ -129,8 +129,9 @@ impl From<CoveyError> for ReportableError {
             ArtifactDigestCollision, ArtifactNotFound, ClaimNotFound, ClaimNotHeld,
             ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
             IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
-            InputTooLarge, InvalidIdempotencyKey, InvalidImportDestination, InvalidImportRow,
-            InvalidLeaseDuration, InvalidPath, InvalidRuntimeAttestation, InvalidSessionToken,
+            InputTooLarge, InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination,
+            InvalidImportRow, InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath,
+            InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
             InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
             MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
@@ -165,6 +166,9 @@ impl From<CoveyError> for ReportableError {
             | InvalidSourceSchema { .. }
             | InvalidImportDestination { .. }
             | InvalidImportRow { .. }
+            | InvalidEventShape { .. }
+            | InvalidObservabilityRow { .. }
+            | InvalidReadyQueueMetrics { .. }
             | TypeValidationError(_) => Self {
                 exit_code: 2,
                 code: "invalid_args",

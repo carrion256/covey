@@ -63,19 +63,22 @@ fn register(covey: &Covey, principal: &str, role: SessionRole) -> String {
 
 fn attest(covey: &Covey, session_token: &str) {
     covey
-        .record_runtime_attestation(RecordRuntimeAttestationReq {
-            session_token: session_token.to_owned(),
-            provider: "covey-test".into(),
-            model: "test-model".into(),
-            provider_run_id: format!("provider-run-{session_token}"),
-            provider_run_id_issuer: "covey-test-provider".into(),
-            process_id: Some(format!("pid-{session_token}")),
-            container_id: None,
-            command_transcript_digest: format!("blake3:{session_token}-transcript"),
-            started_at: 1_700_000_000_000,
-            ended_at: 1_700_000_000_001,
-            idempotency_key: format!("record-runtime-attestation-{session_token}"),
-        })
+        .record_runtime_attestation(
+            RecordRuntimeAttestationReq::try_from_parts(
+                session_token.to_owned(),
+                "covey-test",
+                "test-model",
+                format!("provider-run-{session_token}"),
+                "covey-test-provider",
+                Some(format!("pid-{session_token}")),
+                None,
+                format!("blake3:{session_token}-transcript"),
+                1_700_000_000_000,
+                1_700_000_000_001,
+                format!("record-runtime-attestation-{session_token}"),
+            )
+            .expect("valid runtime attestation request"),
+        )
         .expect("record runtime attestation");
 }
 
@@ -107,7 +110,7 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
     let stale_claim = covey
         .claim_next_subtask(ClaimNextReq {
             session_token: disappeared_codex.clone(),
-            lease_duration_ms: 30_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-next-disappeared-codex"),
         })
         .expect("claim by disappeared codex")
@@ -138,14 +141,14 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
     let stale_session = covey
         .session_status(&disappeared_codex)
         .expect("stale session status");
-    assert_eq!(stale_session.session.state(), SessionState::Stale);
-    assert!(stale_session.session.active_subtask_id().is_none());
+    assert_eq!(stale_session.session().state(), SessionState::Stale);
+    assert!(stale_session.session().active_subtask_id().is_none());
 
     let resumed_worker = register(&covey, "worker-after-disappear", SessionRole::Executor);
     let resumed_claim = covey
         .claim_next_subtask(ClaimNextReq {
             session_token: resumed_worker.clone(),
-            lease_duration_ms: 30_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-after-disappeared-codex"),
         })
         .expect("claim after disappeared Codex")
@@ -156,7 +159,7 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
         covey
             .subtask_status(&subtask_id)
             .expect("reclaimed subtask")
-            .claim
+            .claim()
             .expect("active resumed claim")
             .claim_id,
         resumed_claim.claim_id
@@ -197,7 +200,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
     let dead_claim = covey
         .claim_next_subtask(ClaimNextReq {
             session_token: dead_worker.clone(),
-            lease_duration_ms: 10_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-next-dead-worker"),
         })
         .expect("dead worker claim")
@@ -211,15 +214,18 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         })
         .expect("dead worker starts");
     covey
-        .request_reservation(RequestReservationReq {
-            session_token: orchestrator.clone(),
-            owner_subtask_id: subtask_id.clone(),
-            scope_class: ScopeClass::RepoGlobal,
-            scope_key: "repo".into(),
-            generated_members: Vec::new(),
-            lease_duration_ms: 10_000,
-            idempotency_key: id_key("reservation-dead-worker"),
-        })
+        .request_reservation(
+            RequestReservationReq::try_from_raw_parts(
+                orchestrator.clone(),
+                subtask_id.clone(),
+                ScopeClass::RepoGlobal,
+                "repo",
+                Vec::new(),
+                10_000,
+                id_key("reservation-dead-worker"),
+            )
+            .expect("valid reservation request"),
+        )
         .expect("dead worker reservation");
 
     rig.tick(10_001);
@@ -240,7 +246,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
     let resumed_claim = covey
         .claim_next_subtask(ClaimNextReq {
             session_token: resumed_worker.clone(),
-            lease_duration_ms: 30_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-next-resumed-worker"),
         })
         .expect("resumed worker claim")
@@ -251,7 +257,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         covey
             .session_status(&dead_worker)
             .expect("dead worker session status")
-            .session
+            .session()
             .active_subtask_id()
             .is_none()
     );
@@ -259,7 +265,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         covey
             .subtask_status(&subtask_id)
             .expect("reclaimed subtask")
-            .claim
+            .claim()
             .expect("active resumed claim")
             .claim_id,
         resumed_claim.claim_id
@@ -274,27 +280,33 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         })
         .expect("resumed worker starts");
     covey
-        .publish_artifact(PublishArtifactReq {
-            session_token: resumed_worker.clone(),
-            claim_id: resumed_claim.claim_id.clone(),
-            fence_seq: resumed_claim.fence_seq,
-            artifact_digest: "blake3:unattended_artifact".into(),
-            artifact_kind: ArtifactKind::PatchBundle,
-            base_rev: "base".into(),
-            manifest_path: "unattended-artifact.json".into(),
-            changed_paths_digest: "blake3:unattended_paths".into(),
-            idempotency_key: id_key("publish-artifact"),
-        })
+        .publish_artifact(
+            PublishArtifactReq::try_from_raw_parts(
+                resumed_worker.clone(),
+                resumed_claim.claim_id.clone(),
+                resumed_claim.fence_seq,
+                "blake3:unattended_artifact".into(),
+                ArtifactKind::PatchBundle,
+                "base".into(),
+                "unattended-artifact.json".into(),
+                "blake3:unattended_paths".into(),
+                id_key("publish-artifact"),
+            )
+            .expect("valid artifact publication request"),
+        )
         .expect("publish artifact");
     let review_id = covey
-        .request_review(RequestReviewReq {
-            session_token: resumed_worker.clone(),
-            subtask_id: subtask_id.clone(),
-            artifact_digest: "blake3:unattended_artifact".into(),
-            review_subtask_id: Some("review_unattended_work".into()),
-            priority: 1,
-            idempotency_key: id_key("request-review"),
-        })
+        .request_review(
+            RequestReviewReq::try_from_raw_parts(
+                resumed_worker.clone(),
+                subtask_id.clone(),
+                "blake3:unattended_artifact",
+                Some("review_unattended_work".into()),
+                1,
+                id_key("request-review"),
+            )
+            .expect("valid review request"),
+        )
         .expect("request review");
     covey
         .release_claim(ReleaseClaimReq {
@@ -308,7 +320,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
     let review_claim = covey
         .claim_next_subtask(ClaimNextReq {
             session_token: reviewer.clone(),
-            lease_duration_ms: 30_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-review"),
         })
         .expect("claim review")
@@ -323,54 +335,67 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         })
         .expect("start review");
     covey
-        .decide_review(DecideReviewReq {
-            session_token: reviewer,
-            review_id: review_id.clone(),
-            claim_id: review_claim.claim_id,
-            fence_seq: review_claim.fence_seq,
-            verdict: covey::ReviewVerdict::Approve,
-            findings_digest: "blake3:unattended_findings".into(),
-            idempotency_key: id_key("decide-review"),
-        })
+        .decide_review(
+            DecideReviewReq::try_from_raw_parts(
+                reviewer,
+                review_id.clone(),
+                review_claim.claim_id,
+                review_claim.fence_seq,
+                covey::ReviewVerdict::Approve,
+                "blake3:unattended_findings".into(),
+                id_key("decide-review"),
+            )
+            .expect("valid review decision request"),
+        )
         .expect("approve review");
     let queue_id = covey
-        .enqueue_for_apply(EnqueueForApplyReq {
-            session_token: orchestrator,
-            artifact_digest: "blake3:unattended_artifact".into(),
-            subtask_id: subtask_id.clone(),
-            settlement_target: SettlementTarget::Canonical,
-            idempotency_key: id_key("enqueue-for-apply"),
-        })
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orchestrator,
+                "blake3:unattended_artifact".into(),
+                subtask_id.clone(),
+                SettlementTarget::Canonical,
+                id_key("enqueue-for-apply"),
+            )
+            .expect("valid enqueue-for-apply request"),
+        )
         .expect("enqueue for apply");
     let queue_claim = covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: apply_gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(
+            MarkInFlightReq::try_from_raw_parts(
+                apply_gate.clone(),
+                queue_id.clone(),
+                30_000,
+                id_key("mark-in-flight"),
+            )
+            .expect("valid mark-in-flight request"),
+        )
         .expect("mark in flight");
     covey
-        .record_apply_verification(RecordApplyVerificationReq {
-            session_token: apply_gate.clone(),
-            queue_id: queue_id.clone(),
-            artifact_digest: "blake3:unattended_artifact".into(),
-            review_id,
-            findings_digest: "blake3:unattended_findings".into(),
-            claim_fence_seq: queue_claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: "blake3:unattended_verdict".into(),
-            seal_digest: "blake3:unattended_seal".into(),
-            idempotency_key: id_key("record-apply-verification"),
-        })
+        .record_apply_verification(
+            RecordApplyVerificationReq::try_from_raw_parts(
+                apply_gate.clone(),
+                queue_id.clone(),
+                "blake3:unattended_artifact",
+                review_id,
+                "blake3:unattended_findings",
+                queue_claim.claim_fence_seq,
+                "mutai-rs",
+                "blake3:unattended_verdict",
+                "blake3:unattended_seal",
+                id_key("record-apply-verification"),
+            )
+            .expect("valid apply verification request"),
+        )
         .expect("record apply verification");
 
-    let mark_applied = MarkAppliedReq {
-        session_token: apply_gate,
+    let mark_applied = MarkAppliedReq::try_from_raw_parts(
+        apply_gate,
         queue_id,
-        claim_fence_seq: queue_claim.claim_fence_seq,
-        idempotency_key: "mark-applied-stable".into(),
-    };
+        queue_claim.claim_fence_seq,
+        "mark-applied-stable",
+    )
+    .expect("valid mark-applied request");
     covey
         .mark_applied(mark_applied.clone())
         .expect("mark applied in Covey");
@@ -387,7 +412,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         covey
             .subtask_status(&subtask_id)
             .expect("final subtask status")
-            .subtask
+            .subtask()
             .state(),
         SubtaskState::Applied
     );

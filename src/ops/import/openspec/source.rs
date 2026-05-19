@@ -50,12 +50,12 @@ pub(super) fn load_openspec_source_snapshot(
     validate_source_digest_binding(
         &mission_packet.source_digests,
         &[
-            OpenSpecSourceDigest::new(
+            source_digest(
                 normalize_relative_path(&proposal_path),
                 proposal_digest.clone(),
-            ),
-            OpenSpecSourceDigest::new(normalize_relative_path(&design_path), design_digest.clone()),
-            OpenSpecSourceDigest::new(normalize_relative_path(&tasks_path), tasks_digest.clone()),
+            )?,
+            source_digest(normalize_relative_path(&design_path), design_digest.clone())?,
+            source_digest(normalize_relative_path(&tasks_path), tasks_digest.clone())?,
         ],
         &spec_digests,
     )?;
@@ -80,15 +80,18 @@ fn validate_source_digest_binding(
     spec_digests: &[OpenSpecSourceDigest],
 ) -> Result<()> {
     for expected in required.iter().chain(spec_digests.iter()) {
-        let Some(actual) = compiled.iter().find(|digest| digest.path == expected.path) else {
+        let Some(actual) = compiled
+            .iter()
+            .find(|digest| digest.path() == expected.path())
+        else {
             return Err(CoveyError::InvalidSourceSchema {
-                path: expected.path.clone(),
+                path: expected.path().to_owned(),
                 detail: "compiled mission missing source digest binding".to_owned(),
             });
         };
-        if actual.digest != expected.digest {
+        if actual.digest() != expected.digest() {
             return Err(CoveyError::InvalidSourceSchema {
-                path: expected.path.clone(),
+                path: expected.path().to_owned(),
                 detail: "compiled mission source digest is stale".to_owned(),
             });
         }
@@ -152,10 +155,15 @@ fn load_openspec_spec_digests(
             detail: format!("failed to read OpenSpec spec file: {err}"),
         })?;
         let relative = spec_path.strip_prefix(root).unwrap_or(&spec_path);
-        digests.push(OpenSpecSourceDigest::new(
+        digests.push(source_digest(
             normalize_relative_path(relative),
             blake3_digest(&bytes),
-        ));
+        )?);
     }
     Ok(digests)
+}
+
+fn source_digest(path: String, digest: String) -> Result<OpenSpecSourceDigest> {
+    OpenSpecSourceDigest::new(path.clone(), digest)
+        .map_err(|detail| CoveyError::InvalidSourceSchema { path, detail })
 }

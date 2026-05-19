@@ -128,8 +128,8 @@ impl Covey {
                         })?,
                         req.provider_run_id.clone(),
                         req.provider_run_id_issuer.clone(),
-                        req.process_id.clone(),
-                        req.container_id.clone(),
+                        req.process_id().map(str::to_owned),
+                        req.container_id().map(str::to_owned),
                         CommandTranscriptDigest::parse(req.command_transcript_digest.clone())
                             .map_err(|err| CoveyError::InvalidRuntimeAttestation {
                                 session_token: session_token.clone(),
@@ -321,14 +321,15 @@ impl Covey {
                 .transpose()?
                 .map(crate::model::SubtaskView::try_from)
                 .transpose()?;
-            Ok(crate::model::SessionStatus::new(session, active_subtask))
+            crate::model::SessionStatus::new(session, active_subtask)
+                .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation(
             "session_status",
             session_token,
             started_at,
             &result,
-            |status| vec![format!("session:{}", status.session.session_token)],
+            |status| vec![format!("session:{}", status.session().session_token)],
         );
         result
     }
@@ -368,19 +369,13 @@ fn validate_runtime_attestation_req(
         &req.command_transcript_digest,
         session_token,
     )?;
-    if let Some(process_id) = req.process_id.as_deref() {
+    if let Some(process_id) = req.process_id() {
         ensure_length("process_id", process_id, MAX_RUNTIME_FIELD_LEN)?;
         ensure_non_empty("process_id", process_id, session_token)?;
     }
-    if let Some(container_id) = req.container_id.as_deref() {
+    if let Some(container_id) = req.container_id() {
         ensure_length("container_id", container_id, MAX_RUNTIME_FIELD_LEN)?;
         ensure_non_empty("container_id", container_id, session_token)?;
-    }
-    if req.process_id.is_none() && req.container_id.is_none() {
-        return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: session_token.clone(),
-            reason: "process_id or container_id is required".to_owned(),
-        });
     }
     if req.ended_at < req.started_at {
         return Err(CoveyError::InvalidRuntimeAttestation {

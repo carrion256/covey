@@ -3,15 +3,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
     AbandonSubtaskReq, ActorKind, ArtifactDigest, ArtifactKind, BaseRev, CancelMetaTaskReq,
-    ClaimId, ClaimResult, ClaimState, CommandTranscriptDigest, ConflictResolutionState,
-    CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, EventType, ExitSessionReq, FenceSeq,
-    FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId,
-    MetaTaskState, ModelId, ObjectType, ProviderId, PublishArtifactReq, QueueId, ReadyQueueClaim,
-    ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq, ReleaseClaimReq,
-    RequestReservationReq, RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
-    ReviewId, ReviewState, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SessionState,
-    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind,
-    SubtaskState, SupersedeQueueItemReq, TimestampMs,
+    ChangedPathsDigest, ClaimId, ClaimResult, ClaimState, CommandTranscriptDigest, ConflictKind,
+    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, EventType,
+    ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs,
+    MarkAppliedReq, MetaTaskId, MetaTaskState, ModelId, ObjectType, ProviderId, PublishArtifactReq,
+    QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq,
+    RecordRuntimeAttestationReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
+    ReservationId, ReservationState, ResolveConflictReq, ReviewId, ReviewState, ReviewVerdict,
+    ScopeClass, SessionHandle, SessionRole, SessionState, SessionToken, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState,
+    SupersedeQueueItemReq, TimestampMs,
 };
 
 /// Persisted session row.
@@ -817,6 +818,17 @@ impl SubtaskLifecycle {
         }
     }
 
+    pub(super) fn from_row_parts_for_kind(
+        kind: SubtaskKind,
+        state: SubtaskState,
+        active_claim_id: Option<ClaimId>,
+        artifact_digest: Option<ArtifactDigest>,
+    ) -> rusqlite::Result<Self> {
+        let lifecycle = Self::from_row_parts(state, active_claim_id, artifact_digest)?;
+        lifecycle.ensure_allowed_for_kind(kind)?;
+        Ok(lifecycle)
+    }
+
     #[must_use]
     pub const fn state(&self) -> SubtaskState {
         match self {
@@ -889,6 +901,26 @@ impl SubtaskLifecycle {
             }
         }
     }
+
+    fn ensure_allowed_for_kind(&self, kind: SubtaskKind) -> rusqlite::Result<()> {
+        match (kind, self.state()) {
+            (SubtaskKind::Work, SubtaskState::Decided) => Err(invalid_subtask_row(
+                "work subtasks cannot use decided review lifecycle state",
+            )),
+            (
+                SubtaskKind::Review,
+                SubtaskState::ArtifactPublished
+                | SubtaskState::ReviewPending
+                | SubtaskState::ChangesRequested
+                | SubtaskState::Approved
+                | SubtaskState::ReadyForApply
+                | SubtaskState::Applied,
+            ) => Err(invalid_subtask_row(
+                "review subtasks cannot use work artifact lifecycle states",
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn require_subtask_artifact(
@@ -900,30 +932,215 @@ fn require_subtask_artifact(
 
 /// Domain object for executable work.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkSubtask {
-    pub subtask_id: SubtaskId,
-    pub meta_task_id: MetaTaskId,
-    pub title: String,
-    pub lifecycle: SubtaskLifecycle,
-    pub priority: i64,
-    pub created_at: TimestampMs,
-    pub updated_at: TimestampMs,
+    subtask_id: SubtaskId,
+    meta_task_id: MetaTaskId,
+    title: String,
+    lifecycle: SubtaskLifecycle,
+    priority: i64,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
 }
 
 /// Domain object for review work bound to one artifact of one work subtask.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewSubtask {
-    pub subtask_id: SubtaskId,
-    pub meta_task_id: MetaTaskId,
-    pub title: String,
-    pub review_target: ReviewTarget,
-    pub lifecycle: SubtaskLifecycle,
-    pub priority: i64,
-    pub created_at: TimestampMs,
-    pub updated_at: TimestampMs,
+    subtask_id: SubtaskId,
+    meta_task_id: MetaTaskId,
+    title: String,
+    review_target: ReviewTarget,
+    lifecycle: SubtaskLifecycle,
+    priority: i64,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawWorkSubtask {
+    subtask_id: SubtaskId,
+    meta_task_id: MetaTaskId,
+    title: String,
+    lifecycle: SubtaskLifecycle,
+    priority: i64,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawReviewSubtask {
+    subtask_id: SubtaskId,
+    meta_task_id: MetaTaskId,
+    title: String,
+    review_target: ReviewTarget,
+    lifecycle: SubtaskLifecycle,
+    priority: i64,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+impl WorkSubtask {
+    /// Builds a work subtask, rejecting review-only lifecycle states.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `lifecycle` is not legal for work subtasks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subtask_id: SubtaskId,
+        meta_task_id: MetaTaskId,
+        title: String,
+        lifecycle: SubtaskLifecycle,
+        priority: i64,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> rusqlite::Result<Self> {
+        lifecycle.ensure_allowed_for_kind(SubtaskKind::Work)?;
+        Ok(Self {
+            subtask_id,
+            meta_task_id,
+            title,
+            lifecycle,
+            priority,
+            created_at,
+            updated_at,
+        })
+    }
+}
+
+impl ReviewSubtask {
+    /// Builds a review subtask, rejecting work-artifact lifecycle states.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `lifecycle` is not legal for review subtasks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subtask_id: SubtaskId,
+        meta_task_id: MetaTaskId,
+        title: String,
+        review_target: ReviewTarget,
+        lifecycle: SubtaskLifecycle,
+        priority: i64,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> rusqlite::Result<Self> {
+        lifecycle.ensure_allowed_for_kind(SubtaskKind::Review)?;
+        Ok(Self {
+            subtask_id,
+            meta_task_id,
+            title,
+            review_target,
+            lifecycle,
+            priority,
+            created_at,
+            updated_at,
+        })
+    }
+}
+
+impl TryFrom<RawWorkSubtask> for WorkSubtask {
+    type Error = rusqlite::Error;
+
+    fn try_from(raw: RawWorkSubtask) -> Result<Self, Self::Error> {
+        Self::new(
+            raw.subtask_id,
+            raw.meta_task_id,
+            raw.title,
+            raw.lifecycle,
+            raw.priority,
+            raw.created_at,
+            raw.updated_at,
+        )
+    }
+}
+
+impl From<&WorkSubtask> for RawWorkSubtask {
+    fn from(subtask: &WorkSubtask) -> Self {
+        Self {
+            subtask_id: subtask.subtask_id.clone(),
+            meta_task_id: subtask.meta_task_id.clone(),
+            title: subtask.title.clone(),
+            lifecycle: subtask.lifecycle.clone(),
+            priority: subtask.priority,
+            created_at: subtask.created_at,
+            updated_at: subtask.updated_at,
+        }
+    }
+}
+
+impl Serialize for WorkSubtask {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawWorkSubtask::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkSubtask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawWorkSubtask::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<RawReviewSubtask> for ReviewSubtask {
+    type Error = rusqlite::Error;
+
+    fn try_from(raw: RawReviewSubtask) -> Result<Self, Self::Error> {
+        Self::new(
+            raw.subtask_id,
+            raw.meta_task_id,
+            raw.title,
+            raw.review_target,
+            raw.lifecycle,
+            raw.priority,
+            raw.created_at,
+            raw.updated_at,
+        )
+    }
+}
+
+impl From<&ReviewSubtask> for RawReviewSubtask {
+    fn from(subtask: &ReviewSubtask) -> Self {
+        Self {
+            subtask_id: subtask.subtask_id.clone(),
+            meta_task_id: subtask.meta_task_id.clone(),
+            title: subtask.title.clone(),
+            review_target: subtask.review_target.clone(),
+            lifecycle: subtask.lifecycle.clone(),
+            priority: subtask.priority,
+            created_at: subtask.created_at,
+            updated_at: subtask.updated_at,
+        }
+    }
+}
+
+impl Serialize for ReviewSubtask {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawReviewSubtask::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReviewSubtask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawReviewSubtask::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Domain representation of a subtask.
@@ -987,10 +1204,14 @@ impl TryFrom<SubtaskRow> for Subtask {
     type Error = rusqlite::Error;
 
     fn try_from(row: SubtaskRow) -> Result<Self, Self::Error> {
-        let lifecycle =
-            SubtaskLifecycle::from_row_parts(row.state, row.current_claim_id, row.artifact_digest)?;
         match row.kind {
             SubtaskKind::Work => {
+                let lifecycle = SubtaskLifecycle::from_row_parts_for_kind(
+                    row.kind,
+                    row.state,
+                    row.current_claim_id,
+                    row.artifact_digest,
+                )?;
                 if row.review_target_subtask_id.is_some()
                     || row.review_target_artifact_digest.is_some()
                 {
@@ -1004,9 +1225,15 @@ impl TryFrom<SubtaskRow> for Subtask {
                     row.priority,
                     row.created_at,
                     row.updated_at,
-                )))
+                )?))
             }
             SubtaskKind::Review => {
+                let lifecycle = SubtaskLifecycle::from_row_parts_for_kind(
+                    row.kind,
+                    row.state,
+                    row.current_claim_id,
+                    row.artifact_digest,
+                )?;
                 let Some(target_subtask_id) = row.review_target_subtask_id else {
                     return Err(invalid_subtask_row(
                         "review subtask is missing target subtask",
@@ -1026,7 +1253,7 @@ impl TryFrom<SubtaskRow> for Subtask {
                     row.priority,
                     row.created_at,
                     row.updated_at,
-                )))
+                )?))
             }
         }
     }
@@ -1065,7 +1292,7 @@ pub struct Artifact {
     pub produced_by_subtask_id: SubtaskId,
     pub produced_by_session: SessionToken,
     pub manifest_path: String,
-    pub changed_paths_digest: ArtifactDigest,
+    pub changed_paths_digest: ChangedPathsDigest,
     pub created_at: TimestampMs,
 }
 
@@ -1211,7 +1438,13 @@ impl Reservation {
 }
 
 impl ReservationScope {
-    fn from_parts(
+    /// Builds a reservation scope from the flat storage/API shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the scope class, key, and generated members are
+    /// inconsistent with each other.
+    pub fn from_parts(
         scope_class: ScopeClass,
         scope_key: String,
         generated_members: Vec<String>,
@@ -1255,7 +1488,8 @@ impl ReservationScope {
         }
     }
 
-    const fn scope_class(&self) -> ScopeClass {
+    #[must_use]
+    pub const fn scope_class(&self) -> ScopeClass {
         match self {
             Self::ExactPath { .. } => ScopeClass::ExactPath,
             Self::Subtree { .. } => ScopeClass::Subtree,
@@ -1264,7 +1498,8 @@ impl ReservationScope {
         }
     }
 
-    fn scope_key(&self) -> &str {
+    #[must_use]
+    pub fn scope_key(&self) -> &str {
         match self {
             Self::ExactPath { scope_key }
             | Self::Subtree { scope_key }
@@ -1273,7 +1508,8 @@ impl ReservationScope {
         }
     }
 
-    fn generated_members(&self) -> &[String] {
+    #[must_use]
+    pub fn generated_members(&self) -> &[String] {
         match self {
             Self::GeneratedSet {
                 generated_members, ..
@@ -1865,11 +2101,11 @@ pub struct ApplyVerification {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub seq: i64,
-    pub event_type: EventType,
-    pub object_type: ObjectType,
+    event_type: EventType,
+    object_type: ObjectType,
     pub object_id: String,
     pub(super) actor: EventActor,
-    pub payload_json: String,
+    payload_json: String,
     pub created_at: TimestampMs,
 }
 
@@ -1878,8 +2114,6 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedEvent {
     pub seq: i64,
-    pub event_type: EventType,
-    pub object_type: ObjectType,
     pub object_id: String,
     pub(super) actor: EventActor,
     pub payload: EventPayload,
@@ -1918,7 +2152,11 @@ struct RawTypedEvent {
 
 impl Event {
     /// Builds a session-authored event-log record.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the declared event/object type does not match the
+    /// JSON payload shape.
     pub fn session(
         seq: i64,
         event_type: EventType,
@@ -1927,8 +2165,9 @@ impl Event {
         session_token: SessionToken,
         payload_json: String,
         created_at: TimestampMs,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Self::validate_payload_shape(event_type, object_type, &payload_json)?;
+        Ok(Self {
             seq,
             event_type,
             object_type,
@@ -1936,11 +2175,15 @@ impl Event {
             actor: EventActor::Session { session_token },
             payload_json,
             created_at,
-        }
+        })
     }
 
     /// Builds a system-authored event-log record.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the declared event/object type does not match the
+    /// JSON payload shape.
     pub fn system(
         seq: i64,
         event_type: EventType,
@@ -1948,8 +2191,9 @@ impl Event {
         object_id: String,
         payload_json: String,
         created_at: TimestampMs,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Self::validate_payload_shape(event_type, object_type, &payload_json)?;
+        Ok(Self {
             seq,
             event_type,
             object_type,
@@ -1957,11 +2201,12 @@ impl Event {
             actor: EventActor::System,
             payload_json,
             created_at,
-        }
+        })
     }
 
     fn from_raw(raw: RawEvent) -> Result<Self, String> {
         let actor = EventActor::try_from_parts(raw.actor_kind, raw.session_token)?;
+        Self::validate_payload_shape(raw.event_type, raw.object_type, &raw.payload_json)?;
         Ok(Self {
             seq: raw.seq,
             event_type: raw.event_type,
@@ -1971,6 +2216,40 @@ impl Event {
             payload_json: raw.payload_json,
             created_at: raw.created_at,
         })
+    }
+
+    fn validate_payload_shape(
+        event_type: EventType,
+        object_type: ObjectType,
+        payload_json: &str,
+    ) -> Result<(), String> {
+        let payload = EventPayload::from_json(event_type, payload_json)
+            .map_err(|error| format!("event payload does not match {event_type}: {error}"))?;
+        let expected_object_type = payload.object_type();
+        if object_type != expected_object_type {
+            return Err(format!(
+                "event payload implies object_type {expected_object_type}, got {object_type}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the event kind declared by this raw event.
+    #[must_use]
+    pub const fn event_type(&self) -> EventType {
+        self.event_type
+    }
+
+    /// Returns the object kind validated against this raw event payload.
+    #[must_use]
+    pub const fn object_type(&self) -> ObjectType {
+        self.object_type
+    }
+
+    /// Returns the raw JSON payload validated against `event_type`.
+    #[must_use]
+    pub fn payload_json(&self) -> &str {
+        &self.payload_json
     }
 
     /// Returns the event actor class.
@@ -1987,6 +2266,18 @@ impl Event {
 }
 
 impl TypedEvent {
+    /// Returns the event kind implied by the typed payload variant.
+    #[must_use]
+    pub const fn event_type(&self) -> EventType {
+        self.payload.event_type()
+    }
+
+    /// Returns the object kind implied by the typed payload variant.
+    #[must_use]
+    pub fn object_type(&self) -> ObjectType {
+        self.payload.object_type()
+    }
+
     /// Returns the event actor class.
     #[must_use]
     pub const fn actor_kind(&self) -> ActorKind {
@@ -2066,8 +2357,8 @@ impl Serialize for TypedEvent {
     {
         RawTypedEvent {
             seq: self.seq,
-            event_type: self.event_type,
-            object_type: self.object_type,
+            event_type: self.event_type(),
+            object_type: self.object_type(),
             object_id: self.object_id.clone(),
             actor_kind: self.actor.actor_kind(),
             session_token: self.actor.session_token().cloned(),
@@ -2084,12 +2375,24 @@ impl<'de> Deserialize<'de> for TypedEvent {
         D: Deserializer<'de>,
     {
         let raw = RawTypedEvent::deserialize(deserializer)?;
+        let expected_event_type = raw.payload.event_type();
+        if raw.event_type != expected_event_type {
+            return Err(serde::de::Error::custom(format!(
+                "typed event payload implies event_type {expected_event_type}, got {}",
+                raw.event_type
+            )));
+        }
+        let expected_object_type = raw.payload.object_type();
+        if raw.object_type != expected_object_type {
+            return Err(serde::de::Error::custom(format!(
+                "typed event payload implies object_type {expected_object_type}, got {}",
+                raw.object_type
+            )));
+        }
         let actor = EventActor::try_from_parts(raw.actor_kind, raw.session_token)
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
             seq: raw.seq,
-            event_type: raw.event_type,
-            object_type: raw.object_type,
             object_id: raw.object_id,
             actor,
             payload: raw.payload,
@@ -2143,16 +2446,194 @@ pub enum EventPayload {
     OpenSpecImported(Box<ImportOpenSpecEvent>),
 }
 
+impl EventPayload {
+    /// Returns the event kind implied by this payload variant.
+    #[must_use]
+    pub const fn event_type(&self) -> EventType {
+        match self {
+            Self::SessionRegistered(_) => EventType::SessionRegistered,
+            Self::SessionHeartbeat(_) => EventType::SessionHeartbeat,
+            Self::SessionExited(_) => EventType::SessionExited,
+            Self::RuntimeAttestationRecorded(_) => EventType::RuntimeAttestationRecorded,
+            Self::MetaTaskSubmitted(_) => EventType::MetaTaskSubmitted,
+            Self::MetaTaskCancelled(_) => EventType::MetaTaskCancelled,
+            Self::SubtaskCreated(_) => EventType::SubtaskCreated,
+            Self::SubtaskClaimed(_) => EventType::SubtaskClaimed,
+            Self::SubtaskStarted(_) => EventType::SubtaskStarted,
+            Self::SubtaskAbandoned(_) => EventType::SubtaskAbandoned,
+            Self::ClaimReleased(_) => EventType::ClaimReleased,
+            Self::ClaimRenewed(_) => EventType::ClaimRenewed,
+            Self::ArtifactPublished(_) => EventType::ArtifactPublished,
+            Self::ReviewRequested(_) => EventType::ReviewRequested,
+            Self::ReviewDecided(_) => EventType::ReviewDecided,
+            Self::ReadyQueueEnqueued(_) => EventType::ReadyQueueEnqueued,
+            Self::ReadyQueueInFlight(_) => EventType::ReadyQueueInFlight,
+            Self::ApplyVerificationRecorded(_) => EventType::ApplyVerificationRecorded,
+            Self::ReadyQueueApplied(_) => EventType::ReadyQueueApplied,
+            Self::ReadyQueueSuperseded(_) => EventType::ReadyQueueSuperseded,
+            Self::ReservationRequested(_) => EventType::ReservationRequested,
+            Self::ReservationReleased(_) => EventType::ReservationReleased,
+            Self::ReservationRenewed(_) => EventType::ReservationRenewed,
+            Self::ConflictResolved(_) => EventType::ConflictResolved,
+            Self::SessionsReaped(_) => EventType::SessionsReaped,
+            Self::ClaimsExpired(_) => EventType::ClaimsExpired,
+            Self::ReservationsExpired(_) => EventType::ReservationsExpired,
+            Self::OpenSpecImported(_) => EventType::OpenSpecImported,
+        }
+    }
+
+    /// Returns the object kind implied by this payload variant.
+    #[must_use]
+    pub fn object_type(&self) -> ObjectType {
+        match self {
+            Self::SessionRegistered(_)
+            | Self::SessionHeartbeat(_)
+            | Self::SessionExited(_)
+            | Self::SessionsReaped(_) => ObjectType::Session,
+            Self::RuntimeAttestationRecorded(_) => ObjectType::RuntimeAttestation,
+            Self::MetaTaskSubmitted(_) | Self::MetaTaskCancelled(_) => ObjectType::MetaTask,
+            Self::SubtaskCreated(_) | Self::SubtaskStarted(_) | Self::SubtaskAbandoned(_) => {
+                ObjectType::Subtask
+            }
+            Self::SubtaskClaimed(_)
+            | Self::ClaimReleased(_)
+            | Self::ClaimRenewed(_)
+            | Self::ClaimsExpired(_) => ObjectType::Claim,
+            Self::ArtifactPublished(_) => ObjectType::Artifact,
+            Self::ReviewRequested(_) | Self::ReviewDecided(_) => ObjectType::Review,
+            Self::ReadyQueueEnqueued(_)
+            | Self::ReadyQueueInFlight(_)
+            | Self::ApplyVerificationRecorded(_)
+            | Self::ReadyQueueApplied(_)
+            | Self::ReadyQueueSuperseded(_) => ObjectType::ReadyQueue,
+            Self::ReservationRequested(_)
+            | Self::ReservationReleased(_)
+            | Self::ReservationRenewed(_)
+            | Self::ReservationsExpired(_) => ObjectType::Reservation,
+            Self::ConflictResolved(_) => ObjectType::Conflict,
+            Self::OpenSpecImported(event) => event.object_type(),
+        }
+    }
+}
+
 /// Persisted unresolved conflict row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
-    pub conflict_id: String,
-    pub object_type: ObjectType,
-    pub object_id: String,
-    pub conflict_kind: String,
-    pub payload_json: String,
-    pub detected_at: TimestampMs,
-    pub resolution_state: ConflictResolutionState,
+    conflict_id: String,
+    object_type: ObjectType,
+    object_id: String,
+    conflict_kind: ConflictKind,
+    payload_json: String,
+    detected_at: TimestampMs,
+    resolution_state: ConflictResolutionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawConflict {
+    conflict_id: String,
+    object_type: ObjectType,
+    object_id: String,
+    conflict_kind: ConflictKind,
+    payload_json: String,
+    detected_at: TimestampMs,
+    resolution_state: ConflictResolutionState,
+}
+
+impl Conflict {
+    fn try_from_raw(raw: RawConflict) -> Result<Self, String> {
+        match raw.conflict_kind {
+            ConflictKind::ReservationOverlap => {
+                if raw.object_type != ObjectType::Reservation {
+                    return Err(
+                        "reservation_overlap conflicts must target reservation objects".into(),
+                    );
+                }
+                serde_json::from_str::<ReservationOverlapConflictPayload>(&raw.payload_json)
+                    .map_err(|error| {
+                        format!("reservation_overlap conflicts require typed payload: {error}")
+                    })?;
+            }
+        }
+        Ok(Self {
+            conflict_id: raw.conflict_id,
+            object_type: raw.object_type,
+            object_id: raw.object_id,
+            conflict_kind: raw.conflict_kind,
+            payload_json: raw.payload_json,
+            detected_at: raw.detected_at,
+            resolution_state: raw.resolution_state,
+        })
+    }
+
+    /// Returns the stable conflict id.
+    #[must_use]
+    pub fn conflict_id(&self) -> &str {
+        &self.conflict_id
+    }
+
+    /// Returns the object class this conflict targets.
+    #[must_use]
+    pub const fn object_type(&self) -> ObjectType {
+        self.object_type
+    }
+
+    /// Returns the target object id.
+    #[must_use]
+    pub fn object_id(&self) -> &str {
+        &self.object_id
+    }
+
+    /// Returns the typed conflict kind.
+    #[must_use]
+    pub const fn conflict_kind(&self) -> ConflictKind {
+        self.conflict_kind
+    }
+
+    /// Returns the validated JSON payload stored for this conflict.
+    #[must_use]
+    pub fn payload_json(&self) -> &str {
+        &self.payload_json
+    }
+
+    /// Returns the current operator resolution state.
+    #[must_use]
+    pub const fn resolution_state(&self) -> ConflictResolutionState {
+        self.resolution_state
+    }
+
+    /// Returns the detection timestamp.
+    #[must_use]
+    pub const fn detected_at(&self) -> TimestampMs {
+        self.detected_at
+    }
+}
+
+impl Serialize for Conflict {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawConflict {
+            conflict_id: self.conflict_id.clone(),
+            object_type: self.object_type,
+            object_id: self.object_id.clone(),
+            conflict_kind: self.conflict_kind,
+            payload_json: self.payload_json.clone(),
+            detected_at: self.detected_at,
+            resolution_state: self.resolution_state,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Conflict {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawConflict::deserialize(deserializer)?;
+        Self::try_from_raw(raw).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

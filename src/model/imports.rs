@@ -4,40 +4,262 @@
 //! Imported records are converted into Covey's validated domain records before
 //! becoming live lifecycle state.
 
-use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::{Display, EnumString};
 
 use super::{ObjectType, TimestampMs};
 
 /// Request to import eligible bd issues from a beads database into Covey as work subtasks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBdV1Req {
     pub session_token: String,
     pub beads_db_path: String,
-    pub meta_task_id: Option<String>,
-    pub prompt_text: Option<String>,
+    destination: ImportBdV1Destination,
     pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportBdV1Destination {
+    ExistingMetaTask { meta_task_id: String },
+    NewMetaTask { prompt_text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawImportBdV1Req {
+    session_token: String,
+    beads_db_path: String,
+    meta_task_id: Option<String>,
+    prompt_text: Option<String>,
+    idempotency_key: String,
+}
+
+impl ImportBdV1Req {
+    /// Builds a bd import request that attaches to an existing meta-task.
+    #[must_use]
+    pub fn existing_meta_task(
+        session_token: impl Into<String>,
+        beads_db_path: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_token: session_token.into(),
+            beads_db_path: beads_db_path.into(),
+            destination: ImportBdV1Destination::ExistingMetaTask {
+                meta_task_id: meta_task_id.into(),
+            },
+            idempotency_key: idempotency_key.into(),
+        }
+    }
+
+    /// Builds a bd import request that creates a new meta-task.
+    #[must_use]
+    pub fn new_meta_task(
+        session_token: impl Into<String>,
+        beads_db_path: impl Into<String>,
+        prompt_text: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_token: session_token.into(),
+            beads_db_path: beads_db_path.into(),
+            destination: ImportBdV1Destination::NewMetaTask {
+                prompt_text: prompt_text.into(),
+            },
+            idempotency_key: idempotency_key.into(),
+        }
+    }
+
+    /// Builds a bd import request from the legacy flat selector fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless exactly one of `meta_task_id` or `prompt_text`
+    /// is present.
+    pub fn from_flat_selectors(
+        session_token: impl Into<String>,
+        beads_db_path: impl Into<String>,
+        meta_task_id: Option<String>,
+        prompt_text: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, String> {
+        let destination = ImportBdV1Destination::from_flat_selectors(meta_task_id, prompt_text)?;
+        Ok(Self {
+            session_token: session_token.into(),
+            beads_db_path: beads_db_path.into(),
+            destination,
+            idempotency_key: idempotency_key.into(),
+        })
+    }
+
+    /// Returns the existing meta-task selector, when this request uses one.
+    #[must_use]
+    pub fn meta_task_id(&self) -> Option<&str> {
+        self.destination.meta_task_id()
+    }
+
+    /// Returns the new meta-task prompt selector, when this request uses one.
+    #[must_use]
+    pub fn prompt_text(&self) -> Option<&str> {
+        self.destination.prompt_text()
+    }
+}
+
+impl ImportBdV1Destination {
+    fn from_flat_selectors(
+        meta_task_id: Option<String>,
+        prompt_text: Option<String>,
+    ) -> Result<Self, String> {
+        match (meta_task_id, prompt_text) {
+            (Some(meta_task_id), None) => Ok(Self::ExistingMetaTask { meta_task_id }),
+            (None, Some(prompt_text)) => Ok(Self::NewMetaTask { prompt_text }),
+            _ => Err("bd import request requires exactly one destination selector".into()),
+        }
+    }
+
+    fn meta_task_id(&self) -> Option<&str> {
+        match self {
+            Self::ExistingMetaTask { meta_task_id } => Some(meta_task_id),
+            Self::NewMetaTask { .. } => None,
+        }
+    }
+
+    fn prompt_text(&self) -> Option<&str> {
+        match self {
+            Self::ExistingMetaTask { .. } => None,
+            Self::NewMetaTask { prompt_text } => Some(prompt_text),
+        }
+    }
+}
+
+impl From<&ImportBdV1Req> for RawImportBdV1Req {
+    fn from(req: &ImportBdV1Req) -> Self {
+        Self {
+            session_token: req.session_token.clone(),
+            beads_db_path: req.beads_db_path.clone(),
+            meta_task_id: req.meta_task_id().map(str::to_owned),
+            prompt_text: req.prompt_text().map(str::to_owned),
+            idempotency_key: req.idempotency_key.clone(),
+        }
+    }
+}
+
+impl Serialize for ImportBdV1Req {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawImportBdV1Req::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportBdV1Req {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawImportBdV1Req::deserialize(deserializer)?;
+        Self::from_flat_selectors(
+            raw.session_token,
+            raw.beads_db_path,
+            raw.meta_task_id,
+            raw.prompt_text,
+            raw.idempotency_key,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Result of a V1 bd batch import operation.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBdV1Result {
     pub meta_task_id: String,
-    pub imported_count: usize,
-    pub skipped_count: usize,
-    pub items: Vec<ImportBdV1ItemResult>,
+    tally: ImportBdV1ResultTally,
+    items: Vec<ImportBdV1ItemResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImportBdV1ResultTally {
+    imported_count: usize,
+    skipped_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawImportBdV1Result {
+    meta_task_id: String,
+    imported_count: usize,
+    skipped_count: usize,
+    items: Vec<ImportBdV1ItemResult>,
 }
 
 impl ImportBdV1Result {
+    /// Builds a bd import result with aggregate counts derived from item outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provided flat counts do not match the item outcomes.
+    pub fn new(
+        meta_task_id: impl Into<String>,
+        items: Vec<ImportBdV1ItemResult>,
+    ) -> Result<Self, String> {
+        Self::from_raw_parts(meta_task_id, None, items)
+    }
+
+    fn from_raw_parts(
+        meta_task_id: impl Into<String>,
+        expected_tally: Option<ImportBdV1ResultTally>,
+        items: Vec<ImportBdV1ItemResult>,
+    ) -> Result<Self, String> {
+        let tally = ImportBdV1ResultTally::from_items(&items);
+        if let Some(expected_tally) = expected_tally {
+            expected_tally.matches(tally)?;
+        }
+        Ok(Self {
+            meta_task_id: meta_task_id.into(),
+            tally,
+            items,
+        })
+    }
+
+    /// Returns the number of imported records, derived from item outcomes.
+    #[must_use]
+    pub const fn imported_count(&self) -> usize {
+        self.tally.imported_count
+    }
+
+    /// Returns the number of skipped records, derived from item outcomes.
+    #[must_use]
+    pub const fn skipped_count(&self) -> usize {
+        self.tally.skipped_count
+    }
+
+    /// Returns per-item import outcomes.
+    #[must_use]
+    pub fn items(&self) -> &[ImportBdV1ItemResult] {
+        &self.items
+    }
+
+    /// Splits this result into the legacy flat response parts.
+    #[must_use]
+    pub fn into_flat_parts(self) -> (String, usize, usize, Vec<ImportBdV1ItemResult>) {
+        (
+            self.meta_task_id,
+            self.tally.imported_count,
+            self.tally.skipped_count,
+            self.items,
+        )
+    }
+
     /// Returns a concise, deterministic human-readable summary of the import.
     pub fn human_summary(&self) -> String {
         let mut summary = format!(
             "imported {} subtask(s) into {} (skipped {})",
-            self.imported_count, self.meta_task_id, self.skipped_count
+            self.imported_count(),
+            self.meta_task_id,
+            self.skipped_count()
         );
-        if self.skipped_count > 0 {
+        if self.skipped_count() > 0 {
             let mut duplicate_count = 0usize;
             let mut invalid_count = 0usize;
             for item in &self.items {
@@ -59,6 +281,77 @@ impl ImportBdV1Result {
             }
         }
         summary
+    }
+}
+
+impl ImportBdV1ResultTally {
+    fn from_items(items: &[ImportBdV1ItemResult]) -> Self {
+        let mut tally = Self {
+            imported_count: 0,
+            skipped_count: 0,
+        };
+        for item in items {
+            if item.skip_reason().is_some() {
+                tally.skipped_count += 1;
+            } else {
+                tally.imported_count += 1;
+            }
+        }
+        tally
+    }
+
+    fn matches(self, actual: Self) -> Result<(), String> {
+        if self.imported_count != actual.imported_count {
+            return Err(format!(
+                "bd import result imported_count mismatch: expected {}, derived {}",
+                self.imported_count, actual.imported_count
+            ));
+        }
+        if self.skipped_count != actual.skipped_count {
+            return Err(format!(
+                "bd import result skipped_count mismatch: expected {}, derived {}",
+                self.skipped_count, actual.skipped_count
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl From<&ImportBdV1Result> for RawImportBdV1Result {
+    fn from(result: &ImportBdV1Result) -> Self {
+        Self {
+            meta_task_id: result.meta_task_id.clone(),
+            imported_count: result.tally.imported_count,
+            skipped_count: result.tally.skipped_count,
+            items: result.items.clone(),
+        }
+    }
+}
+
+impl Serialize for ImportBdV1Result {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawImportBdV1Result::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportBdV1Result {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawImportBdV1Result::deserialize(deserializer)?;
+        Self::from_raw_parts(
+            raw.meta_task_id,
+            Some(ImportBdV1ResultTally {
+                imported_count: raw.imported_count,
+                skipped_count: raw.skipped_count,
+            }),
+            raw.items,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -212,41 +505,420 @@ pub enum ImportBdV1SkipReason {
 }
 
 /// Request to import one OpenSpec change into Covey task state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecReq {
-    pub session_token: Option<String>,
     pub change_id: String,
     pub project_root: String,
-    pub dry_run: bool,
+    mode: ImportOpenSpecMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportOpenSpecMode {
+    DryRun { session_token: Option<String> },
+    Write { session_token: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawImportOpenSpecReq {
+    session_token: Option<String>,
+    change_id: String,
+    project_root: String,
+    dry_run: bool,
+}
+
+impl ImportOpenSpecReq {
+    /// Builds an anonymous OpenSpec dry-run import request.
+    #[must_use]
+    pub fn dry_run(change_id: impl Into<String>, project_root: impl Into<String>) -> Self {
+        Self {
+            change_id: change_id.into(),
+            project_root: project_root.into(),
+            mode: ImportOpenSpecMode::DryRun {
+                session_token: None,
+            },
+        }
+    }
+
+    /// Builds a session-attributed OpenSpec dry-run import request.
+    #[must_use]
+    pub fn dry_run_for_session(
+        session_token: impl Into<String>,
+        change_id: impl Into<String>,
+        project_root: impl Into<String>,
+    ) -> Self {
+        Self {
+            change_id: change_id.into(),
+            project_root: project_root.into(),
+            mode: ImportOpenSpecMode::DryRun {
+                session_token: Some(session_token.into()),
+            },
+        }
+    }
+
+    /// Builds an OpenSpec write-mode import request.
+    #[must_use]
+    pub fn write(
+        session_token: impl Into<String>,
+        change_id: impl Into<String>,
+        project_root: impl Into<String>,
+    ) -> Self {
+        Self {
+            change_id: change_id.into(),
+            project_root: project_root.into(),
+            mode: ImportOpenSpecMode::Write {
+                session_token: session_token.into(),
+            },
+        }
+    }
+
+    /// Builds an OpenSpec import request from the legacy flat mode fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when write mode is requested without a session token.
+    pub fn from_flat_mode(
+        session_token: Option<String>,
+        change_id: impl Into<String>,
+        project_root: impl Into<String>,
+        dry_run: bool,
+    ) -> Result<Self, String> {
+        let mode = ImportOpenSpecMode::from_flat_mode(session_token, dry_run)?;
+        Ok(Self {
+            change_id: change_id.into(),
+            project_root: project_root.into(),
+            mode,
+        })
+    }
+
+    /// Returns the session token used to attribute this request, when present.
+    #[must_use]
+    pub fn session_token(&self) -> Option<&str> {
+        self.mode.session_token()
+    }
+
+    /// Returns the required write-mode session token, when this request mutates state.
+    #[must_use]
+    pub fn write_session_token(&self) -> Option<&str> {
+        self.mode.write_session_token()
+    }
+
+    /// Returns whether this import should only plan the OpenSpec change.
+    #[must_use]
+    pub const fn is_dry_run(&self) -> bool {
+        self.mode.dry_run()
+    }
+}
+
+impl ImportOpenSpecMode {
+    fn from_flat_mode(session_token: Option<String>, dry_run: bool) -> Result<Self, String> {
+        if dry_run {
+            Ok(Self::DryRun { session_token })
+        } else {
+            session_token
+                .map(|session_token| Self::Write { session_token })
+                .ok_or_else(|| "write mode requires --session-token".to_owned())
+        }
+    }
+
+    fn session_token(&self) -> Option<&str> {
+        match self {
+            Self::DryRun { session_token } => session_token.as_deref(),
+            Self::Write { session_token } => Some(session_token),
+        }
+    }
+
+    fn write_session_token(&self) -> Option<&str> {
+        match self {
+            Self::DryRun { .. } => None,
+            Self::Write { session_token } => Some(session_token),
+        }
+    }
+
+    const fn dry_run(&self) -> bool {
+        match self {
+            Self::DryRun { .. } => true,
+            Self::Write { .. } => false,
+        }
+    }
+}
+
+impl From<&ImportOpenSpecReq> for RawImportOpenSpecReq {
+    fn from(req: &ImportOpenSpecReq) -> Self {
+        Self {
+            session_token: req.session_token().map(str::to_owned),
+            change_id: req.change_id.clone(),
+            project_root: req.project_root.clone(),
+            dry_run: req.is_dry_run(),
+        }
+    }
+}
+
+impl Serialize for ImportOpenSpecReq {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawImportOpenSpecReq::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportOpenSpecReq {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawImportOpenSpecReq::deserialize(deserializer)?;
+        Self::from_flat_mode(
+            raw.session_token,
+            raw.change_id,
+            raw.project_root,
+            raw.dry_run,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Result of an OpenSpec import or dry-run import plan.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecResult {
     pub change_id: String,
     pub meta_task_id: String,
-    pub dry_run: bool,
-    pub created: usize,
-    pub updated: usize,
-    pub unchanged: usize,
-    pub conflicts: Vec<ImportOpenSpecConflict>,
-    pub items: Vec<ImportOpenSpecItemResult>,
+    dry_run: bool,
+    tally: ImportOpenSpecResultTally,
+    conflicts: Vec<ImportOpenSpecConflict>,
+    items: Vec<ImportOpenSpecItemResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImportOpenSpecResultTally {
+    created: usize,
+    updated: usize,
+    unchanged: usize,
+    conflicts: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawImportOpenSpecResult {
+    change_id: String,
+    meta_task_id: String,
+    dry_run: bool,
+    created: usize,
+    updated: usize,
+    unchanged: usize,
+    conflicts: Vec<ImportOpenSpecConflict>,
+    items: Vec<ImportOpenSpecItemResult>,
 }
 
 impl ImportOpenSpecResult {
+    /// Builds an OpenSpec import result with aggregate counts derived from items.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conflict vector does not match the number of
+    /// conflict item outcomes.
+    pub fn new(
+        change_id: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        dry_run: bool,
+        conflicts: Vec<ImportOpenSpecConflict>,
+        items: Vec<ImportOpenSpecItemResult>,
+    ) -> Result<Self, String> {
+        Self::from_raw_parts(change_id, meta_task_id, dry_run, None, conflicts, items)
+    }
+
+    fn from_raw_parts(
+        change_id: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        dry_run: bool,
+        expected_tally: Option<ImportOpenSpecResultTally>,
+        conflicts: Vec<ImportOpenSpecConflict>,
+        items: Vec<ImportOpenSpecItemResult>,
+    ) -> Result<Self, String> {
+        let tally = ImportOpenSpecResultTally::from_items(&items);
+        if tally.conflicts != conflicts.len() {
+            return Err(format!(
+                "OpenSpec import result has {} conflict item(s) but {} conflict record(s)",
+                tally.conflicts,
+                conflicts.len()
+            ));
+        }
+        if let Some(expected_tally) = expected_tally {
+            expected_tally.matches(tally)?;
+        }
+        Ok(Self {
+            change_id: change_id.into(),
+            meta_task_id: meta_task_id.into(),
+            dry_run,
+            tally,
+            conflicts,
+            items,
+        })
+    }
+
+    /// Returns whether this result came from a dry-run import plan.
+    #[must_use]
+    pub const fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Returns the number of created records, derived from item actions.
+    #[must_use]
+    pub const fn created(&self) -> usize {
+        self.tally.created
+    }
+
+    /// Returns the number of updated records, derived from item actions.
+    #[must_use]
+    pub const fn updated(&self) -> usize {
+        self.tally.updated
+    }
+
+    /// Returns the number of unchanged records, derived from item actions.
+    #[must_use]
+    pub const fn unchanged(&self) -> usize {
+        self.tally.unchanged
+    }
+
+    /// Returns conflict records for item outcomes that could not be imported.
+    #[must_use]
+    pub fn conflicts(&self) -> &[ImportOpenSpecConflict] {
+        &self.conflicts
+    }
+
+    /// Returns per-record import outcomes.
+    #[must_use]
+    pub fn items(&self) -> &[ImportOpenSpecItemResult] {
+        &self.items
+    }
+
+    /// Splits this result into the legacy flat response parts.
+    #[must_use]
+    pub fn into_flat_parts(
+        self,
+    ) -> (
+        String,
+        String,
+        bool,
+        usize,
+        usize,
+        usize,
+        Vec<ImportOpenSpecConflict>,
+        Vec<ImportOpenSpecItemResult>,
+    ) {
+        (
+            self.change_id,
+            self.meta_task_id,
+            self.dry_run,
+            self.tally.created,
+            self.tally.updated,
+            self.tally.unchanged,
+            self.conflicts,
+            self.items,
+        )
+    }
+
     /// Returns a concise, deterministic human-readable summary of the import.
     pub fn human_summary(&self) -> String {
         format!(
             "openspec import {} meta_task={} created={} updated={} unchanged={} conflicts={} dry_run={}",
             self.change_id,
             self.meta_task_id,
-            self.created,
-            self.updated,
-            self.unchanged,
+            self.created(),
+            self.updated(),
+            self.unchanged(),
             self.conflicts.len(),
             self.dry_run
         )
+    }
+}
+
+impl ImportOpenSpecResultTally {
+    fn from_items(items: &[ImportOpenSpecItemResult]) -> Self {
+        let mut tally = Self {
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            conflicts: 0,
+        };
+        for item in items {
+            match item.action() {
+                ImportOpenSpecAction::Created => tally.created += 1,
+                ImportOpenSpecAction::Updated => tally.updated += 1,
+                ImportOpenSpecAction::Unchanged => tally.unchanged += 1,
+                ImportOpenSpecAction::Conflict => tally.conflicts += 1,
+            }
+        }
+        tally
+    }
+
+    fn matches(self, actual: Self) -> Result<(), String> {
+        if self.created != actual.created {
+            return Err(format!(
+                "OpenSpec import result created count mismatch: expected {}, derived {}",
+                self.created, actual.created
+            ));
+        }
+        if self.updated != actual.updated {
+            return Err(format!(
+                "OpenSpec import result updated count mismatch: expected {}, derived {}",
+                self.updated, actual.updated
+            ));
+        }
+        if self.unchanged != actual.unchanged {
+            return Err(format!(
+                "OpenSpec import result unchanged count mismatch: expected {}, derived {}",
+                self.unchanged, actual.unchanged
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl From<&ImportOpenSpecResult> for RawImportOpenSpecResult {
+    fn from(result: &ImportOpenSpecResult) -> Self {
+        Self {
+            change_id: result.change_id.clone(),
+            meta_task_id: result.meta_task_id.clone(),
+            dry_run: result.dry_run,
+            created: result.tally.created,
+            updated: result.tally.updated,
+            unchanged: result.tally.unchanged,
+            conflicts: result.conflicts.clone(),
+            items: result.items.clone(),
+        }
+    }
+}
+
+impl Serialize for ImportOpenSpecResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawImportOpenSpecResult::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportOpenSpecResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawImportOpenSpecResult::deserialize(deserializer)?;
+        Self::from_raw_parts(
+            raw.change_id,
+            raw.meta_task_id,
+            raw.dry_run,
+            Some(ImportOpenSpecResultTally {
+                created: raw.created,
+                updated: raw.updated,
+                unchanged: raw.unchanged,
+                conflicts: raw.conflicts.len(),
+            }),
+            raw.conflicts,
+            raw.items,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -254,7 +926,7 @@ impl ImportOpenSpecResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecItemResult {
     pub object_id: String,
-    pub action: ImportOpenSpecAction,
+    action: ImportOpenSpecAction,
     object: ImportOpenSpecItemObject,
 }
 
@@ -291,14 +963,17 @@ impl ImportOpenSpecItemResult {
         object_id: impl Into<String>,
         title: impl Into<String>,
         action: ImportOpenSpecAction,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        if action == ImportOpenSpecAction::Conflict {
+            return Err("metatask OpenSpec import items cannot use conflict action".into());
+        }
+        Ok(Self {
             object_id: object_id.into(),
             action,
             object: ImportOpenSpecItemObject::MetaTask {
                 title: title.into(),
             },
-        }
+        })
     }
 
     /// Builds an OpenSpec import item for one work subtask.
@@ -329,6 +1004,12 @@ impl ImportOpenSpecItemResult {
     #[must_use]
     pub const fn object_type(&self) -> ObjectType {
         self.object.object_type()
+    }
+
+    /// Returns the import action for this item.
+    #[must_use]
+    pub const fn action(&self) -> ImportOpenSpecAction {
+        self.action
     }
 
     /// Returns the OpenSpec task id for subtask import items.
@@ -433,6 +1114,15 @@ impl ImportOpenSpecItemObject {
             Self::Subtask { .. } => ObjectType::Subtask,
         }
     }
+
+    fn validate_action(&self, action: ImportOpenSpecAction) -> Result<(), String> {
+        match (self, action) {
+            (Self::MetaTask { .. }, ImportOpenSpecAction::Conflict) => {
+                Err("metatask OpenSpec import items cannot use conflict action".into())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Serialize for ImportOpenSpecItemResult {
@@ -487,6 +1177,9 @@ impl<'de> Deserialize<'de> for ImportOpenSpecItemResult {
             raw.source_path,
         )
         .map_err(serde::de::Error::custom)?;
+        object
+            .validate_action(raw.action)
+            .map_err(serde::de::Error::custom)?;
         Ok(Self {
             object_id: raw.object_id,
             action: raw.action,
@@ -657,15 +1350,14 @@ pub struct OpenSpecImportProvenance {
 /// Object-independent OpenSpec provenance fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpecImportProvenanceCommon {
-    pub object_id: String,
-    pub planning_format: String,
-    pub openspec_change_id: String,
-    pub openspec_change_path: String,
-    pub tasks_digest: String,
-    pub source_digests: Vec<OpenSpecSourceDigest>,
-    pub mission_artifact_digests: Vec<OpenSpecSourceDigest>,
-    pub mission_artifacts: Vec<String>,
-    pub updated_at: TimestampMs,
+    object_id: String,
+    openspec_change_id: String,
+    openspec_change_path: String,
+    tasks_digest: String,
+    source_digests: Vec<OpenSpecSourceDigest>,
+    mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+    mission_artifacts: Vec<String>,
+    updated_at: TimestampMs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,6 +1390,109 @@ pub(crate) struct RawOpenSpecImportProvenance {
     pub(crate) mission_artifacts: Vec<String>,
     pub(crate) task_digest: Option<String>,
     pub(crate) updated_at: TimestampMs,
+}
+
+impl OpenSpecImportProvenanceCommon {
+    const PLANNING_FORMAT: &'static str = "openspec";
+
+    /// Builds common OpenSpec provenance fields.
+    #[must_use]
+    pub fn new(
+        object_id: impl Into<String>,
+        openspec_change_id: impl Into<String>,
+        openspec_change_path: impl Into<String>,
+        tasks_digest: impl Into<String>,
+        source_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifacts: Vec<String>,
+        updated_at: TimestampMs,
+    ) -> Self {
+        Self {
+            object_id: object_id.into(),
+            openspec_change_id: openspec_change_id.into(),
+            openspec_change_path: openspec_change_path.into(),
+            tasks_digest: tasks_digest.into(),
+            source_digests,
+            mission_artifact_digests,
+            mission_artifacts,
+            updated_at,
+        }
+    }
+
+    fn from_raw_parts(
+        object_id: String,
+        planning_format: String,
+        openspec_change_id: String,
+        openspec_change_path: String,
+        tasks_digest: String,
+        source_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifacts: Vec<String>,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        if planning_format != Self::PLANNING_FORMAT {
+            return Err("OpenSpec provenance planning_format must be openspec".to_owned());
+        }
+        Ok(Self::new(
+            object_id,
+            openspec_change_id,
+            openspec_change_path,
+            tasks_digest,
+            source_digests,
+            mission_artifact_digests,
+            mission_artifacts,
+            updated_at,
+        ))
+    }
+
+    #[must_use]
+    pub fn object_id(&self) -> &str {
+        &self.object_id
+    }
+
+    #[must_use]
+    pub const fn planning_format(&self) -> &'static str {
+        Self::PLANNING_FORMAT
+    }
+
+    #[must_use]
+    pub fn openspec_change_id(&self) -> &str {
+        &self.openspec_change_id
+    }
+
+    #[must_use]
+    pub fn openspec_change_path(&self) -> &str {
+        &self.openspec_change_path
+    }
+
+    #[must_use]
+    pub fn tasks_digest(&self) -> &str {
+        &self.tasks_digest
+    }
+
+    #[must_use]
+    pub fn source_digests(&self) -> &[OpenSpecSourceDigest] {
+        &self.source_digests
+    }
+
+    #[must_use]
+    pub fn mission_artifact_digests(&self) -> &[OpenSpecSourceDigest] {
+        &self.mission_artifact_digests
+    }
+
+    #[must_use]
+    pub fn mission_artifacts(&self) -> &[String] {
+        &self.mission_artifacts
+    }
+
+    #[must_use]
+    pub const fn updated_at(&self) -> TimestampMs {
+        self.updated_at
+    }
+
+    fn set_updated_at(&mut self, updated_at: TimestampMs) {
+        self.updated_at = updated_at;
+    }
 }
 
 impl OpenSpecImportProvenance {
@@ -746,17 +1541,17 @@ impl OpenSpecImportProvenance {
             raw.task_digest,
         )?;
         Ok(Self {
-            common: OpenSpecImportProvenanceCommon {
-                object_id: raw.object_id,
-                planning_format: raw.planning_format,
-                openspec_change_id: raw.openspec_change_id,
-                openspec_change_path: raw.openspec_change_path,
-                tasks_digest: raw.tasks_digest,
-                source_digests: raw.source_digests,
-                mission_artifact_digests: raw.mission_artifact_digests,
-                mission_artifacts: raw.mission_artifacts,
-                updated_at: raw.updated_at,
-            },
+            common: OpenSpecImportProvenanceCommon::from_raw_parts(
+                raw.object_id,
+                raw.planning_format,
+                raw.openspec_change_id,
+                raw.openspec_change_path,
+                raw.tasks_digest,
+                raw.source_digests,
+                raw.mission_artifact_digests,
+                raw.mission_artifacts,
+                raw.updated_at,
+            )?,
             object,
         })
     }
@@ -791,22 +1586,22 @@ impl OpenSpecImportProvenance {
 
     #[must_use]
     pub fn object_id(&self) -> &str {
-        &self.common.object_id
+        self.common.object_id()
     }
 
     #[must_use]
     pub fn planning_format(&self) -> &str {
-        &self.common.planning_format
+        self.common.planning_format()
     }
 
     #[must_use]
     pub fn openspec_change_id(&self) -> &str {
-        &self.common.openspec_change_id
+        self.common.openspec_change_id()
     }
 
     #[must_use]
     pub fn openspec_change_path(&self) -> &str {
-        &self.common.openspec_change_path
+        self.common.openspec_change_path()
     }
 
     #[must_use]
@@ -839,7 +1634,7 @@ impl OpenSpecImportProvenance {
 
     #[must_use]
     pub fn tasks_digest(&self) -> &str {
-        &self.common.tasks_digest
+        self.common.tasks_digest()
     }
 
     #[must_use]
@@ -852,17 +1647,17 @@ impl OpenSpecImportProvenance {
 
     #[must_use]
     pub fn source_digests(&self) -> &[OpenSpecSourceDigest] {
-        &self.common.source_digests
+        self.common.source_digests()
     }
 
     #[must_use]
     pub fn mission_artifact_digests(&self) -> &[OpenSpecSourceDigest] {
-        &self.common.mission_artifact_digests
+        self.common.mission_artifact_digests()
     }
 
     #[must_use]
     pub fn mission_artifacts(&self) -> &[String] {
-        &self.common.mission_artifacts
+        self.common.mission_artifacts()
     }
 
     #[must_use]
@@ -875,11 +1670,11 @@ impl OpenSpecImportProvenance {
 
     #[must_use]
     pub const fn updated_at(&self) -> TimestampMs {
-        self.common.updated_at
+        self.common.updated_at()
     }
 
     pub fn set_updated_at(&mut self, updated_at: TimestampMs) {
-        self.common.updated_at = updated_at;
+        self.common.set_updated_at(updated_at);
     }
 }
 
@@ -958,10 +1753,95 @@ impl<'de> Deserialize<'de> for OpenSpecImportProvenance {
 }
 
 /// Digest for one OpenSpec source file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpecSourceDigest {
-    pub path: String,
-    pub digest: String,
+    path: String,
+    digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawOpenSpecSourceDigest {
+    path: String,
+    digest: String,
+}
+
+impl OpenSpecSourceDigest {
+    /// Builds a source digest from a normalized relative path and blake3 digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is empty, absolute, escapes upward, or
+    /// when the digest is not a `blake3:` value.
+    pub fn new(path: impl Into<String>, digest: impl Into<String>) -> Result<Self, String> {
+        let path = path.into();
+        let digest = digest.into();
+        Self::validate_path(&path)?;
+        Self::validate_digest(&digest)?;
+        Ok(Self { path, digest })
+    }
+
+    /// Returns the normalized relative source path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the source digest.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn validate_path(path: &str) -> Result<(), String> {
+        if path.trim().is_empty() {
+            return Err("OpenSpec source digest path must not be empty".to_owned());
+        }
+        if path.starts_with('/') || path.starts_with('\\') {
+            return Err("OpenSpec source digest path must be relative".to_owned());
+        }
+        if path.split(['/', '\\']).any(|component| component == "..") {
+            return Err("OpenSpec source digest path must not escape upward".to_owned());
+        }
+        Ok(())
+    }
+
+    fn validate_digest(digest: &str) -> Result<(), String> {
+        let Some(rest) = digest.strip_prefix("blake3:") else {
+            return Err("OpenSpec source digest must use blake3: prefix".to_owned());
+        };
+        if rest.is_empty() {
+            return Err("OpenSpec source digest must include digest bytes".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl From<&OpenSpecSourceDigest> for RawOpenSpecSourceDigest {
+    fn from(digest: &OpenSpecSourceDigest) -> Self {
+        Self {
+            path: digest.path.clone(),
+            digest: digest.digest.clone(),
+        }
+    }
+}
+
+impl Serialize for OpenSpecSourceDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawOpenSpecSourceDigest::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenSpecSourceDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawOpenSpecSourceDigest::deserialize(deserializer)?;
+        Self::new(raw.path, raw.digest).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Event payload emitted for OpenSpec import creates and updates.

@@ -154,6 +154,12 @@ pub enum CoveyError {
         source_issue_id: String,
         reason: String,
     },
+    #[error("invalid event shape: {reason}")]
+    InvalidEventShape { reason: String },
+    #[error("invalid ready-queue metrics shape: {reason}")]
+    InvalidReadyQueueMetrics { reason: String },
+    #[error("invalid observability row shape: {reason}")]
+    InvalidObservabilityRow { reason: String },
     #[error(
         "import duplicate for source issue {source_issue_id}: subtask {subtask_id} already exists"
     )]
@@ -179,8 +185,9 @@ impl PartialEq for CoveyError {
             ArtifactDigestCollision, ArtifactNotFound, ClaimNotFound, ClaimNotHeld,
             ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
             IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
-            InputTooLarge, InvalidIdempotencyKey, InvalidImportDestination, InvalidImportRow,
-            InvalidLeaseDuration, InvalidPath, InvalidRuntimeAttestation, InvalidSessionToken,
+            InputTooLarge, InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination,
+            InvalidImportRow, InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath,
+            InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
             InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
             MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
@@ -499,6 +506,30 @@ impl PartialEq for CoveyError {
                     reason: right_reason,
                 },
             ) => left_id == right_id && left_reason == right_reason,
+            (
+                InvalidEventShape {
+                    reason: left_reason,
+                },
+                InvalidEventShape {
+                    reason: right_reason,
+                },
+            )
+            | (
+                InvalidReadyQueueMetrics {
+                    reason: left_reason,
+                },
+                InvalidReadyQueueMetrics {
+                    reason: right_reason,
+                },
+            )
+            | (
+                InvalidObservabilityRow {
+                    reason: left_reason,
+                },
+                InvalidObservabilityRow {
+                    reason: right_reason,
+                },
+            ) => left_reason == right_reason,
             (
                 ImportDuplicate {
                     source_issue_id: left_id,

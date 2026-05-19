@@ -51,7 +51,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        crate::model::FenceSeq::parse(req.fence_seq)?,
+                        req.fence_seq,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -175,9 +175,9 @@ impl Covey {
                         return Err(CoveyError::ReviewKindMismatch);
                     }
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
-                    if subtask.artifact_digest.as_deref() != Some(req.artifact_digest.as_str()) {
+                    if subtask.artifact_digest.as_ref() != Some(&req.artifact_digest) {
                         return Err(CoveyError::UnknownArtifactDigest {
-                            digest: req.artifact_digest.clone(),
+                            digest: req.artifact_digest.to_string(),
                         });
                     }
                     ensure_artifact_exists(tx, &req.artifact_digest)?;
@@ -191,9 +191,11 @@ impl Covey {
                     let review_subtask_id = req
                         .review_subtask_id
                         .clone()
-                        .unwrap_or_else(|| crate::model::make_id("subtask"));
+                        .unwrap_or_else(|| {
+                            SubtaskId::parse(crate::model::make_id("subtask"))
+                                .expect("generated subtask id must be valid")
+                        });
                     ensure_length("review_subtask_id", &review_subtask_id, MAX_OBJECT_ID_LEN)?;
-                    let review_subtask_id = SubtaskId::parse(review_subtask_id)?;
                     if subtask_exists(tx, &review_subtask_id)? {
                         return Err(CoveyError::DuplicateSubtaskId {
                             subtask_id: review_subtask_id.clone(),
@@ -212,8 +214,8 @@ impl Covey {
                             subtask.meta_task_id,
                             format!("review {}", req.artifact_digest),
                             SubtaskKind::Review.to_string(),
-                            req.subtask_id,
-                            req.artifact_digest,
+                            req.subtask_id.as_str(),
+                            req.artifact_digest.as_str(),
                             SubtaskState::Available.to_string(),
                             req.priority,
                             now
@@ -233,8 +235,8 @@ impl Covey {
                         "#,
                         params![
                             review_id,
-                            req.subtask_id,
-                            req.artifact_digest,
+                            req.subtask_id.as_str(),
+                            req.artifact_digest.as_str(),
                             req.session_token,
                             review_subtask_id,
                             ReviewState::Requested.to_string(),
@@ -248,7 +250,7 @@ impl Covey {
                             SubtaskState::ReviewPending.to_string(),
                             now,
                             subtask.state.to_string(),
-                            req.artifact_digest
+                            req.artifact_digest.as_str()
                         ],
                     )?;
                     if updated != 1 {
@@ -311,7 +313,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        crate::model::FenceSeq::parse(req.fence_seq)?,
+                        req.fence_seq,
                         lease_now,
                     )?;
                     let review = load_review_tx(tx, &req.review_id)?;

@@ -415,7 +415,8 @@ pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
             session_token,
             payload_json,
             created_at,
-        )),
+        )
+        .map_err(to_sql_err)?),
         (ActorKind::Session, None) => Err(to_sql_err(
             "session actor events require session_token".to_owned(),
         )),
@@ -426,7 +427,8 @@ pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
             object_id,
             payload_json,
             created_at,
-        )),
+        )
+        .map_err(to_sql_err)?),
         (ActorKind::System, Some(_)) => Err(to_sql_err(
             "system actor events must not include session_token".to_owned(),
         )),

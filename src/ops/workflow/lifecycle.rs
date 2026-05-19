@@ -66,7 +66,10 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
-                    ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
+                    ensure_positive_lease_duration(
+                        "lease_duration_ms",
+                        req.lease_duration_ms.get(),
+                    )?;
                     if let Some(active_subtask_id) = session.active_subtask_id().cloned() {
                         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
                             session_token: session.session_token,
@@ -96,7 +99,7 @@ impl Covey {
                             &session,
                             &req.session_token,
                             &subtask_id,
-                            crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
+                            req.lease_duration_ms,
                             lease_now,
                             now,
                         ) {
@@ -150,14 +153,17 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
-                    ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
+                    ensure_positive_lease_duration(
+                        "lease_duration_ms",
+                        req.lease_duration_ms.get(),
+                    )?;
                     if let Some(active_subtask_id) = session.active_subtask_id().cloned() {
                         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
                             session_token: session.session_token,
                             active_subtask_id,
                         });
                     }
-                    if !subtask_exists(tx, &req.subtask_id)? {
+                    if !subtask_exists(tx, req.subtask_id.as_str())? {
                         return Err(CoveyError::SubtaskNotFound);
                     }
 
@@ -165,8 +171,8 @@ impl Covey {
                         tx,
                         &session,
                         &req.session_token,
-                        &req.subtask_id,
-                        crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
+                        req.subtask_id.as_str(),
+                        req.lease_duration_ms,
                         lease_now,
                         now,
                     )
@@ -206,7 +212,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        crate::model::FenceSeq::parse(req.fence_seq)?,
+                        req.fence_seq,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -303,7 +309,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        crate::model::FenceSeq::parse(req.fence_seq)?,
+                        req.fence_seq,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -375,7 +381,7 @@ impl Covey {
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        crate::model::FenceSeq::parse(req.fence_seq)?,
+                        req.fence_seq,
                         lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
@@ -439,16 +445,16 @@ impl Covey {
                 &req,
                 crate::model::TimestampMs::parse(now)?,
                 || {
-                    ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms)?;
+                    ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms.get())?;
                     ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
                     let claim = require_current_claim(
                         tx,
                         &req.session_token,
                         &req.claim_id,
-                        crate::model::FenceSeq::parse(req.fence_seq)?,
+                        req.fence_seq,
                         lease_now,
                     )?;
-                    let renewed_deadline = claim.lease_deadline.get().max(lease_now) + req.extend_by_ms;
+                    let renewed_deadline = claim.lease_deadline.get().max(lease_now) + req.extend_by_ms.get();
                     let updated = tx.execute(
                         "UPDATE claims SET lease_deadline = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4 AND owner_session_token = ?5 AND fence_seq = ?6",
                         params![
@@ -468,10 +474,10 @@ impl Covey {
                         });
                     }
                     let result = ClaimResult::new(
-                        claim.claim_id.to_string(),
-                        claim.subtask_id.to_string(),
-                        claim.fence_seq.get(),
-                        renewed_deadline,
+                        claim.claim_id.clone(),
+                        claim.subtask_id.clone(),
+                        claim.fence_seq,
+                        crate::model::LeaseDeadlineMs::parse(renewed_deadline)?,
                     );
                     append_session_event(
                         tx,
@@ -581,10 +587,10 @@ fn claim_selected_subtask_tx(
     }
 
     let result = ClaimResult::new(
-        claim_id,
-        subtask_id.to_owned(),
-        fence_seq.get(),
-        lease_deadline.get(),
+        crate::model::ClaimId::parse(claim_id)?,
+        crate::model::SubtaskId::parse(subtask_id)?,
+        fence_seq,
+        lease_deadline,
     );
     append_session_event(
         tx,

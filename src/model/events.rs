@@ -5,13 +5,12 @@ use super::*;
 impl Event {
     /// Deserializes the raw JSON payload into the typed payload matching `event_type`.
     pub fn typed(&self) -> CoveyResult<TypedEvent> {
+        let payload = EventPayload::from_json(self.event_type(), self.payload_json())?;
         Ok(TypedEvent {
             seq: self.seq,
-            event_type: self.event_type,
-            object_type: self.object_type,
             object_id: self.object_id.clone(),
             actor: self.actor.clone(),
-            payload: EventPayload::from_json(self.event_type, &self.payload_json)?,
+            payload,
             created_at: self.created_at,
         })
     }

@@ -38,16 +38,25 @@ pub(super) fn load_mission_packet(
                 task_type: Some(task.task_type),
             })
             .collect(),
-        source_digests: digest_map(compiled.source_digests),
-        artifact_digests: digest_map(compiled.artifact_digests),
+        source_digests: digest_map(compiled.source_digests)?,
+        artifact_digests: digest_map(compiled.artifact_digests)?,
         artifact_paths: compiled.artifact_paths,
     })
 }
 
-fn digest_map(digests: std::collections::BTreeMap<String, String>) -> Vec<OpenSpecSourceDigest> {
+fn digest_map(
+    digests: std::collections::BTreeMap<String, String>,
+) -> Result<Vec<OpenSpecSourceDigest>> {
     digests
         .into_iter()
-        .map(|(path, digest)| OpenSpecSourceDigest::new(path, digest))
+        .map(|(path, digest)| {
+            OpenSpecSourceDigest::new(path, digest).map_err(|detail| {
+                CoveyError::InvalidSourceSchema {
+                    path: "compiled Better Droid mission".to_owned(),
+                    detail,
+                }
+            })
+        })
         .collect()
 }
 

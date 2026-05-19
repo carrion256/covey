@@ -7,10 +7,10 @@ use crate::{
     error::Result,
     model::{
         Claim, RepoopsAuthorityClaimFact, RepoopsAuthorityClaimStatus,
-        RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthorityLockStatus,
-        RepoopsAuthorityPolicyFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshot,
-        RepoopsAuthoritySnapshotCommon, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation,
-        ScopeClass, Session, SubtaskState,
+        RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthorityPolicyFact,
+        RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshot, RepoopsAuthoritySnapshotCommon,
+        RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation, ScopeClass, Session,
+        SubtaskState,
     },
     queries::{load_active_reservations_tx, load_subtask_tx},
     validators::require_current_claim,
@@ -43,6 +43,8 @@ impl Covey {
             let session = crate::queries::load_session_tx(tx, &req.session_token)?;
             let paths = normalize_requested_paths(&req.paths);
             let scope_in = scope_patterns_for_subtask(&reservations, &claim.subtask_id);
+            let scope = RepoopsAuthorityScopeFact::new(scope_in.clone(), Vec::new())
+                .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
             let locks = lock_facts_for_paths(&paths, &reservations, &claim, &session);
             let caller_ownership_token = ownership_token_ref(&req.session_token);
             let active_ownership_token = ownership_token_ref(&claim.owner_session_token);
@@ -69,20 +71,22 @@ impl Covey {
                     Vec::new(),
                     !scope_in.is_empty(),
                 ),
-            };
-            Ok(RepoopsAuthoritySnapshot::claim_bound(
+            }
+            .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
+            RepoopsAuthoritySnapshot::claim_bound(
                 RepoopsAuthoritySnapshotCommon {
                     schema_version: REPOOPS_AUTHORITY_SNAPSHOT_VERSION.to_owned(),
                     agent_id: session.agent_principal_id,
                     policy: RepoopsAuthorityPolicyFact::enforce(2),
-                    scope: RepoopsAuthorityScopeFact::new(scope_in, Vec::new()),
+                    scope,
                     locks,
                     git_context: Some(RepoopsAuthorityGitContextFact::new(None, None, None, true)),
                     fact_sources,
                 },
                 caller_ownership_token,
                 claim_fact,
-            ))
+            )
+            .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation(
             "repoops_authority_snapshot",
@@ -93,9 +97,9 @@ impl Covey {
                 let mut objects = vec![format!("claim:{}", req.claim_id)];
                 objects.extend(
                     snapshot
-                        .locks
+                        .locks()
                         .iter()
-                        .map(|lock| format!("repoops-lock:{}", lock.path)),
+                        .map(|lock| format!("repoops-lock:{}", lock.path())),
                 );
                 objects
             },
@@ -120,11 +124,12 @@ fn repoops_claim_status_for_subtask(state: SubtaskState) -> RepoopsAuthorityClai
     }
 }
 
-fn ownership_token_ref(session_token: &str) -> String {
-    format!(
+fn ownership_token_ref(session_token: &str) -> crate::model::SessionToken {
+    crate::model::SessionToken::parse(format!(
         "covey-session-token-blake3:{}",
         blake3::hash(session_token.as_bytes())
-    )
+    ))
+    .expect("blake3-derived ownership token ref should be token-safe")
 }
 
 fn normalize_requested_paths(paths: &[String]) -> Vec<String> {
@@ -206,24 +211,26 @@ fn lock_facts_for_paths(
                 continue;
             }
             if reservation.owner_subtask_id == claim.subtask_id {
-                locks.push(RepoopsAuthorityLockFact::new(
+                locks.push(RepoopsAuthorityLockFact::owned(
                     path.clone(),
                     session.agent_principal_id.clone(),
                     repoops_claim_ref(claim.claim_id.as_str()),
-                    RepoopsAuthorityLockStatus::Owned,
                 ));
             } else {
-                locks.push(RepoopsAuthorityLockFact::new(
+                locks.push(RepoopsAuthorityLockFact::foreign_owner(
                     path.clone(),
                     format!("subtask:{}", reservation.owner_subtask_id),
                     repoops_claim_ref(format!("unknown:{}", reservation.owner_subtask_id)),
-                    RepoopsAuthorityLockStatus::ForeignOwner,
                 ));
             }
         }
     }
     locks.sort_by(|left, right| {
-        (&left.path, &left.owner, &left.claim_id).cmp(&(&right.path, &right.owner, &right.claim_id))
+        (left.path(), left.owner(), left.claim_id()).cmp(&(
+            right.path(),
+            right.owner(),
+            right.claim_id(),
+        ))
     });
     locks.dedup();
     locks
@@ -252,8 +259,8 @@ fn reservation_covers_path(reservation: &Reservation, path: &str) -> bool {
 mod tests {
     use super::*;
     use crate::model::{
-        ClaimId, ClaimState, FenceSeq, LeaseDeadlineMs, ReservationId, ReservationState,
-        SessionToken, SubtaskId, SubtaskState, TimestampMs,
+        ClaimId, ClaimState, FenceSeq, LeaseDeadlineMs, RepoopsAuthorityLockStatus, ReservationId,
+        ReservationState, SessionToken, SubtaskId, SubtaskState, TimestampMs,
     };
 
     fn reservation(
@@ -321,12 +328,12 @@ mod tests {
         assert!(
             locks
                 .iter()
-                .any(|lock| lock.status == RepoopsAuthorityLockStatus::Owned)
+                .any(|lock| lock.status() == RepoopsAuthorityLockStatus::Owned)
         );
         assert!(
             locks
                 .iter()
-                .any(|lock| lock.status == RepoopsAuthorityLockStatus::ForeignOwner)
+                .any(|lock| lock.status() == RepoopsAuthorityLockStatus::ForeignOwner)
         );
     }
 
@@ -367,6 +374,18 @@ mod tests {
         });
         serde_json::from_value::<RepoopsAuthorityClaimFact>(missing_in_progress_token)
             .expect_err("in-progress claim facts must carry an ownership token");
+
+        let blank_in_progress_token = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "in_progress",
+            "owner": "worker-1",
+            "scope_in": ["src/**"],
+            "scope_out": [],
+            "has_required_contract_fields": true,
+            "active_ownership_token": " "
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(blank_in_progress_token)
+            .expect_err("in-progress claim facts must carry a valid ownership token");
 
         let stale_open_token = serde_json::json!({
             "claim_id": "claim-1",
@@ -498,6 +517,56 @@ mod tests {
         serde_json::from_value::<RepoopsAuthoritySnapshot>(mixed_constraint_snapshot)
             .expect_err("repoops snapshots must not mix claim authority and constraints");
 
+        let valid_constraint_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": null,
+            "ownership_token": null,
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": null,
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": "claim unavailable",
+            "fact_sources": []
+        });
+        let snapshot =
+            serde_json::from_value::<RepoopsAuthoritySnapshot>(valid_constraint_snapshot)
+                .expect("valid constrained repoops snapshot");
+        assert_eq!(snapshot.constraint_reason(), Some("claim unavailable"));
+
+        let blank_constraint_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": null,
+            "ownership_token": null,
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": null,
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": " ",
+            "fact_sources": []
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(blank_constraint_snapshot)
+            .expect_err("constrained repoops snapshots must carry a non-empty reason");
+
         let mismatched_claim_id_snapshot = serde_json::json!({
             "schema_version": "covey_repoops_authority_snapshot.v1",
             "agent_id": "worker-1",
@@ -530,6 +599,38 @@ mod tests {
         serde_json::from_value::<RepoopsAuthoritySnapshot>(mismatched_claim_id_snapshot)
             .expect_err("repoops snapshots must bind the same top-level and claim-fact ids");
 
+        let blank_ownership_token_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "",
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": {
+                "claim_id": "claim-1",
+                "status": "in_progress",
+                "owner": "worker-1",
+                "scope_in": ["src/**"],
+                "scope_out": [],
+                "has_required_contract_fields": true,
+                "active_ownership_token": "token-ref"
+            },
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": null,
+            "fact_sources": []
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(blank_ownership_token_snapshot)
+            .expect_err("claim-bound snapshots must carry a valid ownership token");
+
         let override_snapshot = serde_json::json!({
             "schema_version": "covey_repoops_authority_snapshot.v1",
             "agent_id": "worker-1",
@@ -561,5 +662,195 @@ mod tests {
         });
         serde_json::from_value::<RepoopsAuthoritySnapshot>(override_snapshot)
             .expect_err("override tokens are not supported in repoops snapshots yet");
+    }
+
+    #[test]
+    fn repoops_authority_snapshot_rejects_lock_subject_mismatches() {
+        let owned_by_other_claim = claim_bound_snapshot_with_locks(serde_json::json!([{
+            "path": "src/lib.rs",
+            "owner": "worker-1",
+            "claim_id": "claim-other",
+            "status": "owned"
+        }]));
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(owned_by_other_claim)
+            .expect_err("owned lock facts must match the snapshot claim id");
+
+        let foreign_with_current_claim = claim_bound_snapshot_with_locks(serde_json::json!([{
+            "path": "src/lib.rs",
+            "owner": "worker-2",
+            "claim_id": "claim-1",
+            "status": "foreign_owner"
+        }]));
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(foreign_with_current_claim)
+            .expect_err("foreign lock facts must not reuse the snapshot claim id");
+
+        let foreign_with_current_owner = claim_bound_snapshot_with_locks(serde_json::json!([{
+            "path": "src/lib.rs",
+            "owner": "worker-1",
+            "claim_id": "claim-other",
+            "status": "foreign_owner"
+        }]));
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(foreign_with_current_owner)
+            .expect_err("foreign lock facts must not reuse the snapshot owner");
+
+        let constrained_owned_lock = constrained_snapshot_with_locks(serde_json::json!([{
+            "path": "src/lib.rs",
+            "owner": "worker-1",
+            "claim_id": "claim-1",
+            "status": "owned"
+        }]));
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(constrained_owned_lock)
+            .expect_err("constrained snapshots must not include owned locks");
+
+        let constrained_agent_owned_foreign_lock =
+            constrained_snapshot_with_locks(serde_json::json!([{
+                "path": "src/lib.rs",
+                "owner": "worker-1",
+                "claim_id": "claim-other",
+                "status": "foreign_owner"
+            }]));
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(constrained_agent_owned_foreign_lock)
+            .expect_err("constrained snapshots must not include locks owned by the agent");
+    }
+
+    #[test]
+    fn repoops_authority_scope_fact_rejects_invalid_patterns() {
+        let valid_scope = serde_json::json!({
+            "in": ["src/**"],
+            "out": ["target/**"]
+        });
+        let scope = serde_json::from_value::<RepoopsAuthorityScopeFact>(valid_scope)
+            .expect("valid repoops scope fact");
+        assert_eq!(scope.scope_in(), ["src/**"]);
+        assert_eq!(scope.scope_out(), ["target/**"]);
+
+        let blank_scope_in = serde_json::json!({
+            "in": [" "],
+            "out": []
+        });
+        serde_json::from_value::<RepoopsAuthorityScopeFact>(blank_scope_in)
+            .expect_err("repoops scope inclusion patterns must not be blank");
+
+        let padded_scope_out = serde_json::json!({
+            "in": [],
+            "out": [" target/**"]
+        });
+        serde_json::from_value::<RepoopsAuthorityScopeFact>(padded_scope_out)
+            .expect_err("repoops scope exclusion patterns must be normalized");
+
+        let duplicate_scope_in = serde_json::json!({
+            "in": ["src/**", "src/**"],
+            "out": []
+        });
+        serde_json::from_value::<RepoopsAuthorityScopeFact>(duplicate_scope_in)
+            .expect_err("repoops scope inclusion patterns must be unique");
+    }
+
+    #[test]
+    fn repoops_authority_claim_fact_rejects_invalid_contract_fields() {
+        let blank_owner = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "open",
+            "owner": " ",
+            "scope_in": [],
+            "scope_out": [],
+            "has_required_contract_fields": false,
+            "active_ownership_token": null
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(blank_owner)
+            .expect_err("repoops claim facts must carry a non-blank owner");
+
+        let duplicate_scope = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "open",
+            "owner": "worker-1",
+            "scope_in": ["src/**", "src/**"],
+            "scope_out": [],
+            "has_required_contract_fields": true,
+            "active_ownership_token": null
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(duplicate_scope)
+            .expect_err("repoops claim scope patterns must be unique");
+
+        let missing_required_scope = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "open",
+            "owner": "worker-1",
+            "scope_in": [],
+            "scope_out": [],
+            "has_required_contract_fields": true,
+            "active_ownership_token": null
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(missing_required_scope)
+            .expect_err("repoops claim facts cannot mark missing scope as contract-complete");
+
+        let missing_scope = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "open",
+            "owner": "worker-1",
+            "scope_in": [],
+            "scope_out": [],
+            "has_required_contract_fields": false,
+            "active_ownership_token": null
+        });
+        let claim = serde_json::from_value::<RepoopsAuthorityClaimFact>(missing_scope)
+            .expect("missing scope is represented explicitly for authority denial");
+        assert!(!claim.has_required_contract_fields());
+    }
+
+    fn claim_bound_snapshot_with_locks(locks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "token-ref",
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": {
+                "claim_id": "claim-1",
+                "status": "in_progress",
+                "owner": "worker-1",
+                "scope_in": ["src/**"],
+                "scope_out": [],
+                "has_required_contract_fields": true,
+                "active_ownership_token": "token-ref"
+            },
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": locks,
+            "git_context": null,
+            "constraint_reason": null,
+            "fact_sources": []
+        })
+    }
+
+    fn constrained_snapshot_with_locks(locks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": null,
+            "ownership_token": null,
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": null,
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": locks,
+            "git_context": null,
+            "constraint_reason": "claim unavailable",
+            "fact_sources": []
+        })
     }
 }

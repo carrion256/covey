@@ -6,8 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Statement, Transaction, params, pa
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ConflictResolutionState, ObjectType, OverlapCandidate, RequestReservationReq, Reservation,
-        ReservationOverlapConflictPayload, ScopeClass, parse_generated_members,
+        ConflictKind, ConflictResolutionState, ObjectType, OverlapCandidate, RequestReservationReq,
+        Reservation, ReservationOverlapConflictPayload, ScopeClass, parse_generated_members,
     },
 };
 
@@ -136,10 +136,10 @@ pub(crate) fn record_reservation_overlap_conflicts(
         let payload = ReservationOverlapConflictPayload {
             reservation_id: reservation_id.to_owned(),
             overlapping_reservation_id: overlap.reservation_id.to_string(),
-            owner_subtask_id: req.owner_subtask_id.clone(),
+            owner_subtask_id: req.owner_subtask_id.to_string(),
             overlapping_owner_subtask_id: overlap.owner_subtask_id.to_string(),
-            scope_class: req.scope_class,
-            scope_key: req.scope_key.clone(),
+            scope_class: req.scope_class(),
+            scope_key: req.scope_key().to_owned(),
             overlapping_scope_class: overlap.scope_class(),
             overlapping_scope_key: overlap.scope_key().to_owned(),
         };
@@ -159,7 +159,7 @@ pub(crate) fn record_reservation_overlap_conflicts(
                 conflict_id,
                 ObjectType::Reservation.to_string(),
                 left,
-                "reservation_overlap",
+                ConflictKind::ReservationOverlap.to_string(),
                 serde_json::to_string(&payload)?,
                 now,
                 ConflictResolutionState::Open.to_string(),
@@ -599,15 +599,16 @@ mod tests {
             .find(|reservation| reservation.reservation_id == "right")
             .expect("right reservation should overlap");
 
-        let req = RequestReservationReq {
-            session_token: "session-orchestrator".to_owned(),
-            owner_subtask_id: "subtask-owner".to_owned(),
-            scope_class: ScopeClass::ExactPath,
-            scope_key: "src/lib.rs".to_owned(),
-            generated_members: Vec::new(),
-            lease_duration_ms: 10,
-            idempotency_key: "reservation-idempotency".to_owned(),
-        };
+        let req = RequestReservationReq::try_from_raw_parts(
+            "session-orchestrator",
+            "subtask-owner",
+            ScopeClass::ExactPath,
+            "src/lib.rs",
+            Vec::new(),
+            10,
+            "reservation-idempotency",
+        )
+        .expect("valid reservation request");
 
         let tx = conn.transaction().expect("begin write transaction");
         record_reservation_overlap_conflicts(&tx, "left", &req, &[right], 100)

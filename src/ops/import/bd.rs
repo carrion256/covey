@@ -138,10 +138,7 @@ impl Covey {
     pub fn import_bd_v1(&self, req: ImportBdV1Req) -> Result<ImportBdV1Result> {
         let started_at = Instant::now();
 
-        let destination = parse_import_bd_v1_destination(
-            req.meta_task_id.as_deref(),
-            req.prompt_text.as_deref(),
-        )?;
+        let destination = parse_import_bd_v1_destination(req.meta_task_id(), req.prompt_text())?;
         ensure_length("beads_db_path", &req.beads_db_path, MAX_PATH_LEN)?;
 
         let source_snapshot = load_source_snapshot(&req.beads_db_path)?;
@@ -250,8 +247,6 @@ fn import_bd_v1_source_rows_tx(
     });
 
     let mut items = Vec::with_capacity(ordered_issues.len());
-    let mut imported_count = 0usize;
-    let mut skipped_count = 0usize;
 
     for issue in &ordered_issues {
         match assess_source_issue(issue, source_snapshot) {
@@ -273,19 +268,16 @@ fn import_bd_v1_source_rows_tx(
                 )?;
 
                 if existed_before {
-                    skipped_count += 1;
                     items.push(ImportBdV1ItemResult::skipped(
                         issue.id.clone(),
                         Some(subtask_id),
                         ImportBdV1SkipReason::DeterministicDuplicate,
                     ));
                 } else {
-                    imported_count += 1;
                     items.push(ImportBdV1ItemResult::imported(issue.id.clone(), subtask_id));
                 }
             }
             SourceIssueEligibility::Skip(skip_reason) => {
-                skipped_count += 1;
                 items.push(ImportBdV1ItemResult::skipped(
                     issue.id.clone(),
                     None,
@@ -295,12 +287,8 @@ fn import_bd_v1_source_rows_tx(
         }
     }
 
-    Ok(ImportBdV1Result::new(
-        destination_meta_task_id.to_owned(),
-        imported_count,
-        skipped_count,
-        items,
-    ))
+    ImportBdV1Result::new(destination_meta_task_id.to_owned(), items)
+        .map_err(|reason| CoveyError::InvalidImportDestination { reason })
 }
 
 fn existing_subtask_matches_destination(

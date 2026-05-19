@@ -20,21 +20,34 @@ pub(super) fn dispatch_session(store: &Covey, command: SessionCommand) -> covey:
             ))
         }
         SessionCommand::Attest(args) => {
-            let attestation = store.record_runtime_attestation(RecordRuntimeAttestationReq {
-                session_token: args.session_token.clone(),
-                provider: args.provider,
-                model: args.model,
-                provider_run_id: args.provider_run_id,
-                provider_run_id_issuer: args.provider_run_id_issuer,
-                process_id: args.process_id,
-                container_id: args.container_id,
-                command_transcript_digest: args.command_transcript_digest,
-                started_at: args.started_at,
-                ended_at: args.ended_at,
-                idempotency_key: args
-                    .idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("record-runtime-attestation")),
-            })?;
+            let session_token_for_error = args.session_token.clone();
+            let attestation = store.record_runtime_attestation(
+                RecordRuntimeAttestationReq::try_from_parts(
+                    args.session_token.clone(),
+                    args.provider,
+                    args.model,
+                    args.provider_run_id,
+                    args.provider_run_id_issuer,
+                    args.process_id,
+                    args.container_id,
+                    args.command_transcript_digest,
+                    args.started_at,
+                    args.ended_at,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("record-runtime-attestation")),
+                )
+                .map_err(|reason| {
+                    match covey::SessionToken::parse(session_token_for_error.clone()) {
+                        Ok(session_token) => covey::CoveyError::InvalidRuntimeAttestation {
+                            session_token,
+                            reason,
+                        },
+                        Err(_) => covey::CoveyError::InvalidSessionToken {
+                            session_token: session_token_for_error,
+                        },
+                    }
+                })?,
+            )?;
             Ok(Rendered::summary(
                 &attestation,
                 format!(

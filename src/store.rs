@@ -506,12 +506,12 @@ pub(crate) fn claim_ready_queue_item(
     };
 
     Ok(Some(ReadyQueueClaim::new(
-        item.queue_id().to_owned(),
-        item.artifact_digest().to_owned(),
-        item.subtask_id().to_owned(),
+        crate::model::QueueId::parse(item.queue_id())?,
+        crate::model::ArtifactDigest::parse(item.artifact_digest())?,
+        crate::model::SubtaskId::parse(item.subtask_id())?,
         item.settlement_target(),
-        claim_fence_seq,
-        lease_deadline.get(),
+        crate::model::FenceSeq::parse(claim_fence_seq)?,
+        lease_deadline,
     )))
 }
 

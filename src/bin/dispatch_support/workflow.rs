@@ -27,13 +27,12 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::ClaimNext(args) => {
-            let claim = store.claim_next_subtask(ClaimNextReq {
-                session_token: args.session_token.clone(),
-                lease_duration_ms: args.lease_duration_ms,
-                idempotency_key: args
-                    .idempotency_key
+            let claim = store.claim_next_subtask(ClaimNextReq::try_from_raw_parts(
+                args.session_token.clone(),
+                args.lease_duration_ms,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("claim-next-subtask")),
-            })?;
+            )?)?;
             Ok(Rendered::summary(
                 &claim,
                 match &claim {
@@ -46,14 +45,13 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Claim(args) => {
-            let claim = store.claim_subtask(ClaimSubtaskReq {
-                session_token: args.session_token.clone(),
-                subtask_id: args.subtask_id.clone(),
-                lease_duration_ms: args.lease_duration_ms,
-                idempotency_key: args
-                    .idempotency_key
+            let claim = store.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(
+                args.session_token.clone(),
+                args.subtask_id.clone(),
+                args.lease_duration_ms,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("claim-subtask")),
-            })?;
+            )?)?;
             Ok(Rendered::summary(
                 &claim,
                 format!(
@@ -63,10 +61,12 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Start(args) => {
+            let claim_id = covey::ClaimId::parse(args.claim_id.clone())?;
+            let fence_seq = covey::FenceSeq::parse(args.fence_seq)?;
             store.start_subtask(StartSubtaskReq {
                 session_token: args.session_token.clone(),
-                claim_id: args.claim_id.clone(),
-                fence_seq: args.fence_seq,
+                claim_id,
+                fence_seq,
                 idempotency_key: args
                     .idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("start-subtask")),
@@ -81,10 +81,12 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Abandon(args) => {
+            let claim_id = covey::ClaimId::parse(args.claim_id.clone())?;
+            let fence_seq = covey::FenceSeq::parse(args.fence_seq)?;
             store.abandon_subtask(AbandonSubtaskReq {
                 session_token: args.session_token.clone(),
-                claim_id: args.claim_id.clone(),
-                fence_seq: args.fence_seq,
+                claim_id,
+                fence_seq,
                 idempotency_key: args
                     .idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("abandon-subtask")),
@@ -112,11 +114,14 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
 pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Result<Rendered> {
     match command {
         ClaimCommand::Renew(args) => {
+            let claim_id = covey::ClaimId::parse(args.claim_id)?;
+            let fence_seq = covey::FenceSeq::parse(args.fence_seq)?;
+            let extend_by_ms = covey::LeaseDurationMs::parse(args.extend_by_ms)?;
             let claim = store.renew_claim(RenewClaimReq {
                 session_token: args.session_token,
-                claim_id: args.claim_id,
-                fence_seq: args.fence_seq,
-                extend_by_ms: args.extend_by_ms,
+                claim_id,
+                fence_seq,
+                extend_by_ms,
                 idempotency_key: args
                     .idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("renew-claim")),
@@ -130,10 +135,12 @@ pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Res
             ))
         }
         ClaimCommand::Release(args) => {
+            let claim_id = covey::ClaimId::parse(args.claim_id.clone())?;
+            let fence_seq = covey::FenceSeq::parse(args.fence_seq)?;
             store.release_claim(ReleaseClaimReq {
                 session_token: args.session_token.clone(),
-                claim_id: args.claim_id.clone(),
-                fence_seq: args.fence_seq,
+                claim_id,
+                fence_seq,
                 idempotency_key: args
                     .idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("release-claim")),
@@ -168,19 +175,19 @@ pub(super) fn dispatch_artifact(
                 .expect("label")
                 .get_name()
                 .to_owned();
-            store.publish_artifact(PublishArtifactReq {
-                session_token: args.session_token,
-                claim_id: args.claim_id,
-                fence_seq: args.fence_seq,
-                artifact_digest: artifact_digest.clone(),
-                artifact_kind: args.artifact_kind.into(),
-                base_rev: args.base_rev,
-                manifest_path: args.manifest_path,
-                changed_paths_digest: args.changed_paths_digest,
-                idempotency_key: args
-                    .idempotency_key
+            let req = PublishArtifactReq::try_from_raw_parts(
+                args.session_token,
+                args.claim_id,
+                args.fence_seq,
+                artifact_digest.clone(),
+                args.artifact_kind.into(),
+                args.base_rev,
+                args.manifest_path,
+                args.changed_paths_digest,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("publish-artifact")),
-            })?;
+            )?;
+            store.publish_artifact(req)?;
             Ok(Rendered::summary(
                 ArtifactPublishAck {
                     operation: "publish",
@@ -198,16 +205,17 @@ pub(super) fn dispatch_artifact(
 pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::Result<Rendered> {
     match command {
         ReviewCommand::Request(args) => {
-            let review_id = store.request_review(RequestReviewReq {
-                session_token: args.session_token,
-                subtask_id: args.subtask_id,
-                artifact_digest: args.artifact_digest,
-                review_subtask_id: args.review_subtask_id,
-                priority: args.priority,
-                idempotency_key: args
-                    .idempotency_key
+            let req = RequestReviewReq::try_from_raw_parts(
+                args.session_token,
+                args.subtask_id,
+                args.artifact_digest,
+                args.review_subtask_id,
+                args.priority,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("request-review")),
-            })?;
+            )
+            .map_err(|path| covey::CoveyError::InvalidPath { path })?;
+            let review_id = store.request_review(req)?;
             Ok(Rendered::summary(
                 ReviewRef {
                     review_id: review_id.clone(),
@@ -224,17 +232,17 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
                 .expect("label")
                 .get_name()
                 .to_owned();
-            store.decide_review(DecideReviewReq {
-                session_token: args.session_token,
-                review_id: review_id.clone(),
-                claim_id: args.claim_id,
-                fence_seq: args.fence_seq,
-                verdict: args.verdict.into(),
-                findings_digest: args.findings_digest,
-                idempotency_key: args
-                    .idempotency_key
+            let req = DecideReviewReq::try_from_raw_parts(
+                args.session_token,
+                args.review_id,
+                args.claim_id,
+                args.fence_seq,
+                args.verdict.into(),
+                args.findings_digest,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("decide-review")),
-            })?;
+            )?;
+            store.decide_review(req)?;
             Ok(Rendered::summary(
                 ReviewDecisionAck {
                     operation: "decide",
@@ -480,7 +488,7 @@ mod tests {
                 claim_id: review_claim_id,
                 fence_seq: review_fence,
                 verdict: ReviewVerdictArg::Approve,
-                findings_digest: "findings-digest".to_owned(),
+                findings_digest: "blake3:findings-digest".to_owned(),
                 idempotency_key: None,
             }),
         )

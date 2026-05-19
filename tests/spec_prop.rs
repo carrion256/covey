@@ -106,7 +106,7 @@ proptest! {
             let claim = covey
                 .claim_next_subtask(ClaimNextReq {
                     session_token: worker.clone(),
-                    lease_duration_ms: 10_000,
+                    lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
                     idempotency_key: id_key("claim-next"),
                 })
                 .expect("claim call")
@@ -137,33 +137,42 @@ proptest! {
         let (_dir, _clock, covey) = fresh_covey();
         let orch = seed_single_work_subtask(&covey);
         let reservation_id = covey
-            .request_reservation(RequestReservationReq {
-                session_token: orch,
-                owner_subtask_id: "work".into(),
-                scope_class: ScopeClass::Subtree,
-                scope_key: format!("src/{base}"),
-                generated_members: vec![],
-                lease_duration_ms: 60_000,
-                idempotency_key: id_key("request-reservation"),
-            })
+            .request_reservation(
+                RequestReservationReq::try_from_raw_parts(
+                    orch,
+                    "work",
+                    ScopeClass::Subtree,
+                    format!("src/{base}"),
+                    vec![],
+                    60_000,
+                    id_key("request-reservation"),
+                )
+                .expect("valid reservation request"),
+            )
             .expect("reservation");
 
         let exact_overlaps = covey
-            .find_overlapping_reservations(covey::OverlapQueryReq {
-                scope_class: ScopeClass::ExactPath,
-                scope_key: format!("src/{base}/{child}.rs"),
-                generated_members: vec![],
-            })
+            .find_overlapping_reservations(
+                covey::OverlapQueryReq::try_from_parts(
+                    ScopeClass::ExactPath,
+                    format!("src/{base}/{child}.rs"),
+                    vec![],
+                )
+                .expect("valid overlap query"),
+            )
             .expect("overlaps");
         prop_assert_eq!(exact_overlaps.len(), 1);
         prop_assert_eq!(exact_overlaps[0].reservation_id.as_str(), reservation_id.as_str());
 
         let generated_overlaps = covey
-            .find_overlapping_reservations(covey::OverlapQueryReq {
-                scope_class: ScopeClass::GeneratedSet,
-                scope_key: format!("generated/{base}"),
-                generated_members: vec![format!("src/{base}/{child}.rs")],
-            })
+            .find_overlapping_reservations(
+                covey::OverlapQueryReq::try_from_parts(
+                    ScopeClass::GeneratedSet,
+                    format!("generated/{base}"),
+                    vec![format!("src/{base}/{child}.rs")],
+                )
+                .expect("valid overlap query"),
+            )
             .expect("generated overlaps");
         prop_assert_eq!(generated_overlaps.len(), 1);
     }
@@ -196,7 +205,7 @@ proptest! {
             let claim = covey
                 .claim_next_subtask(ClaimNextReq {
                     session_token: worker_a.clone(),
-                    lease_duration_ms: 10_000,
+                    lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
                     idempotency_key: id_key("claim-next"),
                 })
                 .expect("claim call")
@@ -217,7 +226,7 @@ proptest! {
         let held_a = covey
             .claim_next_subtask(ClaimNextReq {
                 session_token: worker_a,
-                lease_duration_ms: 10_000,
+                lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
                 idempotency_key: id_key("claim-next"),
             })
             .expect("claim a")
@@ -227,7 +236,7 @@ proptest! {
         let first_b = covey
             .claim_next_subtask(ClaimNextReq {
                 session_token: worker_b,
-                lease_duration_ms: 10_000,
+                lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
                 idempotency_key: id_key("claim-next"),
             })
             .expect("claim b")

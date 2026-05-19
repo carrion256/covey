@@ -7,15 +7,15 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             Ok(Rendered::pretty(&items))
         }
         QueueCommand::Enqueue(args) => {
-            let queue_id = store.enqueue_for_apply(EnqueueForApplyReq {
-                session_token: args.session_token,
-                artifact_digest: args.artifact_digest,
-                subtask_id: args.subtask_id,
-                settlement_target: SettlementTarget::Canonical,
-                idempotency_key: args
-                    .idempotency_key
+            let req = EnqueueForApplyReq::try_from_raw_parts(
+                args.session_token,
+                args.artifact_digest,
+                args.subtask_id,
+                SettlementTarget::Canonical,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("enqueue-for-apply")),
-            })?;
+            )?;
+            let queue_id = store.enqueue_for_apply(req)?;
             Ok(Rendered::summary(
                 QueueRef {
                     queue_id: queue_id.clone(),
@@ -24,13 +24,13 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             ))
         }
         QueueCommand::ClaimNext(args) => {
-            let claim = store.claim_next_ready_queue_item(ClaimReadyQueueReq {
-                session_token: args.session_token,
-                lease_duration_ms: args.lease_duration_ms,
-                idempotency_key: args
-                    .idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("claim-next-ready-queue")),
-            })?;
+            let claim =
+                store.claim_next_ready_queue_item(ClaimReadyQueueReq::try_from_raw_parts(
+                    args.session_token,
+                    args.lease_duration_ms,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("claim-next-ready-queue")),
+                )?)?;
             Ok(Rendered::summary(
                 &claim,
                 match &claim {
@@ -43,14 +43,13 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             ))
         }
         QueueCommand::MarkInFlight(args) => {
-            let claim = store.mark_in_flight(MarkInFlightReq {
-                session_token: args.session_token,
-                queue_id: args.queue_id,
-                lease_duration_ms: args.lease_duration_ms,
-                idempotency_key: args
-                    .idempotency_key
+            let claim = store.mark_in_flight(MarkInFlightReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id,
+                args.lease_duration_ms,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("mark-in-flight")),
-            })?;
+            )?)?;
             Ok(Rendered::summary(
                 &claim,
                 format!(
@@ -60,20 +59,20 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             ))
         }
         QueueCommand::RecordApplyVerification(args) => {
-            store.record_apply_verification(RecordApplyVerificationReq {
-                session_token: args.session_token,
-                queue_id: args.queue_id.clone(),
-                artifact_digest: args.artifact_digest,
-                review_id: args.review_id,
-                findings_digest: args.findings_digest,
-                claim_fence_seq: args.claim_fence_seq,
-                verifier: args.verifier,
-                verdict_digest: args.verdict_digest,
-                seal_digest: args.seal_digest,
-                idempotency_key: args
-                    .idempotency_key
+            let req = RecordApplyVerificationReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id.clone(),
+                args.artifact_digest,
+                args.review_id,
+                args.findings_digest,
+                args.claim_fence_seq,
+                args.verifier,
+                args.verdict_digest,
+                args.seal_digest,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("record-apply-verification")),
-            })?;
+            )?;
+            store.record_apply_verification(req)?;
             Ok(Rendered::summary(
                 QueueClaimAck {
                     operation: "record_apply_verification",
@@ -84,31 +83,33 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             ))
         }
         QueueCommand::VerifyLandingAuthorization(args) => {
-            let status = store.verify_landing_authorization(VerifyLandingAuthorizationReq {
-                session_token: args.session_token,
-                queue_id: args.queue_id,
-                artifact_digest: args.artifact_digest,
-                review_id: args.review_id,
-                findings_digest: args.findings_digest,
-                claim_fence_seq: args.claim_fence_seq,
-                verifier: args.verifier,
-                verdict_digest: args.verdict_digest,
-                seal_digest: args.seal_digest,
-            })?;
+            let status = store.verify_landing_authorization(
+                VerifyLandingAuthorizationReq::try_from_raw_parts(
+                    args.session_token,
+                    args.queue_id,
+                    args.artifact_digest,
+                    args.review_id,
+                    args.findings_digest,
+                    args.claim_fence_seq,
+                    args.verifier,
+                    args.verdict_digest,
+                    args.seal_digest,
+                )?,
+            )?;
             Ok(Rendered::summary(
                 &status,
                 format!("landing authorization verified {}", status.queue_id()),
             ))
         }
         QueueCommand::MarkApplied(args) => {
-            store.mark_applied(MarkAppliedReq {
-                session_token: args.session_token,
-                queue_id: args.queue_id.clone(),
-                claim_fence_seq: args.claim_fence_seq,
-                idempotency_key: args
-                    .idempotency_key
+            let req = MarkAppliedReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id.clone(),
+                args.claim_fence_seq,
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("mark-applied")),
-            })?;
+            )?;
+            store.mark_applied(req)?;
             Ok(Rendered::summary(
                 QueueClaimAck {
                     operation: "mark_applied",
@@ -119,13 +120,12 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             ))
         }
         QueueCommand::Supersede(args) => {
-            store.supersede_queue_item(SupersedeQueueItemReq {
-                session_token: args.session_token,
-                queue_id: args.queue_id.clone(),
-                idempotency_key: args
-                    .idempotency_key
+            store.supersede_queue_item(SupersedeQueueItemReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id.clone(),
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("supersede-queue-item")),
-            })?;
+            )?)?;
             Ok(Rendered::summary(
                 QueueOpAck {
                     operation: "supersede",

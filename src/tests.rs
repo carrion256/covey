@@ -45,7 +45,7 @@ fn in_memory_covey_exercises_shared_connection_read_paths() {
         covey
             .meta_task_status(&meta_task_id)
             .expect("meta status")
-            .meta_task
+            .meta_task()
             .meta_task_id,
         meta_task_id
     );

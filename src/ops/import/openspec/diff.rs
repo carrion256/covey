@@ -62,11 +62,10 @@ pub(super) fn build_openspec_import_diff_tx(
         action: meta_action,
         provenance: meta_provenance,
     });
-    items.push(ImportOpenSpecItemResult::meta_task(
-        meta_task_id.clone(),
-        meta_prompt,
-        meta_action,
-    ));
+    items.push(
+        ImportOpenSpecItemResult::meta_task(meta_task_id.clone(), meta_prompt, meta_action)
+            .map_err(|reason| CoveyError::InvalidImportDestination { reason })?,
+    );
 
     for task in &source.tasks {
         ensure_length("title", &task.title, MAX_TITLE_LEN)?;
@@ -136,19 +135,19 @@ pub(super) fn build_openspec_import_diff_tx(
         ));
     }
 
-    Ok(OpenSpecImportDiff {
-        result: ImportOpenSpecResult {
-            change_id: source.change_id.clone(),
-            meta_task_id,
-            dry_run,
-            created,
-            updated,
-            unchanged,
-            conflicts,
-            items,
-        },
-        records,
-    })
+    let result = ImportOpenSpecResult::new(
+        source.change_id.clone(),
+        meta_task_id,
+        dry_run,
+        conflicts,
+        items,
+    )
+    .map_err(|reason| CoveyError::InvalidImportDestination { reason })?;
+    debug_assert_eq!(result.created(), created);
+    debug_assert_eq!(result.updated(), updated);
+    debug_assert_eq!(result.unchanged(), unchanged);
+
+    Ok(OpenSpecImportDiff { result, records })
 }
 
 fn count_action(

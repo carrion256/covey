@@ -9,9 +9,7 @@ use crate::{
     store::append_session_event,
 };
 
-use super::{
-    OPENSPEC_PLANNING_FORMAT, OpenSpecImportRecord, OpenSpecSourceSnapshot, OpenSpecSourceTask,
-};
+use super::{OpenSpecImportRecord, OpenSpecSourceSnapshot, OpenSpecSourceTask};
 
 pub(super) fn meta_provenance(
     source: &OpenSpecSourceSnapshot,
@@ -19,17 +17,16 @@ pub(super) fn meta_provenance(
     now: i64,
 ) -> OpenSpecImportProvenance {
     OpenSpecImportProvenance::meta_task(
-        OpenSpecImportProvenanceCommon {
-            object_id: object_id.to_owned(),
-            planning_format: OPENSPEC_PLANNING_FORMAT.to_owned(),
-            openspec_change_id: source.change_id.clone(),
-            openspec_change_path: source.change_path.clone(),
-            tasks_digest: source.tasks_digest.clone(),
-            source_digests: source.source_digests.clone(),
-            mission_artifact_digests: source.mission_artifact_digests.clone(),
-            mission_artifacts: source.mission_artifacts.clone(),
-            updated_at: timestamp_ms(now),
-        },
+        OpenSpecImportProvenanceCommon::new(
+            object_id.to_owned(),
+            source.change_id.clone(),
+            source.change_path.clone(),
+            source.tasks_digest.clone(),
+            source.source_digests.clone(),
+            source.mission_artifact_digests.clone(),
+            source.mission_artifacts.clone(),
+            timestamp_ms(now),
+        ),
         source.proposal_digest.clone(),
         source.design_digest.clone(),
         source.spec_digests.clone(),
@@ -43,17 +40,16 @@ pub(super) fn task_provenance(
     now: i64,
 ) -> OpenSpecImportProvenance {
     OpenSpecImportProvenance::subtask(
-        OpenSpecImportProvenanceCommon {
-            object_id: object_id.to_owned(),
-            planning_format: OPENSPEC_PLANNING_FORMAT.to_owned(),
-            openspec_change_id: source.change_id.clone(),
-            openspec_change_path: source.change_path.clone(),
-            tasks_digest: source.tasks_digest.clone(),
-            source_digests: source.source_digests.clone(),
-            mission_artifact_digests: source.mission_artifact_digests.clone(),
-            mission_artifacts: source.mission_artifacts.clone(),
-            updated_at: timestamp_ms(now),
-        },
+        OpenSpecImportProvenanceCommon::new(
+            object_id.to_owned(),
+            source.change_id.clone(),
+            source.change_path.clone(),
+            source.tasks_digest.clone(),
+            source.source_digests.clone(),
+            source.mission_artifact_digests.clone(),
+            source.mission_artifacts.clone(),
+            timestamp_ms(now),
+        ),
         task.task_id.clone(),
         task.task_digest.clone(),
     )

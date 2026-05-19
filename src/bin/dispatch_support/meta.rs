@@ -18,13 +18,12 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             ))
         }
         MetaCommand::Cancel(args) => {
-            store.cancel_meta_task(covey::CancelMetaTaskReq {
-                session_token: args.session_token.clone(),
-                meta_task_id: args.meta_task_id.clone(),
-                idempotency_key: args
-                    .idempotency_key
+            store.cancel_meta_task(covey::CancelMetaTaskReq::try_from_raw_parts(
+                args.session_token.clone(),
+                args.meta_task_id.clone(),
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("cancel-meta-task")),
-            })?;
+            )?)?;
             Ok(Rendered::summary(
                 MetaTaskAck {
                     operation: "cancel",

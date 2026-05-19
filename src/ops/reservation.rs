@@ -39,15 +39,15 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
-                    ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
                     ensure_length("owner_subtask_id", &req.owner_subtask_id, MAX_OBJECT_ID_LEN)?;
                     ensure_subtask_exists(tx, &req.owner_subtask_id)?;
-                    ensure_generated_member_count(req.generated_members.len())?;
-                    let normalized_scope_key = normalize_scope_key(req.scope_class, &req.scope_key)?;
+                    ensure_generated_member_count(req.generated_members().len())?;
+                    let normalized_scope_key =
+                        normalize_scope_key(req.scope_class(), req.scope_key())?;
                     ensure_length("reservation_scope_key", &normalized_scope_key, MAX_PATH_LEN)?;
-                    let normalized_members = normalize_generated_members(&req.generated_members)?;
+                    let normalized_members = normalize_generated_members(req.generated_members())?;
                     ensure_reservation_scope_shape(
-                        req.scope_class,
+                        req.scope_class(),
                         &normalized_scope_key,
                         &normalized_members,
                     )?;
@@ -57,7 +57,7 @@ impl Covey {
                     let overlaps = find_overlapping_reservations_tx(
                         tx,
                         &OverlapCandidate::new(
-                            req.scope_class,
+                            req.scope_class(),
                             normalized_scope_key.clone(),
                             normalized_members.clone(),
                         ),
@@ -72,9 +72,9 @@ impl Covey {
                         params![
                             reservation_id,
                             req.owner_subtask_id,
-                            req.scope_class.to_string(),
+                            req.scope_class().to_string(),
                             normalized_scope_key,
-                            lease_now + req.lease_duration_ms,
+                            lease_now + req.lease_duration_ms.get(),
                             ReservationState::Active.to_string(),
                             now
                         ],
@@ -128,12 +128,12 @@ impl Covey {
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("reservation_id", &req.reservation_id, MAX_OBJECT_ID_LEN)?;
-                    let reservation = load_reservation_tx(tx, &req.reservation_id)?;
+                    let reservation = load_reservation_tx(tx, req.reservation_id.as_str())?;
                     ensure_reservation_transition(reservation.state, ReservationState::Released)?;
                     let updated = tx.execute(
                         "UPDATE reservations SET state = ?2, updated_at = ?3 WHERE reservation_id = ?1 AND state = ?4",
                         params![
-                            req.reservation_id,
+                            req.reservation_id.as_str(),
                             ReservationState::Released.to_string(),
                             now,
                             ReservationState::Active.to_string()
@@ -146,7 +146,7 @@ impl Covey {
                             object: ObjectType::Reservation,
                         });
                     }
-                    resolve_reservation_overlap_conflicts(tx, &req.reservation_id, now)?;
+                    resolve_reservation_overlap_conflicts(tx, req.reservation_id.as_str(), now)?;
                     let scope_class = reservation.scope_class();
                     let scope_key = reservation.scope_key().to_owned();
                     let generated_members = reservation.generated_members().to_vec();
@@ -200,9 +200,9 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
-                    ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms)?;
+                    ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms.get())?;
                     ensure_length("reservation_id", &req.reservation_id, MAX_OBJECT_ID_LEN)?;
-                    let reservation = load_reservation_tx(tx, &req.reservation_id)?;
+                    let reservation = load_reservation_tx(tx, req.reservation_id.as_str())?;
                     if reservation.state != ReservationState::Active {
                         return Err(CoveyError::IllegalTransition {
                             from: reservation.state.into(),
@@ -216,11 +216,11 @@ impl Covey {
                         });
                     }
                     let renewed_deadline =
-                        reservation.lease_deadline.get().max(lease_now) + req.extend_by_ms;
+                        reservation.lease_deadline.get().max(lease_now) + req.extend_by_ms.get();
                     let updated = tx.execute(
                         "UPDATE reservations SET lease_deadline = ?2, updated_at = ?3 WHERE reservation_id = ?1 AND state = ?4",
                         params![
-                            req.reservation_id,
+                            req.reservation_id.as_str(),
                             renewed_deadline,
                             now,
                             ReservationState::Active.to_string()
@@ -276,12 +276,12 @@ impl Covey {
     /// Returns active reservations that overlap a proposed reservation candidate.
     pub fn find_overlapping_reservations(&self, req: OverlapQueryReq) -> Result<Vec<Reservation>> {
         let started_at = Instant::now();
-        let normalized_scope_key = normalize_scope_key(req.scope_class, &req.scope_key)?;
+        let normalized_scope_key = normalize_scope_key(req.scope_class(), req.scope_key())?;
         ensure_length("reservation_scope_key", &normalized_scope_key, MAX_PATH_LEN)?;
-        ensure_generated_member_count(req.generated_members.len())?;
-        let normalized_members = normalize_generated_members(&req.generated_members)?;
+        ensure_generated_member_count(req.generated_members().len())?;
+        let normalized_members = normalize_generated_members(req.generated_members())?;
         ensure_reservation_scope_shape(
-            req.scope_class,
+            req.scope_class(),
             &normalized_scope_key,
             &normalized_members,
         )?;
@@ -289,7 +289,7 @@ impl Covey {
             ensure_length("generated_member", member, MAX_PATH_LEN)?;
         }
         let candidate =
-            OverlapCandidate::new(req.scope_class, normalized_scope_key, normalized_members);
+            OverlapCandidate::new(req.scope_class(), normalized_scope_key, normalized_members);
         let result =
             self.with_read_conn(|conn| find_overlapping_reservations_conn(conn, &candidate));
         self.log_operation(
@@ -358,7 +358,7 @@ impl Covey {
             |conflicts| {
                 conflicts
                     .iter()
-                    .map(|conflict| format!("conflict:{}", conflict.conflict_id))
+                    .map(|conflict| format!("conflict:{}", conflict.conflict_id()))
                     .collect()
             },
         );

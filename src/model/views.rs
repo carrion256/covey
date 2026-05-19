@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
 use strum::Display;
@@ -182,9 +184,13 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
     type Error = rusqlite::Error;
 
     fn try_from(raw: RawSubtaskView) -> Result<Self, Self::Error> {
-        let lifecycle =
-            SubtaskLifecycle::from_row_parts(raw.state, raw.active_claim_id, raw.artifact_digest)?;
         let kind = SubtaskViewKind::from_parts(raw.kind, raw.review_target)?;
+        let lifecycle = SubtaskLifecycle::from_row_parts_for_kind(
+            kind.kind(),
+            raw.state,
+            raw.active_claim_id,
+            raw.artifact_digest,
+        )?;
         Ok(Self::new(
             raw.subtask_id,
             raw.meta_task_id,
@@ -231,59 +237,850 @@ fn invalid_subtask_view(reason: &str) -> rusqlite::Error {
 
 /// Snapshot view of a session and its currently active subtask, if any.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatus {
-    pub session: Session,
-    pub active_subtask: Option<SubtaskView>,
+    session: Session,
+    active_subtask: Option<SubtaskView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawSessionStatus {
+    session: Session,
+    active_subtask: Option<SubtaskView>,
+}
+
+impl SessionStatus {
+    /// Builds a session status view whose optional active subtask matches the session lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the active subtask view is missing, stale, or
+    /// attached to a session without an active subtask.
+    pub fn new(session: Session, active_subtask: Option<SubtaskView>) -> Result<Self, String> {
+        match (session.active_subtask_id(), active_subtask.as_ref()) {
+            (Some(expected), Some(subtask)) if &subtask.subtask_id == expected => {}
+            (Some(_), Some(_)) => {
+                return Err("session status active_subtask must match session state".to_owned());
+            }
+            (Some(_), None) => {
+                return Err("session status requires active_subtask view".to_owned());
+            }
+            (None, Some(_)) => {
+                return Err("session status must not include active_subtask".to_owned());
+            }
+            (None, None) => {}
+        }
+        Ok(Self {
+            session,
+            active_subtask,
+        })
+    }
+
+    /// Returns the session row.
+    #[must_use]
+    pub const fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Returns the active subtask view, when the session has one.
+    #[must_use]
+    pub const fn active_subtask(&self) -> Option<&SubtaskView> {
+        self.active_subtask.as_ref()
+    }
+}
+
+impl Serialize for SessionStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawSessionStatus::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawSessionStatus::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl From<&SessionStatus> for RawSessionStatus {
+    fn from(status: &SessionStatus) -> Self {
+        Self {
+            session: status.session.clone(),
+            active_subtask: status.active_subtask.clone(),
+        }
+    }
+}
+
+impl TryFrom<RawSessionStatus> for SessionStatus {
+    type Error = String;
+
+    fn try_from(raw: RawSessionStatus) -> Result<Self, Self::Error> {
+        Self::new(raw.session, raw.active_subtask)
+    }
 }
 
 /// Snapshot view of a subtask and its attached stateful records.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtaskStatus {
-    pub subtask: SubtaskView,
-    pub claim: Option<Claim>,
-    pub artifact: Option<Artifact>,
-    pub reviews: Vec<Review>,
-    pub ready_queue: Vec<ReadyQueueItem>,
+    subtask: SubtaskView,
+    claim: Option<Claim>,
+    artifact: Option<Artifact>,
+    reviews: Vec<Review>,
+    ready_queue: Vec<ReadyQueueItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawSubtaskStatus {
+    subtask: SubtaskView,
+    claim: Option<Claim>,
+    artifact: Option<Artifact>,
+    reviews: Vec<Review>,
+    ready_queue: Vec<ReadyQueueItem>,
+}
+
+impl SubtaskStatus {
+    /// Builds a subtask status view with attachments that match the subtask lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when claim, artifact, review, or queue attachments do
+    /// not belong to the subtask or contradict its lifecycle fields.
+    pub fn new(
+        subtask: SubtaskView,
+        claim: Option<Claim>,
+        artifact: Option<Artifact>,
+        reviews: Vec<Review>,
+        ready_queue: Vec<ReadyQueueItem>,
+    ) -> Result<Self, String> {
+        validate_subtask_status_attachments(&subtask, claim.as_ref(), artifact.as_ref())?;
+        for review in &reviews {
+            if review.subtask_id() != subtask.subtask_id.as_str() {
+                return Err("subtask status reviews must belong to the subtask".to_owned());
+            }
+        }
+        for item in &ready_queue {
+            if item.subtask_id() != subtask.subtask_id.as_str() {
+                return Err(
+                    "subtask status ready-queue items must belong to the subtask".to_owned(),
+                );
+            }
+        }
+        Ok(Self {
+            subtask,
+            claim,
+            artifact,
+            reviews,
+            ready_queue,
+        })
+    }
+
+    /// Returns the subtask view.
+    #[must_use]
+    pub const fn subtask(&self) -> &SubtaskView {
+        &self.subtask
+    }
+
+    /// Returns the active claim when the subtask lifecycle carries one.
+    #[must_use]
+    pub const fn claim(&self) -> Option<&Claim> {
+        self.claim.as_ref()
+    }
+
+    /// Returns the artifact when the subtask lifecycle carries one.
+    #[must_use]
+    pub const fn artifact(&self) -> Option<&Artifact> {
+        self.artifact.as_ref()
+    }
+
+    /// Returns reviews associated with the subtask.
+    #[must_use]
+    pub fn reviews(&self) -> &[Review] {
+        &self.reviews
+    }
+
+    /// Returns ready-queue items associated with the subtask.
+    #[must_use]
+    pub fn ready_queue(&self) -> &[ReadyQueueItem] {
+        &self.ready_queue
+    }
+}
+
+fn validate_subtask_status_attachments(
+    subtask: &SubtaskView,
+    claim: Option<&Claim>,
+    artifact: Option<&Artifact>,
+) -> Result<(), String> {
+    match (subtask.active_claim_id(), claim) {
+        (Some(expected), Some(claim)) if &claim.claim_id == expected => {}
+        (Some(_), Some(_)) => {
+            return Err("subtask status claim_id must match active claim".to_owned());
+        }
+        (Some(_), None) => return Err("subtask status requires active claim row".to_owned()),
+        (None, Some(_)) => {
+            return Err("subtask status must not include claim without active claim".to_owned());
+        }
+        (None, None) => {}
+    }
+
+    match (subtask.artifact_digest(), artifact) {
+        (Some(expected), Some(artifact)) if &artifact.artifact_digest == expected => {}
+        (Some(_), Some(_)) => {
+            return Err("subtask status artifact_digest must match lifecycle artifact".to_owned());
+        }
+        (Some(_), None) => return Err("subtask status requires artifact row".to_owned()),
+        (None, Some(_)) => {
+            return Err(
+                "subtask status must not include artifact without lifecycle artifact".to_owned(),
+            );
+        }
+        (None, None) => {}
+    }
+
+    Ok(())
+}
+
+impl Serialize for SubtaskStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawSubtaskStatus::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SubtaskStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawSubtaskStatus::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl From<&SubtaskStatus> for RawSubtaskStatus {
+    fn from(status: &SubtaskStatus) -> Self {
+        Self {
+            subtask: status.subtask.clone(),
+            claim: status.claim.clone(),
+            artifact: status.artifact.clone(),
+            reviews: status.reviews.clone(),
+            ready_queue: status.ready_queue.clone(),
+        }
+    }
+}
+
+impl TryFrom<RawSubtaskStatus> for SubtaskStatus {
+    type Error = String;
+
+    fn try_from(raw: RawSubtaskStatus) -> Result<Self, Self::Error> {
+        Self::new(
+            raw.subtask,
+            raw.claim,
+            raw.artifact,
+            raw.reviews,
+            raw.ready_queue,
+        )
+    }
 }
 
 /// Snapshot view of a meta-task and all of its subtasks.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaTaskStatus {
-    pub meta_task: MetaTask,
-    pub subtasks: Vec<SubtaskView>,
+    meta_task: MetaTask,
+    subtasks: Vec<SubtaskView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawMetaTaskStatus {
+    meta_task: MetaTask,
+    subtasks: Vec<SubtaskView>,
+}
+
+impl MetaTaskStatus {
+    /// Builds a meta-task status view whose subtasks all belong to the meta-task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any subtask is attached to a different meta-task.
+    pub fn new(meta_task: MetaTask, subtasks: Vec<SubtaskView>) -> Result<Self, String> {
+        for subtask in &subtasks {
+            if subtask.meta_task_id != meta_task.meta_task_id {
+                return Err("meta-task status subtasks must belong to the meta-task".to_owned());
+            }
+        }
+        Ok(Self {
+            meta_task,
+            subtasks,
+        })
+    }
+
+    /// Returns the meta-task row.
+    #[must_use]
+    pub const fn meta_task(&self) -> &MetaTask {
+        &self.meta_task
+    }
+
+    /// Returns subtasks attached to this meta-task.
+    #[must_use]
+    pub fn subtasks(&self) -> &[SubtaskView] {
+        &self.subtasks
+    }
+}
+
+impl Serialize for MetaTaskStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawMetaTaskStatus::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MetaTaskStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawMetaTaskStatus::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl From<&MetaTaskStatus> for RawMetaTaskStatus {
+    fn from(status: &MetaTaskStatus) -> Self {
+        Self {
+            meta_task: status.meta_task.clone(),
+            subtasks: status.subtasks.clone(),
+        }
+    }
+}
+
+impl TryFrom<RawMetaTaskStatus> for MetaTaskStatus {
+    type Error = String;
+
+    fn try_from(raw: RawMetaTaskStatus) -> Result<Self, Self::Error> {
+        Self::new(raw.meta_task, raw.subtasks)
+    }
 }
 
 /// Observability row for a subtask that has not moved recently enough to merit attention.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StuckSubtask {
-    pub subtask: SubtaskView,
-    pub claim: Option<Claim>,
-    pub session: Option<Session>,
-    pub idle_for_ms: i64,
+    subtask: SubtaskView,
+    claim: Option<Claim>,
+    session: Option<Session>,
+    idle_for_ms: StuckIdleDurationMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawStuckSubtask {
+    subtask: SubtaskView,
+    claim: Option<Claim>,
+    session: Option<Session>,
+    idle_for_ms: i64,
 }
 
 /// Observability row for a held claim whose lease deadline is approaching.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiringClaim {
-    pub claim: Claim,
-    pub subtask: SubtaskView,
-    pub session: Session,
-    pub expires_in_ms: i64,
+    claim: Claim,
+    subtask: SubtaskView,
+    session: Session,
+    expires_in_ms: ClaimExpiresInDurationMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawExpiringClaim {
+    claim: Claim,
+    subtask: SubtaskView,
+    session: Session,
+    expires_in_ms: i64,
+}
+
+macro_rules! non_negative_duration_newtype {
+    ($name:ident, $field:literal) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(try_from = "i64", into = "i64")]
+        struct $name(i64);
+
+        impl $name {
+            fn parse(value: i64) -> Result<Self, String> {
+                Self::try_from(value)
+            }
+
+            const fn get(self) -> i64 {
+                self.0
+            }
+        }
+
+        impl TryFrom<i64> for $name {
+            type Error = String;
+
+            fn try_from(value: i64) -> Result<Self, Self::Error> {
+                if value < 0 {
+                    Err(format!("{} must not be negative", $field))
+                } else {
+                    Ok(Self(value))
+                }
+            }
+        }
+
+        impl From<$name> for i64 {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+    };
+}
+
+non_negative_duration_newtype!(StuckIdleDurationMs, "idle_for_ms");
+non_negative_duration_newtype!(ClaimExpiresInDurationMs, "expires_in_ms");
+
+impl StuckSubtask {
+    /// Builds a stuck-subtask observability row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `idle_for_ms` is negative, or when the attached
+    /// claim/session rows do not match the subtask.
+    pub fn new(
+        subtask: SubtaskView,
+        claim: Option<Claim>,
+        session: Option<Session>,
+        idle_for_ms: i64,
+    ) -> Result<Self, String> {
+        let idle_for_ms = StuckIdleDurationMs::parse(idle_for_ms)?;
+        validate_stuck_subtask_attachments(&subtask, claim.as_ref(), session.as_ref())?;
+        Ok(Self {
+            subtask,
+            claim,
+            session,
+            idle_for_ms,
+        })
+    }
+
+    /// Returns the idle subtask view.
+    #[must_use]
+    pub const fn subtask(&self) -> &SubtaskView {
+        &self.subtask
+    }
+
+    /// Returns the active claim attached to the subtask, when present.
+    #[must_use]
+    pub const fn claim(&self) -> Option<&Claim> {
+        self.claim.as_ref()
+    }
+
+    /// Returns the claim owner session, when a claim is attached.
+    #[must_use]
+    pub const fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// Returns how long the subtask has been idle.
+    #[must_use]
+    pub const fn idle_for_ms(&self) -> i64 {
+        self.idle_for_ms.get()
+    }
+}
+
+fn validate_stuck_subtask_attachments(
+    subtask: &SubtaskView,
+    claim: Option<&Claim>,
+    session: Option<&Session>,
+) -> Result<(), String> {
+    validate_optional_claim_matches_subtask(
+        "stuck subtask",
+        subtask,
+        claim,
+        "requires active claim row",
+        "must not include claim without active claim",
+    )?;
+    validate_optional_session_matches_claim(
+        "stuck subtask",
+        subtask,
+        claim,
+        session,
+        "requires session row for active claim",
+        "must not include session without claim",
+    )
+}
+
+impl Serialize for StuckSubtask {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawStuckSubtask::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StuckSubtask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawStuckSubtask::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl From<&StuckSubtask> for RawStuckSubtask {
+    fn from(row: &StuckSubtask) -> Self {
+        Self {
+            subtask: row.subtask.clone(),
+            claim: row.claim.clone(),
+            session: row.session.clone(),
+            idle_for_ms: row.idle_for_ms(),
+        }
+    }
+}
+
+impl TryFrom<RawStuckSubtask> for StuckSubtask {
+    type Error = String;
+
+    fn try_from(raw: RawStuckSubtask) -> Result<Self, Self::Error> {
+        Self::new(raw.subtask, raw.claim, raw.session, raw.idle_for_ms)
+    }
+}
+
+impl ExpiringClaim {
+    /// Builds an expiring-claim observability row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `expires_in_ms` is negative, or when the claim,
+    /// subtask, and session do not describe the same active claim.
+    pub fn new(
+        claim: Claim,
+        subtask: SubtaskView,
+        session: Session,
+        expires_in_ms: i64,
+    ) -> Result<Self, String> {
+        let expires_in_ms = ClaimExpiresInDurationMs::parse(expires_in_ms)?;
+        validate_expiring_claim_attachments(&claim, &subtask, &session)?;
+        Ok(Self {
+            claim,
+            subtask,
+            session,
+            expires_in_ms,
+        })
+    }
+
+    /// Returns the expiring held claim.
+    #[must_use]
+    pub const fn claim(&self) -> &Claim {
+        &self.claim
+    }
+
+    /// Returns the subtask owned by the expiring claim.
+    #[must_use]
+    pub const fn subtask(&self) -> &SubtaskView {
+        &self.subtask
+    }
+
+    /// Returns the owner session for the expiring claim.
+    #[must_use]
+    pub const fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Returns how long until the claim lease expires.
+    #[must_use]
+    pub const fn expires_in_ms(&self) -> i64 {
+        self.expires_in_ms.get()
+    }
+}
+
+fn validate_expiring_claim_attachments(
+    claim: &Claim,
+    subtask: &SubtaskView,
+    session: &Session,
+) -> Result<(), String> {
+    validate_claim_matches_subtask("expiring claim", subtask, claim)?;
+    validate_session_matches_claim("expiring claim", subtask, claim, session)
+}
+
+fn validate_optional_claim_matches_subtask(
+    context: &str,
+    subtask: &SubtaskView,
+    claim: Option<&Claim>,
+    missing_message: &str,
+    unexpected_message: &str,
+) -> Result<(), String> {
+    match (subtask.active_claim_id(), claim) {
+        (Some(_), Some(claim)) => validate_claim_matches_subtask(context, subtask, claim),
+        (Some(_), None) => Err(format!("{context} {missing_message}")),
+        (None, Some(_)) => Err(format!("{context} {unexpected_message}")),
+        (None, None) => Ok(()),
+    }
+}
+
+fn validate_claim_matches_subtask(
+    context: &str,
+    subtask: &SubtaskView,
+    claim: &Claim,
+) -> Result<(), String> {
+    if claim.subtask_id != subtask.subtask_id {
+        return Err(format!("{context} claim must belong to the subtask"));
+    }
+    if Some(&claim.claim_id) != subtask.active_claim_id() {
+        return Err(format!(
+            "{context} claim_id must match the subtask active claim"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_session_matches_claim(
+    context: &str,
+    subtask: &SubtaskView,
+    claim: Option<&Claim>,
+    session: Option<&Session>,
+    missing_message: &str,
+    unexpected_message: &str,
+) -> Result<(), String> {
+    match (claim, session) {
+        (Some(claim), Some(session)) => {
+            validate_session_matches_claim(context, subtask, claim, session)
+        }
+        (Some(_), None) => Err(format!("{context} {missing_message}")),
+        (None, Some(_)) => Err(format!("{context} {unexpected_message}")),
+        (None, None) => Ok(()),
+    }
+}
+
+fn validate_session_matches_claim(
+    context: &str,
+    subtask: &SubtaskView,
+    claim: &Claim,
+    session: &Session,
+) -> Result<(), String> {
+    if session.session_token != claim.owner_session_token {
+        return Err(format!("{context} session must own the claim"));
+    }
+    match session.active_subtask_id() {
+        Some(active_subtask_id) if active_subtask_id == &subtask.subtask_id => Ok(()),
+        Some(_) => Err(format!(
+            "{context} session active_subtask_id must match the subtask"
+        )),
+        None => Err(format!(
+            "{context} session must be active on the claimed subtask"
+        )),
+    }
+}
+
+impl Serialize for ExpiringClaim {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawExpiringClaim::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExpiringClaim {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawExpiringClaim::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl From<&ExpiringClaim> for RawExpiringClaim {
+    fn from(row: &ExpiringClaim) -> Self {
+        Self {
+            claim: row.claim.clone(),
+            subtask: row.subtask.clone(),
+            session: row.session.clone(),
+            expires_in_ms: row.expires_in_ms(),
+        }
+    }
+}
+
+impl TryFrom<RawExpiringClaim> for ExpiringClaim {
+    type Error = String;
+
+    fn try_from(raw: RawExpiringClaim) -> Result<Self, Self::Error> {
+        Self::new(raw.claim, raw.subtask, raw.session, raw.expires_in_ms)
+    }
 }
 
 /// Aggregate counts and queue ages for the ready queue.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyQueueMetrics {
-    pub queued_count: usize,
-    pub in_flight_count: usize,
-    pub oldest_queued_age_ms: Option<i64>,
-    pub oldest_in_flight_age_ms: Option<i64>,
+    queued: QueueMetricBucket,
+    in_flight: QueueMetricBucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueueMetricBucket {
+    Empty,
+    NonEmpty {
+        count: usize,
+        oldest_age_ms: QueueMetricAgeMs,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueueMetricAgeMs(i64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawReadyQueueMetrics {
+    queued_count: usize,
+    in_flight_count: usize,
+    oldest_queued_age_ms: Option<i64>,
+    oldest_in_flight_age_ms: Option<i64>,
+}
+
+impl ReadyQueueMetrics {
+    /// Builds queue metrics from the flat SQL/API shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a non-empty queue is missing an age, when an empty
+    /// queue carries an age, or when an age is negative.
+    pub fn new(
+        queued_count: usize,
+        in_flight_count: usize,
+        oldest_queued_age_ms: Option<i64>,
+        oldest_in_flight_age_ms: Option<i64>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            queued: QueueMetricBucket::from_parts("queued", queued_count, oldest_queued_age_ms)?,
+            in_flight: QueueMetricBucket::from_parts(
+                "in_flight",
+                in_flight_count,
+                oldest_in_flight_age_ms,
+            )?,
+        })
+    }
+
+    /// Returns the number of queued apply items.
+    #[must_use]
+    pub const fn queued_count(&self) -> usize {
+        self.queued.count()
+    }
+
+    /// Returns the number of in-flight apply items.
+    #[must_use]
+    pub const fn in_flight_count(&self) -> usize {
+        self.in_flight.count()
+    }
+
+    /// Returns the age of the oldest queued apply item.
+    #[must_use]
+    pub const fn oldest_queued_age_ms(&self) -> Option<i64> {
+        self.queued.oldest_age_ms()
+    }
+
+    /// Returns the age of the oldest in-flight apply item.
+    #[must_use]
+    pub const fn oldest_in_flight_age_ms(&self) -> Option<i64> {
+        self.in_flight.oldest_age_ms()
+    }
+}
+
+impl QueueMetricBucket {
+    fn from_parts(
+        label: &'static str,
+        count: usize,
+        oldest_age_ms: Option<i64>,
+    ) -> Result<Self, String> {
+        match (count, oldest_age_ms) {
+            (0, None) => Ok(Self::Empty),
+            (0, Some(_)) => Err(format!(
+                "empty {label} ready-queue metrics must not include oldest age"
+            )),
+            (count, Some(oldest_age_ms)) => Ok(Self::NonEmpty {
+                count,
+                oldest_age_ms: QueueMetricAgeMs::parse(label, oldest_age_ms)?,
+            }),
+            (_, None) => Err(format!(
+                "non-empty {label} ready-queue metrics require oldest age"
+            )),
+        }
+    }
+
+    const fn count(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::NonEmpty { count, .. } => *count,
+        }
+    }
+
+    const fn oldest_age_ms(&self) -> Option<i64> {
+        match self {
+            Self::Empty => None,
+            Self::NonEmpty { oldest_age_ms, .. } => Some(oldest_age_ms.get()),
+        }
+    }
+}
+
+impl QueueMetricAgeMs {
+    fn parse(label: &'static str, value: i64) -> Result<Self, String> {
+        if value < 0 {
+            Err(format!(
+                "{label} ready-queue oldest age must not be negative"
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl Serialize for ReadyQueueMetrics {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawReadyQueueMetrics {
+            queued_count: self.queued_count(),
+            in_flight_count: self.in_flight_count(),
+            oldest_queued_age_ms: self.oldest_queued_age_ms(),
+            oldest_in_flight_age_ms: self.oldest_in_flight_age_ms(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReadyQueueMetrics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawReadyQueueMetrics::deserialize(deserializer)?;
+        Self::new(
+            raw.queued_count,
+            raw.in_flight_count,
+            raw.oldest_queued_age_ms,
+            raw.oldest_in_flight_age_ms,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Live authorization check for a git landing side effect.
@@ -606,16 +1403,18 @@ pub enum RepoopsAuthorityPolicyMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthorityClaimFact {
     pub claim_id: ClaimId,
-    pub owner: String,
-    pub scope_in: Vec<String>,
-    pub scope_out: Vec<String>,
-    pub has_required_contract_fields: bool,
+    owner: String,
+    scope_in: Vec<String>,
+    scope_out: Vec<String>,
+    has_required_contract_fields: bool,
     lifecycle: RepoopsAuthorityClaimLifecycle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RepoopsAuthorityClaimLifecycle {
-    InProgress { active_ownership_token: String },
+    InProgress {
+        active_ownership_token: SessionToken,
+    },
     Open,
 }
 
@@ -642,42 +1441,52 @@ pub enum RepoopsAuthorityClaimStatus {
 
 impl RepoopsAuthorityClaimFact {
     /// Builds an in-progress claim fact with its active ownership token reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when owner or scope fields are not normalized, or when
+    /// required contract fields are marked present without an inclusion scope.
     pub fn in_progress(
         claim_id: ClaimId,
         owner: String,
         scope_in: Vec<String>,
         scope_out: Vec<String>,
         has_required_contract_fields: bool,
-        active_ownership_token: String,
-    ) -> Self {
-        Self {
+        active_ownership_token: SessionToken,
+    ) -> Result<Self, String> {
+        Self::from_parts(
             claim_id,
             owner,
             scope_in,
             scope_out,
             has_required_contract_fields,
-            lifecycle: RepoopsAuthorityClaimLifecycle::InProgress {
+            RepoopsAuthorityClaimLifecycle::InProgress {
                 active_ownership_token,
             },
-        }
+        )
     }
 
     /// Builds an open claim fact. Open claims do not carry active ownership tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when owner or scope fields are not normalized, or when
+    /// required contract fields are marked present without an inclusion scope.
     pub fn open(
         claim_id: ClaimId,
         owner: String,
         scope_in: Vec<String>,
         scope_out: Vec<String>,
         has_required_contract_fields: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Self::from_parts(
             claim_id,
             owner,
             scope_in,
             scope_out,
             has_required_contract_fields,
-            lifecycle: RepoopsAuthorityClaimLifecycle::Open,
-        }
+            RepoopsAuthorityClaimLifecycle::Open,
+        )
     }
 
     /// Returns the claim status.
@@ -685,10 +1494,63 @@ impl RepoopsAuthorityClaimFact {
         self.lifecycle.status()
     }
 
+    /// Returns the owner reference for this claim fact.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Returns inclusion scope patterns for this claim fact.
+    #[must_use]
+    pub fn scope_in(&self) -> &[String] {
+        &self.scope_in
+    }
+
+    /// Returns exclusion scope patterns for this claim fact.
+    #[must_use]
+    pub fn scope_out(&self) -> &[String] {
+        &self.scope_out
+    }
+
+    /// Returns whether this fact carries the required repoops contract fields.
+    #[must_use]
+    pub const fn has_required_contract_fields(&self) -> bool {
+        self.has_required_contract_fields
+    }
+
     /// Returns the active ownership token reference for in-progress claims.
     #[must_use]
     pub fn active_ownership_token(&self) -> Option<&str> {
         self.lifecycle.active_ownership_token()
+    }
+
+    fn from_parts(
+        claim_id: ClaimId,
+        owner: String,
+        scope_in: Vec<String>,
+        scope_out: Vec<String>,
+        has_required_contract_fields: bool,
+        lifecycle: RepoopsAuthorityClaimLifecycle,
+    ) -> Result<Self, String> {
+        if owner.trim().is_empty() {
+            return Err("repoops claim facts require an owner".into());
+        }
+        if owner.trim() != owner {
+            return Err("repoops claim fact owner must be normalized".into());
+        }
+        validate_repoops_scope_patterns("claim.scope_in", &scope_in)?;
+        validate_repoops_scope_patterns("claim.scope_out", &scope_out)?;
+        if has_required_contract_fields && scope_in.is_empty() {
+            return Err("repoops claim facts with required contract fields need scope_in".into());
+        }
+        Ok(Self {
+            claim_id,
+            owner,
+            scope_in,
+            scope_out,
+            has_required_contract_fields,
+            lifecycle,
+        })
     }
 }
 
@@ -700,7 +1562,8 @@ impl RepoopsAuthorityClaimLifecycle {
         match (status, active_ownership_token) {
             (RepoopsAuthorityClaimStatus::InProgress, Some(active_ownership_token)) => {
                 Ok(Self::InProgress {
-                    active_ownership_token,
+                    active_ownership_token: SessionToken::parse(active_ownership_token)
+                        .map_err(|err| err.to_string())?,
                 })
             }
             (RepoopsAuthorityClaimStatus::InProgress, None) => {
@@ -724,7 +1587,7 @@ impl RepoopsAuthorityClaimLifecycle {
         match self {
             Self::InProgress {
                 active_ownership_token,
-            } => Some(active_ownership_token),
+            } => Some(active_ownership_token.as_str()),
             Self::Open => None,
         }
     }
@@ -757,35 +1620,269 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityClaimFact {
         let lifecycle =
             RepoopsAuthorityClaimLifecycle::try_from_parts(raw.status, raw.active_ownership_token)
                 .map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            claim_id: raw.claim_id,
-            owner: raw.owner,
-            scope_in: raw.scope_in,
-            scope_out: raw.scope_out,
-            has_required_contract_fields: raw.has_required_contract_fields,
+        Self::from_parts(
+            raw.claim_id,
+            raw.owner,
+            raw.scope_in,
+            raw.scope_out,
+            raw.has_required_contract_fields,
             lifecycle,
-        })
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
 /// Scope facts derived from Covey lifecycle and reservation state.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthorityScopeFact {
+    scope_in: Vec<String>,
+    scope_out: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawRepoopsAuthorityScopeFact {
     #[serde(rename = "in")]
-    pub scope_in: Vec<String>,
+    scope_in: Vec<String>,
     #[serde(rename = "out")]
-    pub scope_out: Vec<String>,
+    scope_out: Vec<String>,
+}
+
+impl RepoopsAuthorityScopeFact {
+    /// Builds scope facts from normalized inclusion and exclusion patterns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a scope pattern is blank, padded, or duplicated
+    /// within its inclusion or exclusion list.
+    pub fn new(scope_in: Vec<String>, scope_out: Vec<String>) -> Result<Self, String> {
+        validate_repoops_scope_patterns("scope.in", &scope_in)?;
+        validate_repoops_scope_patterns("scope.out", &scope_out)?;
+        Ok(Self {
+            scope_in,
+            scope_out,
+        })
+    }
+
+    /// Returns inclusion scope patterns.
+    #[must_use]
+    pub fn scope_in(&self) -> &[String] {
+        &self.scope_in
+    }
+
+    /// Returns exclusion scope patterns.
+    #[must_use]
+    pub fn scope_out(&self) -> &[String] {
+        &self.scope_out
+    }
+}
+
+impl Serialize for RepoopsAuthorityScopeFact {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawRepoopsAuthorityScopeFact {
+            scope_in: self.scope_in.clone(),
+            scope_out: self.scope_out.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RepoopsAuthorityScopeFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawRepoopsAuthorityScopeFact::deserialize(deserializer)?;
+        Self::new(raw.scope_in, raw.scope_out).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_repoops_scope_patterns(label: &str, patterns: &[String]) -> Result<(), String> {
+    let mut seen = HashSet::with_capacity(patterns.len());
+    for pattern in patterns {
+        if pattern.trim().is_empty() {
+            return Err(format!("{label} patterns must not be empty"));
+        }
+        if pattern.trim() != pattern {
+            return Err(format!("{label} patterns must be normalized"));
+        }
+        if !seen.insert(pattern.as_str()) {
+            return Err(format!("{label} patterns must not contain duplicates"));
+        }
+    }
+    Ok(())
 }
 
 /// Path ownership fact passed through to mutAI repoops preflight.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthorityLockFact {
-    pub path: String,
-    pub owner: String,
-    pub claim_id: RepoopsClaimRef,
-    pub status: RepoopsAuthorityLockStatus,
+    fact: RepoopsAuthorityLock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepoopsAuthorityLock {
+    Owned {
+        path: String,
+        owner: String,
+        claim_id: RepoopsClaimRef,
+    },
+    ForeignOwner {
+        path: String,
+        owner: String,
+        claim_id: RepoopsClaimRef,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawRepoopsAuthorityLockFact {
+    path: String,
+    owner: String,
+    claim_id: RepoopsClaimRef,
+    status: RepoopsAuthorityLockStatus,
+}
+
+impl RepoopsAuthorityLockFact {
+    /// Builds a lock fact owned by the current claim.
+    pub fn owned(
+        path: impl Into<String>,
+        owner: impl Into<String>,
+        claim_id: RepoopsClaimRef,
+    ) -> Self {
+        Self {
+            fact: RepoopsAuthorityLock::Owned {
+                path: path.into(),
+                owner: owner.into(),
+                claim_id,
+            },
+        }
+    }
+
+    /// Builds a lock fact owned by another claim or reservation.
+    pub fn foreign_owner(
+        path: impl Into<String>,
+        owner: impl Into<String>,
+        claim_id: RepoopsClaimRef,
+    ) -> Self {
+        Self {
+            fact: RepoopsAuthorityLock::ForeignOwner {
+                path: path.into(),
+                owner: owner.into(),
+                claim_id,
+            },
+        }
+    }
+
+    /// Returns the path covered by the lock fact.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        self.fact.path()
+    }
+
+    /// Returns the owner reference for the lock fact.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        self.fact.owner()
+    }
+
+    /// Returns the claim reference associated with the lock fact.
+    #[must_use]
+    pub const fn claim_id(&self) -> &RepoopsClaimRef {
+        self.fact.claim_id()
+    }
+
+    /// Returns whether this lock is owned by the current claim or by a foreign owner.
+    #[must_use]
+    pub const fn status(&self) -> RepoopsAuthorityLockStatus {
+        self.fact.status()
+    }
+}
+
+impl RepoopsAuthorityLock {
+    fn from_parts(
+        path: String,
+        owner: String,
+        claim_id: RepoopsClaimRef,
+        status: RepoopsAuthorityLockStatus,
+    ) -> Self {
+        match status {
+            RepoopsAuthorityLockStatus::Owned => Self::Owned {
+                path,
+                owner,
+                claim_id,
+            },
+            RepoopsAuthorityLockStatus::ForeignOwner => Self::ForeignOwner {
+                path,
+                owner,
+                claim_id,
+            },
+        }
+    }
+
+    fn path(&self) -> &str {
+        match self {
+            Self::Owned { path, .. } | Self::ForeignOwner { path, .. } => path,
+        }
+    }
+
+    fn owner(&self) -> &str {
+        match self {
+            Self::Owned { owner, .. } | Self::ForeignOwner { owner, .. } => owner,
+        }
+    }
+
+    const fn claim_id(&self) -> &RepoopsClaimRef {
+        match self {
+            Self::Owned { claim_id, .. } | Self::ForeignOwner { claim_id, .. } => claim_id,
+        }
+    }
+
+    const fn status(&self) -> RepoopsAuthorityLockStatus {
+        match self {
+            Self::Owned { .. } => RepoopsAuthorityLockStatus::Owned,
+            Self::ForeignOwner { .. } => RepoopsAuthorityLockStatus::ForeignOwner,
+        }
+    }
+}
+
+impl Serialize for RepoopsAuthorityLockFact {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawRepoopsAuthorityLockFact::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RepoopsAuthorityLockFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(RawRepoopsAuthorityLockFact::deserialize(deserializer)?.into())
+    }
+}
+
+impl From<&RepoopsAuthorityLockFact> for RawRepoopsAuthorityLockFact {
+    fn from(lock: &RepoopsAuthorityLockFact) -> Self {
+        Self {
+            path: lock.path().to_owned(),
+            owner: lock.owner().to_owned(),
+            claim_id: lock.claim_id().clone(),
+            status: lock.status(),
+        }
+    }
+}
+
+impl From<RawRepoopsAuthorityLockFact> for RepoopsAuthorityLockFact {
+    fn from(raw: RawRepoopsAuthorityLockFact) -> Self {
+        Self {
+            fact: RepoopsAuthorityLock::from_parts(raw.path, raw.owner, raw.claim_id, raw.status),
+        }
+    }
 }
 
 /// Path lock ownership status exposed to mutAI repoops authority.
@@ -817,7 +1914,7 @@ pub struct RepoopsAuthoritySnapshot {
     subject: RepoopsAuthoritySnapshotSubject,
     pub policy: RepoopsAuthorityPolicyFact,
     pub scope: RepoopsAuthorityScopeFact,
-    pub locks: Vec<RepoopsAuthorityLockFact>,
+    locks: Vec<RepoopsAuthorityLockFact>,
     pub git_context: Option<RepoopsAuthorityGitContextFact>,
     pub fact_sources: Vec<String>,
 }
@@ -839,12 +1936,29 @@ pub struct RepoopsAuthoritySnapshotCommon {
 enum RepoopsAuthoritySnapshotSubject {
     ClaimBound {
         claim_id: ClaimId,
-        ownership_token: String,
+        ownership_token: SessionToken,
         claim: RepoopsAuthorityClaimFact,
     },
     Constrained {
-        constraint_reason: String,
+        constraint_reason: RepoopsAuthorityConstraintReason,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsAuthorityConstraintReason(String);
+
+impl RepoopsAuthorityConstraintReason {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("constrained repoops authority snapshots require constraint_reason".into());
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -867,11 +1981,16 @@ impl RepoopsAuthoritySnapshot {
     /// Builds a snapshot for one current Covey claim selected by repoops preflight.
     pub fn claim_bound(
         common: RepoopsAuthoritySnapshotCommon,
-        ownership_token: String,
+        ownership_token: SessionToken,
         claim: RepoopsAuthorityClaimFact,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let claim_id = claim.claim_id.clone();
-        Self {
+        validate_repoops_authority_locks(
+            &common.agent_id,
+            Some((&claim_id, &claim.owner)),
+            &common.locks,
+        )?;
+        Ok(Self {
             schema_version: common.schema_version,
             agent_id: common.agent_id,
             subject: RepoopsAuthoritySnapshotSubject::ClaimBound {
@@ -884,12 +2003,17 @@ impl RepoopsAuthoritySnapshot {
             locks: common.locks,
             git_context: common.git_context,
             fact_sources: common.fact_sources,
-        }
+        })
     }
 
     /// Builds a constrained snapshot that carries no live claim authority.
-    pub fn constrained(common: RepoopsAuthoritySnapshotCommon, constraint_reason: String) -> Self {
-        Self {
+    pub fn constrained(
+        common: RepoopsAuthoritySnapshotCommon,
+        constraint_reason: String,
+    ) -> Result<Self, String> {
+        let constraint_reason = RepoopsAuthorityConstraintReason::parse(constraint_reason)?;
+        validate_repoops_authority_locks(&common.agent_id, None, &common.locks)?;
+        Ok(Self {
             schema_version: common.schema_version,
             agent_id: common.agent_id,
             subject: RepoopsAuthoritySnapshotSubject::Constrained { constraint_reason },
@@ -898,7 +2022,7 @@ impl RepoopsAuthoritySnapshot {
             locks: common.locks,
             git_context: common.git_context,
             fact_sources: common.fact_sources,
-        }
+        })
     }
 
     /// Returns the current claim id when this is a claim-bound snapshot.
@@ -916,7 +2040,7 @@ impl RepoopsAuthoritySnapshot {
         match &self.subject {
             RepoopsAuthoritySnapshotSubject::ClaimBound {
                 ownership_token, ..
-            } => Some(ownership_token),
+            } => Some(ownership_token.as_str()),
             RepoopsAuthoritySnapshotSubject::Constrained { .. } => None,
         }
     }
@@ -942,9 +2066,15 @@ impl RepoopsAuthoritySnapshot {
         match &self.subject {
             RepoopsAuthoritySnapshotSubject::ClaimBound { .. } => None,
             RepoopsAuthoritySnapshotSubject::Constrained { constraint_reason } => {
-                Some(constraint_reason)
+                Some(constraint_reason.as_str())
             }
         }
+    }
+
+    /// Returns lock facts bound into this authority snapshot.
+    #[must_use]
+    pub fn locks(&self) -> &[RepoopsAuthorityLockFact] {
+        &self.locks
     }
 }
 
@@ -968,13 +2098,14 @@ impl RepoopsAuthoritySnapshotSubject {
                 }
                 Ok(Self::ClaimBound {
                     claim_id,
-                    ownership_token,
+                    ownership_token: SessionToken::parse(ownership_token)
+                        .map_err(|err| err.to_string())?,
                     claim,
                 })
             }
-            (None, None, None, Some(constraint_reason)) => {
-                Ok(Self::Constrained { constraint_reason })
-            }
+            (None, None, None, Some(constraint_reason)) => Ok(Self::Constrained {
+                constraint_reason: RepoopsAuthorityConstraintReason::parse(constraint_reason)?,
+            }),
             _ => Err(
                 "repoops authority snapshots must be claim-bound or constrained, not mixed".into(),
             ),
@@ -1019,6 +2150,8 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshot {
             raw.constraint_reason,
         )
         .map_err(serde::de::Error::custom)?;
+        validate_repoops_authority_locks(&raw.agent_id, subject.claim_owner_ref(), &raw.locks)
+            .map_err(serde::de::Error::custom)?;
         Ok(Self {
             schema_version: raw.schema_version,
             agent_id: raw.agent_id,
@@ -1030,6 +2163,54 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshot {
             fact_sources: raw.fact_sources,
         })
     }
+}
+
+impl RepoopsAuthoritySnapshotSubject {
+    fn claim_owner_ref(&self) -> Option<(&ClaimId, &str)> {
+        match self {
+            Self::ClaimBound {
+                claim_id, claim, ..
+            } => Some((claim_id, claim.owner.as_str())),
+            Self::Constrained { .. } => None,
+        }
+    }
+}
+
+fn validate_repoops_authority_locks(
+    agent_id: &str,
+    claim_owner: Option<(&ClaimId, &str)>,
+    locks: &[RepoopsAuthorityLockFact],
+) -> Result<(), String> {
+    for lock in locks {
+        match (lock.status(), claim_owner) {
+            (RepoopsAuthorityLockStatus::Owned, Some((claim_id, owner))) => {
+                if lock.claim_id().as_str() != claim_id.as_str() || lock.owner() != owner {
+                    return Err(
+                        "owned repoops lock facts must match snapshot claim and owner".into(),
+                    );
+                }
+            }
+            (RepoopsAuthorityLockStatus::Owned, None) => {
+                return Err("constrained repoops snapshots must not include owned locks".into());
+            }
+            (RepoopsAuthorityLockStatus::ForeignOwner, Some((claim_id, owner))) => {
+                if lock.claim_id().as_str() == claim_id.as_str() || lock.owner() == owner {
+                    return Err(
+                        "foreign repoops lock facts must not match snapshot claim or owner".into(),
+                    );
+                }
+            }
+            (RepoopsAuthorityLockStatus::ForeignOwner, None) => {
+                if lock.owner() == agent_id {
+                    return Err(
+                        "constrained repoops snapshots must not include locks owned by agent"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Result of a stale-session reap pass.

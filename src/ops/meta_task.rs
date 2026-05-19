@@ -172,14 +172,15 @@ impl Covey {
                 .into_iter()
                 .map(crate::model::SubtaskView::try_from)
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(MetaTaskStatus::new(meta_task, subtasks))
+            MetaTaskStatus::new(meta_task, subtasks)
+                .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation(
             "meta_task_status",
             "system",
             started_at,
             &result,
-            |status| vec![format!("meta_task:{}", status.meta_task.meta_task_id)],
+            |status| vec![format!("meta_task:{}", status.meta_task().meta_task_id)],
         );
         result
     }

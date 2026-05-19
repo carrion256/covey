@@ -1006,13 +1006,12 @@ fn import_reports_invalid_source_schema() {
     let covey = Covey::open(&db).expect("open covey");
     let orch = register_orchestrator(&covey, "orch-import-schema");
 
-    let missing = covey.import_bd_v1(ImportBdV1Req {
-        session_token: orch.clone(),
-        beads_db_path: "/nonexistent/beads.db".to_owned(),
-        meta_task_id: None,
-        prompt_text: Some("new meta".to_owned()),
-        idempotency_key: "import-missing-db".to_owned(),
-    });
+    let missing = covey.import_bd_v1(ImportBdV1Req::new_meta_task(
+        orch.clone(),
+        "/nonexistent/beads.db".to_owned(),
+        "new meta".to_owned(),
+        "import-missing-db".to_owned(),
+    ));
     assert!(matches!(
         missing,
         Err(CoveyError::ImportSourceNotFound { path }) if path == "/nonexistent/beads.db"
@@ -1024,13 +1023,12 @@ fn import_reports_invalid_source_schema() {
         conn.execute("CREATE TABLE other (id INTEGER PRIMARY KEY)", [])
             .expect("create other table");
     }
-    let invalid_schema = covey.import_bd_v1(ImportBdV1Req {
-        session_token: orch.clone(),
-        beads_db_path: bad_db.to_string_lossy().to_string(),
-        meta_task_id: None,
-        prompt_text: Some("new meta".to_owned()),
-        idempotency_key: "import-invalid-schema".to_owned(),
-    });
+    let invalid_schema = covey.import_bd_v1(ImportBdV1Req::new_meta_task(
+        orch.clone(),
+        bad_db.to_string_lossy().to_string(),
+        "new meta".to_owned(),
+        "import-invalid-schema".to_owned(),
+    ));
     assert!(matches!(
         invalid_schema,
         Err(CoveyError::InvalidSourceSchema { path: _, detail }) if detail == "missing issues table"
@@ -1448,8 +1446,9 @@ fn import_openspec_updates_unclaimed_task_and_conflicts_on_active_claim_change()
     let _claim = covey
         .claim_subtask(ClaimSubtaskReq {
             session_token: worker,
-            subtask_id: "openspec:openspec-covey-importer:1.1".to_owned(),
-            lease_duration_ms: 30_000,
+            subtask_id: covey::SubtaskId::parse("openspec:openspec-covey-importer:1.1".to_owned())
+                .expect("valid subtask id"),
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: "claim-openspec-imported-task".to_owned(),
         })
         .expect("claim imported subtask");
@@ -1771,13 +1770,12 @@ fn import_human_output_summary() {
     seed_beads_db(&beads_db);
 
     let result = covey
-        .import_bd_v1(ImportBdV1Req {
-            session_token: orch.clone(),
-            beads_db_path: beads_db.to_string_lossy().to_string(),
-            meta_task_id: None,
-            prompt_text: Some("human output summary".to_owned()),
-            idempotency_key: "import-human-summary".to_owned(),
-        })
+        .import_bd_v1(ImportBdV1Req::new_meta_task(
+            orch.clone(),
+            beads_db.to_string_lossy().to_string(),
+            "human output summary".to_owned(),
+            "import-human-summary".to_owned(),
+        ))
         .expect("import should succeed");
 
     let summary = result.human_summary();
@@ -1795,13 +1793,12 @@ fn import_human_output_summary() {
     );
 
     let repeat = covey
-        .import_bd_v1(ImportBdV1Req {
-            session_token: orch,
-            beads_db_path: beads_db.to_string_lossy().to_string(),
-            meta_task_id: Some(result.meta_task_id.clone()),
-            prompt_text: None,
-            idempotency_key: "import-human-repeat".to_owned(),
-        })
+        .import_bd_v1(ImportBdV1Req::existing_meta_task(
+            orch,
+            beads_db.to_string_lossy().to_string(),
+            result.meta_task_id.clone(),
+            "import-human-repeat".to_owned(),
+        ))
         .expect("repeat import should succeed");
 
     let repeat_summary = repeat.human_summary();

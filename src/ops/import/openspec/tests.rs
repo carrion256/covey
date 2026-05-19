@@ -44,15 +44,14 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
         .expect("register orchestrator");
 
     let result = covey
-        .import_openspec(ImportOpenSpecReq {
-            session_token: Some(orchestrator.session_token),
-            change_id: "provenance-query".to_owned(),
-            project_root: tmp.path().to_string_lossy().to_string(),
-            dry_run: false,
-        })
+        .import_openspec(ImportOpenSpecReq::write(
+            orchestrator.session_token,
+            "provenance-query",
+            tmp.path().to_string_lossy().to_string(),
+        ))
         .expect("import openspec");
     let subtask_id = result
-        .items
+        .items()
         .iter()
         .find(|item| item.object_type() == ObjectType::Subtask)
         .map(|item| item.object_id.clone())
@@ -161,7 +160,7 @@ fn openspec_mission_packet_loader_accepts_compiled_better_droid_artifacts() {
         source
             .source_digests
             .iter()
-            .any(|digest| digest.path.ends_with("tasks.md"))
+            .any(|digest| digest.path().ends_with("tasks.md"))
     );
 }
 
@@ -533,13 +532,13 @@ fn openspec_mission_packet_private_loader_returns_sorted_digest_vectors() {
         packet
             .source_digests
             .windows(2)
-            .all(|window| window[0].path <= window[1].path)
+            .all(|window| window[0].path() <= window[1].path())
     );
     assert!(
         packet
             .artifact_digests
             .windows(2)
-            .all(|window| window[0].path <= window[1].path)
+            .all(|window| window[0].path() <= window[1].path())
     );
 }
 

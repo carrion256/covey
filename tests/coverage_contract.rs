@@ -7,13 +7,13 @@ mod support;
 
 use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
-    Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ManualClock,
-    MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
-    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
-    RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SupersedeQueueItemReq,
-    VerifyLandingAuthorizationReq,
+    Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, FenceSeq,
+    LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
+    PublishArtifactReq, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
+    ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -48,6 +48,49 @@ fn id_key(label: &str) -> String {
     format!("{label}-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
+fn claim_ready_queue_req(
+    session_token: impl Into<String>,
+    lease_duration_ms: i64,
+    idempotency_key: impl Into<String>,
+) -> ClaimReadyQueueReq {
+    ClaimReadyQueueReq::try_from_raw_parts(session_token, lease_duration_ms, idempotency_key)
+        .expect("valid ready-queue claim request")
+}
+
+fn mark_in_flight_req(
+    session_token: impl Into<String>,
+    queue_id: impl Into<String>,
+    lease_duration_ms: i64,
+    idempotency_key: impl Into<String>,
+) -> MarkInFlightReq {
+    MarkInFlightReq::try_from_raw_parts(session_token, queue_id, lease_duration_ms, idempotency_key)
+        .expect("valid mark-in-flight request")
+}
+
+fn mark_applied_req(
+    session_token: impl Into<String>,
+    queue_id: impl Into<String>,
+    claim_fence_seq: FenceSeq,
+    idempotency_key: impl Into<String>,
+) -> MarkAppliedReq {
+    MarkAppliedReq::try_from_raw_parts(
+        session_token,
+        queue_id,
+        claim_fence_seq.get(),
+        idempotency_key,
+    )
+    .expect("valid mark-applied request")
+}
+
+fn supersede_queue_item_req(
+    session_token: impl Into<String>,
+    queue_id: impl Into<String>,
+    idempotency_key: impl Into<String>,
+) -> SupersedeQueueItemReq {
+    SupersedeQueueItemReq::try_from_raw_parts(session_token, queue_id, idempotency_key)
+        .expect("valid supersede-queue-item request")
+}
+
 fn register(covey: &Covey, principal: &str, role: SessionRole) -> String {
     covey
         .register_session(RegisterSessionReq {
@@ -62,19 +105,22 @@ fn register(covey: &Covey, principal: &str, role: SessionRole) -> String {
 
 fn attest(covey: &Covey, session_token: &str) {
     covey
-        .record_runtime_attestation(RecordRuntimeAttestationReq {
-            session_token: session_token.to_owned(),
-            provider: "covey-test".into(),
-            model: "test-model".into(),
-            provider_run_id: format!("provider-run-{session_token}"),
-            provider_run_id_issuer: "covey-test-provider".into(),
-            process_id: Some(format!("pid-{session_token}")),
-            container_id: None,
-            command_transcript_digest: format!("blake3:{session_token}-transcript"),
-            started_at: 1_700_000_000_000,
-            ended_at: 1_700_000_000_001,
-            idempotency_key: format!("record-runtime-attestation-{session_token}"),
-        })
+        .record_runtime_attestation(
+            RecordRuntimeAttestationReq::try_from_parts(
+                session_token.to_owned(),
+                "covey-test",
+                "test-model",
+                format!("provider-run-{session_token}"),
+                "covey-test-provider",
+                Some(format!("pid-{session_token}")),
+                None,
+                format!("blake3:{session_token}-transcript"),
+                1_700_000_000_000,
+                1_700_000_000_001,
+                format!("record-runtime-attestation-{session_token}"),
+            )
+            .expect("valid runtime attestation request"),
+        )
         .expect("record runtime attestation");
 }
 
@@ -207,13 +253,16 @@ fn enqueue_ready_item(rig: &Rig, subtask_id: &str, digest: &str) -> (String, Str
     prepare_approved_artifact(rig, &work_id, &orch, digest);
     let queue_id = rig
         .covey
-        .enqueue_for_apply(EnqueueForApplyReq {
-            session_token: orch.clone(),
-            artifact_digest: digest.into(),
-            subtask_id: work_id,
-            settlement_target: SettlementTarget::Canonical,
-            idempotency_key: id_key("enqueue-for-apply"),
-        })
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orch.clone(),
+                digest.to_owned(),
+                work_id,
+                SettlementTarget::Canonical,
+                id_key("enqueue-for-apply"),
+            )
+            .expect("valid enqueue-for-apply request"),
+        )
         .expect("enqueue");
     (orch, queue_id)
 }
@@ -225,22 +274,25 @@ fn record_apply_verification(
     subtask_id: &str,
     digest: &str,
     findings_digest: &str,
-    claim_fence_seq: i64,
+    claim_fence_seq: FenceSeq,
 ) {
     attest(covey, gate);
     covey
-        .record_apply_verification(RecordApplyVerificationReq {
-            session_token: gate.to_owned(),
-            queue_id: queue_id.to_owned(),
-            artifact_digest: digest.to_owned(),
-            review_id: format!("review_{subtask_id}"),
-            findings_digest: findings_digest.to_owned(),
-            claim_fence_seq,
-            verifier: "mutai-rs".to_owned(),
-            verdict_digest: format!("{digest}-verdict"),
-            seal_digest: format!("{digest}-seal"),
-            idempotency_key: id_key("record-apply-verification"),
-        })
+        .record_apply_verification(
+            RecordApplyVerificationReq::try_from_raw_parts(
+                gate.to_owned(),
+                queue_id.to_owned(),
+                digest.to_owned(),
+                format!("review_{subtask_id}"),
+                findings_digest.to_owned(),
+                claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                format!("{digest}-seal"),
+                id_key("record-apply-verification"),
+            )
+            .expect("valid apply verification request"),
+        )
         .expect("record apply verification");
 }
 
@@ -256,50 +308,50 @@ fn ready_queue_alternate_paths_cover_fetch_claim_supersede_and_owner_errors(rig:
 
     let claim = rig
         .covey
-        .claim_next_ready_queue_item(ClaimReadyQueueReq {
-            session_token: gate.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("claim-ready-queue"),
-        })
+        .claim_next_ready_queue_item(claim_ready_queue_req(
+            gate.clone(),
+            30_000,
+            id_key("claim-ready-queue"),
+        ))
         .expect("claim queue")
         .expect("queue claim");
     assert_eq!(claim.queue_id, queue_id);
     assert!(
         rig.covey
-            .claim_next_ready_queue_item(ClaimReadyQueueReq {
-                session_token: gate.clone(),
-                lease_duration_ms: 30_000,
-                idempotency_key: id_key("claim-ready-empty"),
-            })
+            .claim_next_ready_queue_item(claim_ready_queue_req(
+                gate.clone(),
+                30_000,
+                id_key("claim-ready-empty"),
+            ))
             .expect("empty queue claim")
             .is_none()
     );
 
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: other_gate,
-            queue_id: queue_id.clone(),
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied-wrong-owner"),
-        }),
+        rig.covey.mark_applied(mark_applied_req(
+            other_gate,
+            queue_id.clone(),
+            claim.claim_fence_seq,
+            id_key("mark-applied-wrong-owner"),
+        )),
         Err(CoveyError::NotQueueClaimOwner { .. })
     ));
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            claim_fence_seq: claim.claim_fence_seq + 1,
-            idempotency_key: id_key("mark-applied-stale-fence"),
-        }),
+        rig.covey.mark_applied(mark_applied_req(
+            gate.clone(),
+            queue_id.clone(),
+            claim.claim_fence_seq + 1,
+            id_key("mark-applied-stale-fence"),
+        )),
         Err(CoveyError::StaleFenceToken { .. })
     ));
 
     rig.covey
-        .supersede_queue_item(SupersedeQueueItemReq {
-            session_token: gate,
-            queue_id: queue_id.clone(),
-            idempotency_key: id_key("supersede-in-flight"),
-        })
+        .supersede_queue_item(supersede_queue_item_req(
+            gate,
+            queue_id.clone(),
+            id_key("supersede-in-flight"),
+        ))
         .expect("supersede in-flight item");
     assert_eq!(rig.covey.fetch_ready_queue(10).expect("fetch after"), []);
 }
@@ -311,23 +363,23 @@ fn mark_in_flight_and_lease_expiry_paths_are_observable(rig: Rig) {
 
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 1,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            1,
+            id_key("mark-in-flight"),
+        ))
         .expect("mark in flight");
     assert_eq!(claim.claim_fence_seq, 1);
 
     rig.clock.advance(2);
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: gate,
+        rig.covey.mark_applied(mark_applied_req(
+            gate,
             queue_id,
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied-expired"),
-        }),
+            claim.claim_fence_seq,
+            id_key("mark-applied-expired"),
+        )),
         Err(CoveyError::LeaseExpired { .. })
     ));
 }
@@ -338,83 +390,89 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
     prepare_approved_artifact(&rig, &work_id, &orch, "blake3:queue_error_paths");
 
     assert!(matches!(
-        rig.covey.enqueue_for_apply(EnqueueForApplyReq {
-            session_token: orch.clone(),
-            artifact_digest: "blake3:different".into(),
-            subtask_id: work_id.clone(),
-            settlement_target: SettlementTarget::Canonical,
-            idempotency_key: id_key("enqueue-digest-mismatch"),
-        }),
+        rig.covey.enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orch.clone(),
+                "blake3:different".into(),
+                work_id.clone(),
+                SettlementTarget::Canonical,
+                id_key("enqueue-digest-mismatch")
+            )
+            .expect("valid enqueue-for-apply request")
+        ),
         Err(CoveyError::IllegalTransition { .. })
     ));
 
     let queue_id = rig
         .covey
-        .enqueue_for_apply(EnqueueForApplyReq {
-            session_token: orch.clone(),
-            artifact_digest: "blake3:queue_error_paths".into(),
-            subtask_id: work_id,
-            settlement_target: SettlementTarget::Canonical,
-            idempotency_key: id_key("enqueue-for-apply"),
-        })
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orch.clone(),
+                "blake3:queue_error_paths".into(),
+                work_id,
+                SettlementTarget::Canonical,
+                id_key("enqueue-for-apply"),
+            )
+            .expect("valid enqueue-for-apply request"),
+        )
         .expect("enqueue should succeed");
     let metrics = rig.covey.ready_queue_metrics().expect("queue metrics");
-    assert_eq!(metrics.queued_count, 1);
-    assert_eq!(metrics.in_flight_count, 0);
-    assert!(metrics.oldest_queued_age_ms.is_some());
+    assert_eq!(metrics.queued_count(), 1);
+    assert_eq!(metrics.in_flight_count(), 0);
+    assert!(metrics.oldest_queued_age_ms().is_some());
 
     assert!(matches!(
-        rig.covey.claim_next_ready_queue_item(ClaimReadyQueueReq {
-            session_token: orch.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("claim-ready-wrong-role"),
-        }),
+        rig.covey.claim_next_ready_queue_item(claim_ready_queue_req(
+            orch.clone(),
+            30_000,
+            id_key("claim-ready-wrong-role"),
+        )),
         Err(CoveyError::WrongRole { .. })
     ));
 
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: orch.clone(),
-            queue_id: queue_id.clone(),
-            claim_fence_seq: 1,
-            idempotency_key: id_key("mark-applied-queued"),
-        }),
+        rig.covey.mark_applied(mark_applied_req(
+            orch.clone(),
+            queue_id.clone(),
+            FenceSeq::parse(1).expect("valid fence"),
+            id_key("mark-applied-queued"),
+        )),
         Err(CoveyError::WrongRole { .. })
     ));
 
     let gate = register(&rig.covey, "gate-queue-error-paths", SessionRole::ApplyGate);
     attest(&rig.covey, &gate);
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            claim_fence_seq: 1,
-            idempotency_key: id_key("mark-applied-not-in-flight"),
-        }),
+        rig.covey.mark_applied(mark_applied_req(
+            gate.clone(),
+            queue_id.clone(),
+            FenceSeq::parse(1).expect("valid fence"),
+            id_key("mark-applied-not-in-flight"),
+        )),
         Err(CoveyError::IllegalTransition { .. })
     ));
 
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("mark in flight should claim queue item");
     let metrics = rig.covey.ready_queue_metrics().expect("queue metrics");
-    assert_eq!(metrics.queued_count, 0);
-    assert_eq!(metrics.in_flight_count, 1);
-    assert!(metrics.oldest_in_flight_age_ms.is_some());
+    assert_eq!(metrics.queued_count(), 0);
+    assert_eq!(metrics.in_flight_count(), 1);
+    assert!(metrics.oldest_in_flight_age_ms().is_some());
 
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied-missing-verification"),
-        }),
+        rig.covey.mark_applied(mark_applied_req(
+            gate.clone(),
+            queue_id.clone(),
+            claim.claim_fence_seq,
+            id_key("mark-applied-missing-verification"),
+        )),
         Err(CoveyError::ApplyGateEvidenceMissing { .. })
     ));
     record_apply_verification(
@@ -428,20 +486,20 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
     );
 
     rig.covey
-        .mark_applied(MarkAppliedReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied-success"),
-        })
+        .mark_applied(mark_applied_req(
+            gate.clone(),
+            queue_id.clone(),
+            claim.claim_fence_seq,
+            id_key("mark-applied-success"),
+        ))
         .expect("mark applied should settle queue item");
 
     assert!(matches!(
-        rig.covey.supersede_queue_item(SupersedeQueueItemReq {
-            session_token: gate,
+        rig.covey.supersede_queue_item(supersede_queue_item_req(
+            gate,
             queue_id,
-            idempotency_key: id_key("supersede-applied"),
-        }),
+            id_key("supersede-applied"),
+        )),
         Err(CoveyError::IllegalTransition { .. })
     ));
 }
@@ -460,27 +518,30 @@ fn apply_verification_requires_runtime_attestation(rig: Rig) {
     );
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("mark in flight");
 
     assert!(matches!(
-        rig.covey.record_apply_verification(RecordApplyVerificationReq {
-            session_token: gate.clone(),
-            queue_id,
-            artifact_digest: "blake3:queue_requires_runtime_attestation".into(),
-            review_id: "review_queue_requires_runtime_attestation".into(),
-            findings_digest: "blake3:queue_requires_runtime_attestation-findings".into(),
-            claim_fence_seq: claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: "blake3:queue_requires_runtime_attestation-verdict".into(),
-            seal_digest: "blake3:queue_requires_runtime_attestation-seal".into(),
-            idempotency_key: id_key("record-apply-verification"),
-        }),
+        rig.covey.record_apply_verification(
+            RecordApplyVerificationReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id,
+                "blake3:queue_requires_runtime_attestation",
+                "review_queue_requires_runtime_attestation",
+                "blake3:queue_requires_runtime_attestation-findings",
+                claim.claim_fence_seq,
+                "mutai-rs",
+                "blake3:queue_requires_runtime_attestation-verdict",
+                "blake3:queue_requires_runtime_attestation-seal",
+                id_key("record-apply-verification"),
+            )
+            .expect("valid apply verification request"),
+        ),
         Err(CoveyError::RuntimeAttestationMissing { session_token }) if session_token == gate
     ));
 }
@@ -507,27 +568,30 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
     attest(&rig.covey, &gate);
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("mark in flight");
 
     assert!(matches!(
-        rig.covey.record_apply_verification(RecordApplyVerificationReq {
-            session_token: gate,
-            queue_id,
-            artifact_digest: digest.into(),
-            review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}-findings"),
-            claim_fence_seq: claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}-verdict"),
-            seal_digest: format!("{digest}-seal"),
-            idempotency_key: id_key("record-apply-verification"),
-        }),
+        rig.covey.record_apply_verification(
+            RecordApplyVerificationReq::try_from_raw_parts(
+                gate,
+                queue_id,
+                digest,
+                format!("review_{subtask_id}"),
+                format!("{digest}-findings"),
+                claim.claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                format!("{digest}-seal"),
+                id_key("record-apply-verification"),
+            )
+            .expect("valid apply verification request"),
+        ),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "producer and reviewer runtime refs are not separated"
     ));
@@ -541,27 +605,30 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
     force_runtime_ref(&rig, &gate, "pid-gate", "blake3:shared-transcript");
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("mark in flight");
 
     assert!(matches!(
-        rig.covey.record_apply_verification(RecordApplyVerificationReq {
-            session_token: gate,
-            queue_id,
-            artifact_digest: digest.into(),
-            review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}-findings"),
-            claim_fence_seq: claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}-verdict"),
-            seal_digest: format!("{digest}-seal"),
-            idempotency_key: id_key("record-apply-verification"),
-        }),
+        rig.covey.record_apply_verification(
+            RecordApplyVerificationReq::try_from_raw_parts(
+                gate,
+                queue_id,
+                digest,
+                format!("review_{subtask_id}"),
+                format!("{digest}-findings"),
+                claim.claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                format!("{digest}-seal"),
+                id_key("record-apply-verification"),
+            )
+            .expect("valid apply verification request"),
+        ),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "producer and apply_gate transcript digests are not separated"
     ));
@@ -583,27 +650,30 @@ fn apply_verification_rejects_shared_provider_run_identity(rig: Rig) {
     attest(&rig.covey, &gate);
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("mark in flight");
 
     assert!(matches!(
-        rig.covey.record_apply_verification(RecordApplyVerificationReq {
-            session_token: gate,
-            queue_id,
-            artifact_digest: digest.into(),
-            review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}-findings"),
-            claim_fence_seq: claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}-verdict"),
-            seal_digest: format!("{digest}-seal"),
-            idempotency_key: id_key("record-apply-verification"),
-        }),
+        rig.covey.record_apply_verification(
+            RecordApplyVerificationReq::try_from_raw_parts(
+                gate,
+                queue_id,
+                digest,
+                format!("review_{subtask_id}"),
+                format!("{digest}-findings"),
+                claim.claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                format!("{digest}-seal"),
+                id_key("record-apply-verification"),
+            )
+            .expect("valid apply verification request"),
+        ),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "producer and reviewer provider run ids are not separated"
     ));
@@ -622,31 +692,34 @@ fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig
     );
     let queue_id = rig
         .covey
-        .enqueue_for_apply(EnqueueForApplyReq {
-            session_token: orch.clone(),
-            artifact_digest: "blake3:queue_evidence_required".into(),
-            subtask_id: work_id,
-            settlement_target: SettlementTarget::Canonical,
-            idempotency_key: id_key("enqueue-for-apply"),
-        })
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orch.clone(),
+                "blake3:queue_evidence_required".into(),
+                work_id,
+                SettlementTarget::Canonical,
+                id_key("enqueue-for-apply"),
+            )
+            .expect("valid enqueue-for-apply request"),
+        )
         .expect("enqueue without review evidence");
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("claim queue item");
 
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: gate,
+        rig.covey.mark_applied(mark_applied_req(
+            gate,
             queue_id,
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied"),
-        }),
+            claim.claim_fence_seq,
+            id_key("mark-applied"),
+        )),
         Err(CoveyError::ApplyGateEvidenceMissing { .. })
     ));
 
@@ -659,31 +732,34 @@ fn mark_applied_requires_live_review_evidence_and_apply_gate_separation(rig: Rig
     prepare_approved_artifact(&rig, &work_id, &gate, "blake3:queue_apply_gate_separation");
     let queue_id = rig
         .covey
-        .enqueue_for_apply(EnqueueForApplyReq {
-            session_token: orch,
-            artifact_digest: "blake3:queue_apply_gate_separation".into(),
-            subtask_id: work_id,
-            settlement_target: SettlementTarget::Canonical,
-            idempotency_key: id_key("enqueue-for-apply"),
-        })
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orch,
+                "blake3:queue_apply_gate_separation".into(),
+                work_id,
+                SettlementTarget::Canonical,
+                id_key("enqueue-for-apply"),
+            )
+            .expect("valid enqueue-for-apply request"),
+        )
         .expect("enqueue with review evidence");
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("claim queue item");
 
     assert!(matches!(
-        rig.covey.mark_applied(MarkAppliedReq {
-            session_token: gate,
+        rig.covey.mark_applied(mark_applied_req(
+            gate,
             queue_id,
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied"),
-        }),
+            claim.claim_fence_seq,
+            id_key("mark-applied"),
+        )),
         Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
             conflicting_role,
             ..
@@ -703,12 +779,12 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
     );
     let claim = rig
         .covey
-        .mark_in_flight(MarkInFlightReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            lease_duration_ms: 30_000,
-            idempotency_key: id_key("mark-in-flight"),
-        })
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
         .expect("claim queue item");
     record_apply_verification(
         &rig.covey,
@@ -720,43 +796,49 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
         claim.claim_fence_seq,
     );
     rig.covey
-        .mark_applied(MarkAppliedReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            claim_fence_seq: claim.claim_fence_seq,
-            idempotency_key: id_key("mark-applied"),
-        })
+        .mark_applied(mark_applied_req(
+            gate.clone(),
+            queue_id.clone(),
+            claim.claim_fence_seq,
+            id_key("mark-applied"),
+        ))
         .expect("mark applied");
 
     let status = rig
         .covey
-        .verify_landing_authorization(VerifyLandingAuthorizationReq {
-            session_token: gate.clone(),
-            queue_id: queue_id.clone(),
-            artifact_digest: digest.into(),
-            review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}-findings"),
-            claim_fence_seq: claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}-verdict"),
-            seal_digest: format!("{digest}-seal"),
-        })
+        .verify_landing_authorization(
+            VerifyLandingAuthorizationReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id.clone(),
+                digest,
+                format!("review_{subtask_id}"),
+                format!("{digest}-findings"),
+                claim.claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                format!("{digest}-seal"),
+            )
+            .expect("valid landing authorization request"),
+        )
         .expect("verify landing authorization");
     assert!(status.accepted_flag());
     assert_eq!(status.recorded_by_session().as_str(), gate);
 
     assert!(matches!(
-        rig.covey.verify_landing_authorization(VerifyLandingAuthorizationReq {
-            session_token: status.recorded_by_session().to_string(),
-            queue_id,
-            artifact_digest: digest.into(),
-            review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}-findings"),
-            claim_fence_seq: claim.claim_fence_seq,
-            verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}-verdict"),
-            seal_digest: "blake3:wrong-apply-verification-seal".into(),
-        }),
+        rig.covey.verify_landing_authorization(
+            VerifyLandingAuthorizationReq::try_from_raw_parts(
+                status.recorded_by_session().to_string(),
+                queue_id,
+                digest,
+                format!("review_{subtask_id}"),
+                format!("{digest}-findings"),
+                claim.claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                "blake3:wrong-apply-verification-seal",
+            )
+            .expect("valid landing authorization request"),
+        ),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "accepted apply verifier verdict does not match landing authorization"
     ));
@@ -798,36 +880,45 @@ fn reservation_success_error_and_conflict_paths_use_public_contract(rig: Rig) {
     let (orch, work_id) = seed_work(&rig.covey, "reservation_cover");
     let first = rig
         .covey
-        .request_reservation(RequestReservationReq {
-            session_token: orch.clone(),
-            owner_subtask_id: work_id.clone(),
-            scope_class: ScopeClass::Subtree,
-            scope_key: "src/reservation".into(),
-            generated_members: vec![],
-            lease_duration_ms: 60_000,
-            idempotency_key: id_key("request-reservation"),
-        })
+        .request_reservation(
+            RequestReservationReq::try_from_raw_parts(
+                orch.clone(),
+                work_id.clone(),
+                ScopeClass::Subtree,
+                "src/reservation",
+                vec![],
+                60_000,
+                id_key("request-reservation"),
+            )
+            .expect("valid reservation request"),
+        )
         .expect("request first reservation");
     let second = rig
         .covey
-        .request_reservation(RequestReservationReq {
-            session_token: orch.clone(),
-            owner_subtask_id: work_id,
-            scope_class: ScopeClass::ExactPath,
-            scope_key: "src/reservation/mod.rs".into(),
-            generated_members: vec![],
-            lease_duration_ms: 60_000,
-            idempotency_key: id_key("request-reservation"),
-        })
+        .request_reservation(
+            RequestReservationReq::try_from_raw_parts(
+                orch.clone(),
+                work_id,
+                ScopeClass::ExactPath,
+                "src/reservation/mod.rs",
+                vec![],
+                60_000,
+                id_key("request-reservation"),
+            )
+            .expect("valid reservation request"),
+        )
         .expect("request overlapping reservation");
 
     let overlaps = rig
         .covey
-        .find_overlapping_reservations(OverlapQueryReq {
-            scope_class: ScopeClass::GeneratedSet,
-            scope_key: "generated/query".into(),
-            generated_members: vec!["src/reservation/mod.rs".into()],
-        })
+        .find_overlapping_reservations(
+            OverlapQueryReq::try_from_parts(
+                ScopeClass::GeneratedSet,
+                "generated/query",
+                vec!["src/reservation/mod.rs".into()],
+            )
+            .expect("valid overlap query"),
+        )
         .expect("find generated overlap");
     assert!(
         overlaps
@@ -840,7 +931,7 @@ fn reservation_success_error_and_conflict_paths_use_public_contract(rig: Rig) {
     rig.covey
         .resolve_conflict(ResolveConflictReq {
             session_token: orch.clone(),
-            conflict_id: conflicts[0].conflict_id.clone(),
+            conflict_id: conflicts[0].conflict_id().to_owned(),
             resolution_state: ConflictResolutionState::Acknowledged,
             idempotency_key: id_key("resolve-conflict"),
         })
@@ -857,28 +948,37 @@ fn reservation_success_error_and_conflict_paths_use_public_contract(rig: Rig) {
 
     let renewed = rig
         .covey
-        .renew_reservation(RenewReservationReq {
-            session_token: orch.clone(),
-            reservation_id: second.clone(),
-            extend_by_ms: 5_000,
-            idempotency_key: id_key("renew-reservation"),
-        })
+        .renew_reservation(
+            RenewReservationReq::try_from_raw_parts(
+                orch.clone(),
+                second.clone(),
+                5_000,
+                id_key("renew-reservation"),
+            )
+            .expect("valid renew reservation request"),
+        )
         .expect("renew active reservation");
     assert_eq!(renewed.reservation_id, second);
     rig.covey
-        .release_reservation(ReleaseReservationReq {
-            session_token: orch.clone(),
-            reservation_id: second.clone(),
-            idempotency_key: id_key("release-reservation"),
-        })
+        .release_reservation(
+            ReleaseReservationReq::try_from_raw_parts(
+                orch.clone(),
+                second.clone(),
+                id_key("release-reservation"),
+            )
+            .expect("valid release reservation request"),
+        )
         .expect("release reservation");
     assert!(matches!(
-        rig.covey.renew_reservation(RenewReservationReq {
-            session_token: orch,
-            reservation_id: second,
-            extend_by_ms: 5_000,
-            idempotency_key: id_key("renew-released-reservation"),
-        }),
+        rig.covey.renew_reservation(
+            RenewReservationReq::try_from_raw_parts(
+                orch,
+                second,
+                5_000,
+                id_key("renew-released-reservation"),
+            )
+            .expect("valid renew reservation request"),
+        ),
         Err(CoveyError::IllegalTransition { .. })
     ));
 }
@@ -895,7 +995,8 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
         rig.covey
             .claim_next_subtask(ClaimNextReq {
                 session_token: worker.clone(),
-                lease_duration_ms: 10_000,
+                lease_duration_ms: covey::LeaseDurationMs::parse(10_000)
+                    .expect("valid lease duration"),
                 idempotency_key: id_key("claim-empty"),
             })
             .expect("claim on empty queue")
@@ -904,7 +1005,7 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
     assert!(matches!(
         rig.covey.claim_next_subtask(ClaimNextReq {
             session_token: orch.clone(),
-            lease_duration_ms: 10_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-wrong-role"),
         }),
         Err(CoveyError::WrongRole { .. })
@@ -957,7 +1058,7 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
         .covey
         .claim_next_subtask(ClaimNextReq {
             session_token: worker.clone(),
-            lease_duration_ms: 30_000,
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-work-for-review"),
         })
         .expect("claim work")
@@ -977,69 +1078,81 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
             session_token: worker.clone(),
             claim_id: work_claim.claim_id.clone(),
             fence_seq: work_claim.fence_seq,
-            extend_by_ms: 1_000,
+            extend_by_ms: LeaseDurationMs::parse(1_000).expect("valid lease duration"),
             idempotency_key: id_key("renew-work-claim"),
         })
         .expect("renew work claim");
     assert!(renewed.lease_deadline > work_claim.lease_deadline);
 
     rig.covey
-        .publish_artifact(PublishArtifactReq {
-            session_token: worker.clone(),
-            claim_id: work_claim.claim_id.clone(),
-            fence_seq: work_claim.fence_seq,
-            artifact_digest: "blake3:artifact_review_first".into(),
-            artifact_kind: ArtifactKind::PatchBundle,
-            base_rev: "base-1".into(),
-            manifest_path: "artifacts/first.json".into(),
-            changed_paths_digest: "blake3:paths_first".into(),
-            idempotency_key: id_key("publish-first-artifact"),
-        })
+        .publish_artifact(
+            PublishArtifactReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                "blake3:artifact_review_first".into(),
+                ArtifactKind::PatchBundle,
+                "base-1".into(),
+                "artifacts/first.json".into(),
+                "blake3:paths_first".into(),
+                id_key("publish-first-artifact"),
+            )
+            .expect("valid artifact publication request"),
+        )
         .expect("publish first artifact");
     let first_review_id = rig
         .covey
-        .request_review(RequestReviewReq {
-            session_token: worker.clone(),
-            subtask_id: work_id.clone(),
-            artifact_digest: "blake3:artifact_review_first".into(),
-            review_subtask_id: Some("review_cover_first".into()),
-            priority: 5,
-            idempotency_key: id_key("request-first-review"),
-        })
+        .request_review(
+            RequestReviewReq::try_from_raw_parts(
+                worker.clone(),
+                work_id.clone(),
+                "blake3:artifact_review_first",
+                Some("review_cover_first".into()),
+                5,
+                id_key("request-first-review"),
+            )
+            .expect("valid review request"),
+        )
         .expect("request first review");
     assert!(!first_review_id.is_empty());
 
     rig.covey
-        .publish_artifact(PublishArtifactReq {
-            session_token: worker.clone(),
-            claim_id: work_claim.claim_id.clone(),
-            fence_seq: work_claim.fence_seq,
-            artifact_digest: "blake3:artifact_review_second".into(),
-            artifact_kind: ArtifactKind::PatchBundle,
-            base_rev: "base-2".into(),
-            manifest_path: "artifacts/second.json".into(),
-            changed_paths_digest: "blake3:paths_second".into(),
-            idempotency_key: id_key("publish-second-artifact"),
-        })
+        .publish_artifact(
+            PublishArtifactReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                "blake3:artifact_review_second".into(),
+                ArtifactKind::PatchBundle,
+                "base-2".into(),
+                "artifacts/second.json".into(),
+                "blake3:paths_second".into(),
+                id_key("publish-second-artifact"),
+            )
+            .expect("valid artifact publication request"),
+        )
         .expect("publish second artifact and supersede the first review");
     let review_id = rig
         .covey
-        .request_review(RequestReviewReq {
-            session_token: worker.clone(),
-            subtask_id: work_id.clone(),
-            artifact_digest: "blake3:artifact_review_second".into(),
-            review_subtask_id: Some("review_cover_second".into()),
-            priority: 1,
-            idempotency_key: id_key("request-second-review"),
-        })
+        .request_review(
+            RequestReviewReq::try_from_raw_parts(
+                worker.clone(),
+                work_id.clone(),
+                "blake3:artifact_review_second",
+                Some("review_cover_second".into()),
+                1,
+                id_key("request-second-review"),
+            )
+            .expect("valid review request"),
+        )
         .expect("request second review");
 
     let review_claim = rig
         .covey
         .claim_subtask(ClaimSubtaskReq {
             session_token: reviewer.clone(),
-            subtask_id: "review_cover_second".into(),
-            lease_duration_ms: 30_000,
+            subtask_id: covey::SubtaskId::parse("review_cover_second").expect("valid subtask id"),
+            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
             idempotency_key: id_key("claim-review-subtask"),
         })
         .expect("claim review");
@@ -1052,15 +1165,18 @@ fn artifact_review_success_supersede_and_claim_renewal_paths_are_observable(rig:
         })
         .expect("start review");
     rig.covey
-        .decide_review(DecideReviewReq {
-            session_token: reviewer,
-            review_id,
-            claim_id: review_claim.claim_id,
-            fence_seq: review_claim.fence_seq,
-            verdict: ReviewVerdict::Approve,
-            findings_digest: "blake3:review_findings".into(),
-            idempotency_key: id_key("decide-review"),
-        })
+        .decide_review(
+            DecideReviewReq::try_from_raw_parts(
+                reviewer,
+                review_id,
+                review_claim.claim_id,
+                review_claim.fence_seq,
+                ReviewVerdict::Approve,
+                "blake3:review_findings".into(),
+                id_key("decide-review"),
+            )
+            .expect("valid review decision request"),
+        )
         .expect("decide review");
 
     rig.covey
@@ -1084,11 +1200,11 @@ proptest! {
         for _ in 0..reclaim_count {
             let claim = rig
                 .covey
-                .claim_next_ready_queue_item(ClaimReadyQueueReq {
-                    session_token: gate.clone(),
-                    lease_duration_ms: 1,
-                    idempotency_key: id_key("claim-ready-prop"),
-                })
+                .claim_next_ready_queue_item(claim_ready_queue_req(
+                    gate.clone(),
+                    1,
+                    id_key("claim-ready-prop"),
+                ))
                 .expect("claim ready")
                 .expect("claim should exist");
             prop_assert_eq!(claim.queue_id.as_str(), queue_id.as_str());

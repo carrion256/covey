@@ -215,6 +215,32 @@ pub enum ConflictResolutionState {
     Resolved,
 }
 
+/// Conflict payload kinds surfaced for operator/orchestrator follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ConflictKind {
+    ReservationOverlap,
+}
+
+impl PartialEq<&str> for ConflictKind {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(
+            (self, *other),
+            (Self::ReservationOverlap, "reservation_overlap")
+        )
+    }
+}
+
+impl PartialEq<ConflictKind> for &str {
+    fn eq(&self, other: &ConflictKind) -> bool {
+        matches!(
+            (self, other),
+            (&"reservation_overlap", ConflictKind::ReservationOverlap)
+        )
+    }
+}
+
 /// Typed view of state-machine labels used in transition errors.
 #[derive(
     Debug,

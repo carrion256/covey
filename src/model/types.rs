@@ -310,6 +310,7 @@ string_newtype!(QueueId, "queue_id", validate_tokenish);
 string_newtype!(ReviewId, "review_id", validate_tokenish);
 string_newtype!(ReservationId, "reservation_id", validate_tokenish);
 string_newtype!(ArtifactDigest, "artifact_digest", validate_digest);
+string_newtype!(ChangedPathsDigest, "changed_paths_digest", validate_digest);
 string_newtype!(FindingsDigest, "findings_digest", validate_digest);
 string_newtype!(BaseRev, "base_rev", validate_tokenish);
 string_newtype!(ProviderId, "provider", validate_tokenish);

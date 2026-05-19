@@ -196,14 +196,17 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
-                    ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
+                    ensure_positive_lease_duration(
+                        "lease_duration_ms",
+                        req.lease_duration_ms.get(),
+                    )?;
                     requeue_stale_ready_queue_claims(tx, lease_now, now)?;
                     for queue_id in ordered_ready_queue_candidates(tx)? {
                         if let Some(claim) = claim_ready_queue_item(
                             tx,
                             &queue_id,
                             &req.session_token,
-                            crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
+                            req.lease_duration_ms,
                             lease_now,
                             now,
                         )? {
@@ -252,15 +255,18 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
-                    ensure_positive_lease_duration("lease_duration_ms", req.lease_duration_ms)?;
+                    ensure_positive_lease_duration(
+                        "lease_duration_ms",
+                        req.lease_duration_ms.get(),
+                    )?;
                     ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
                     requeue_stale_ready_queue_claims(tx, lease_now, now)?;
-                    let item = load_queue_item_tx(tx, &req.queue_id)?;
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
                     let claim = claim_ready_queue_item(
                         tx,
-                        &req.queue_id,
+                        req.queue_id.as_str(),
                         &req.session_token,
-                        crate::model::LeaseDurationMs::parse(req.lease_duration_ms)?,
+                        req.lease_duration_ms,
                         lease_now,
                         now,
                     )?
@@ -318,7 +324,7 @@ impl Covey {
                     let queue_id = QueueId::parse(item.queue_id())?;
                     if item.state() != ReadyQueueState::InFlight
                         || item.artifact_digest() != req.artifact_digest
-                        || item.claim_fence_seq() != Some(req.claim_fence_seq)
+                        || item.claim_fence_seq() != Some(req.claim_fence_seq.get())
                     {
                         return Err(CoveyError::ApplyGateEvidenceMissing {
                             queue_id,
@@ -397,7 +403,7 @@ impl Covey {
                 || {
                     let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
                     ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
-                    let item = load_queue_item_tx(tx, &req.queue_id)?;
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
                     ensure_ready_queue_transition(item.state(), ReadyQueueState::Applied)?;
                     let queue_owner = item
                         .claimed_by_session_token()
@@ -422,10 +428,10 @@ impl Covey {
                             object: ObjectType::ReadyQueue,
                         },
                     )?;
-                    if expected_fence != req.claim_fence_seq {
+                    if expected_fence != req.claim_fence_seq.get() {
                         return Err(CoveyError::StaleFenceToken {
                             expected: expected_fence,
-                            provided: req.claim_fence_seq,
+                            provided: req.claim_fence_seq.get(),
                         });
                     }
                     let claim_deadline = item.claim_lease_deadline().ok_or(
@@ -437,7 +443,7 @@ impl Covey {
                     )?;
                     if claim_deadline <= lease_now {
                         return Err(CoveyError::LeaseExpired {
-                            object_id: req.queue_id.clone(),
+                            object_id: req.queue_id.to_string(),
                         });
                     }
                     let subtask = load_subtask_tx(tx, item.subtask_id())?;
@@ -463,11 +469,11 @@ impl Covey {
                     let queue_updated = tx.execute(
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4 AND claimed_by_session_token = ?5 AND claim_fence_seq = ?6",
                         params![
-                            req.queue_id,
+                            req.queue_id.as_str(),
                             ReadyQueueState::Applied.to_string(),
                             now,
                             ReadyQueueState::InFlight.to_string(),
-                            req.session_token,
+                            req.session_token.as_str(),
                             req.claim_fence_seq
                         ],
                     )?;
@@ -537,12 +543,12 @@ impl Covey {
                         &[SessionRole::ApplyGate, SessionRole::Orchestrator],
                     )?;
                     ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
-                    let item = load_queue_item_tx(tx, &req.queue_id)?;
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
                     ensure_ready_queue_transition(item.state(), ReadyQueueState::Superseded)?;
                     let updated = tx.execute(
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state IN (?4, ?5)",
                         params![
-                            req.queue_id,
+                            req.queue_id.as_str(),
                             ReadyQueueState::Superseded.to_string(),
                             now,
                             ReadyQueueState::Queued.to_string(),
@@ -594,12 +600,13 @@ impl Covey {
                 params![ReadyQueueState::InFlight.to_string()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            Ok(ReadyQueueMetrics::new(
+            ReadyQueueMetrics::new(
                 queued_count.max(0) as usize,
                 in_flight_count.max(0) as usize,
                 oldest_queued.map(|created_at| (now - created_at).max(0)),
                 oldest_in_flight.map(|created_at| (now - created_at).max(0)),
-            ))
+            )
+            .map_err(|reason| CoveyError::InvalidReadyQueueMetrics { reason })
         });
         self.log_operation(
             "ready_queue_metrics",
@@ -647,7 +654,7 @@ impl Covey {
                         .to_owned(),
                 });
             }
-            if item.claim_fence_seq() != Some(req.claim_fence_seq) {
+            if item.claim_fence_seq() != Some(req.claim_fence_seq.get()) {
                 return Err(CoveyError::ApplyGateEvidenceMissing {
                     queue_id,
                     reason: "landing authorization claim fence does not match queue item"
@@ -690,14 +697,14 @@ impl Covey {
                 })?;
 
             Ok(LandingAuthorizationStatus::accepted(
-                parse_landing_value(&queue_id, req.queue_id.clone())?,
-                parse_landing_value(&queue_id, req.artifact_digest.clone())?,
-                parse_landing_value(&queue_id, req.review_id.clone())?,
-                parse_landing_value(&queue_id, req.findings_digest.clone())?,
-                parse_landing_value(&queue_id, req.claim_fence_seq)?,
+                req.queue_id,
+                req.artifact_digest,
+                req.review_id,
+                req.findings_digest,
+                req.claim_fence_seq,
                 req.verifier,
-                parse_landing_value(&queue_id, req.verdict_digest.clone())?,
-                parse_landing_value(&queue_id, req.seal_digest.clone())?,
+                req.verdict_digest,
+                req.seal_digest,
                 recorded_by_session,
             ))
         });

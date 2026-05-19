@@ -40,17 +40,16 @@ fn better_droid_compiled_change_imports_through_covey() {
         })
         .expect("register orchestrator");
     let imported = covey
-        .import_openspec(ImportOpenSpecReq {
-            session_token: Some(orchestrator.session_token),
-            change_id: "covey-bd-lint-compile".to_owned(),
-            project_root: tmp.path().to_string_lossy().to_string(),
-            dry_run: false,
-        })
+        .import_openspec(ImportOpenSpecReq::write(
+            orchestrator.session_token,
+            "covey-bd-lint-compile",
+            tmp.path().to_string_lossy().to_string(),
+        ))
         .expect("import compiled openspec change");
 
-    assert!(imported.conflicts.is_empty());
-    assert_eq!(imported.created, 2);
-    assert!(imported.items.iter().any(|item| {
+    assert!(imported.conflicts().is_empty());
+    assert_eq!(imported.created(), 2);
+    assert!(imported.items().iter().any(|item| {
         item.object_type() == ObjectType::Subtask
             && item.openspec_task_id() == Some("1.1")
             && item.title() == "Import compiled packet"

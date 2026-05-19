@@ -93,20 +93,20 @@ impl Covey {
         ids::validate_openspec_change_id(&req.change_id)?;
         let source = source::load_openspec_source_snapshot(&req.project_root, &req.change_id)?;
 
-        let result = if req.dry_run {
+        let result = if req.is_dry_run() {
             self.with_read_tx(|tx| {
                 diff::build_openspec_import_diff_tx(tx, &source, true).map(|d| d.result)
             })
         } else {
-            let session_token = req.session_token.as_deref().ok_or_else(|| {
-                CoveyError::InvalidImportDestination {
-                    reason: "write mode requires --session-token".to_owned(),
-                }
-            })?;
+            let session_token =
+                req.write_session_token()
+                    .ok_or_else(|| CoveyError::InvalidImportDestination {
+                        reason: "write mode requires --session-token".to_owned(),
+                    })?;
             self.with_write_tx(|tx, now| {
                 require_role(tx, session_token, &[SessionRole::Orchestrator])?;
                 let diff = diff::build_openspec_import_diff_tx(tx, &source, false)?;
-                if diff.result.conflicts.is_empty() {
+                if diff.result.conflicts().is_empty() {
                     apply::apply_openspec_import_diff_tx(tx, session_token, &diff.records, now)?;
                 }
                 Ok(diff.result)
@@ -115,14 +115,14 @@ impl Covey {
 
         self.log_operation(
             "import_openspec",
-            req.session_token.as_deref().unwrap_or("dry-run"),
+            req.session_token().unwrap_or("dry-run"),
             started_at,
             &result,
             |result| {
                 let mut affected = vec![format!("meta_task:{}", result.meta_task_id)];
                 affected.extend(
                     result
-                        .items
+                        .items()
                         .iter()
                         .filter(|item| item.object_type() == ObjectType::Subtask)
                         .map(|item| format!("subtask:{}", item.object_id)),

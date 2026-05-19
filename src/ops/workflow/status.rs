@@ -4,7 +4,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{
     Covey,
-    error::Result,
+    error::{CoveyError, Result},
     model::{
         Claim, ClaimState, ExpiringClaim, StuckSubtask, SubtaskRow, SubtaskState, SubtaskStatus,
         SubtaskView,
@@ -34,16 +34,17 @@ impl Covey {
                 .transpose()?;
             let reviews = load_reviews_for_subtask_tx(tx, subtask_id)?;
             let ready_queue = load_queue_items_for_subtask_tx(tx, subtask_id)?;
-            Ok(SubtaskStatus::new(
+            SubtaskStatus::new(
                 SubtaskView::try_from(subtask)?,
                 claim,
                 artifact,
                 reviews,
                 ready_queue,
-            ))
+            )
+            .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation("subtask_status", "system", started_at, &result, |status| {
-            vec![format!("subtask:{}", status.subtask.subtask_id)]
+            vec![format!("subtask:{}", status.subtask().subtask_id)]
         });
         result
     }
@@ -94,12 +95,13 @@ impl Covey {
                         .map(|held| load_session_conn(conn, &held.owner_session_token))
                         .transpose()?;
                     let idle_for_ms = (now - subtask.updated_at.get()).max(0);
-                    Ok(StuckSubtask::new(
+                    StuckSubtask::new(
                         SubtaskView::try_from(subtask)?,
                         claim,
                         session,
                         idle_for_ms,
-                    ))
+                    )
+                    .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
                 })
                 .collect()
         });
@@ -111,7 +113,7 @@ impl Covey {
             |stuck: &Vec<StuckSubtask>| {
                 stuck
                     .iter()
-                    .map(|row| format!("subtask:{}", row.subtask.subtask_id))
+                    .map(|row| format!("subtask:{}", row.subtask().subtask_id))
                     .collect()
             },
         );
@@ -152,12 +154,13 @@ impl Covey {
                 .map(|claim| {
                     let subtask = SubtaskView::try_from(load_subtask_conn(conn, &claim.subtask_id)?)?;
                     let session = load_session_conn(conn, &claim.owner_session_token)?;
-                    Ok(ExpiringClaim::new(
+                    ExpiringClaim::new(
                         claim.clone(),
                         subtask,
                         session,
                         (claim.lease_deadline.get() - lease_now).max(0),
-                    ))
+                    )
+                    .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
                 })
                 .collect()
         });
@@ -169,7 +172,7 @@ impl Covey {
             |claims: &Vec<ExpiringClaim>| {
                 claims
                     .iter()
-                    .map(|row| format!("claim:{}", row.claim.claim_id))
+                    .map(|row| format!("claim:{}", row.claim().claim_id))
                     .collect()
             },
         );

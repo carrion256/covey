@@ -351,7 +351,7 @@ struct SessionRow {
     state: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 struct RuntimeAttestationRow {
     session_token: String,
     agent_principal_id: String,
@@ -359,14 +359,198 @@ struct RuntimeAttestationRow {
     role: String,
     provider: String,
     model: String,
-    process_id: Option<String>,
-    container_id: Option<String>,
+    runtime_identity: RuntimeProofIdentity,
     command_transcript_digest: String,
     started_at: i64,
     ended_at: i64,
     recorded_at: i64,
-    provider_run_id: Option<String>,
-    provider_run_id_issuer: Option<String>,
+    provider_run_identity: Option<ProviderRunProofIdentity>,
+}
+
+#[derive(Debug, Clone)]
+enum RuntimeProofIdentity {
+    Process {
+        process_id: String,
+    },
+    Container {
+        container_id: String,
+    },
+    ProcessAndContainer {
+        process_id: String,
+        container_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ProviderRunProofIdentity {
+    provider_run_id: String,
+    provider_run_id_issuer: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RawRuntimeAttestationRow<'a> {
+    session_token: &'a str,
+    agent_principal_id: &'a str,
+    agent_instance_id: &'a str,
+    role: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    process_id: Option<&'a str>,
+    container_id: Option<&'a str>,
+    command_transcript_digest: &'a str,
+    started_at: i64,
+    ended_at: i64,
+    recorded_at: i64,
+    provider_run_id: Option<&'a str>,
+    provider_run_id_issuer: Option<&'a str>,
+}
+
+impl RuntimeAttestationRow {
+    #[allow(clippy::too_many_arguments)]
+    fn from_db_parts(
+        session_token: String,
+        agent_principal_id: String,
+        agent_instance_id: String,
+        role: String,
+        provider: String,
+        model: String,
+        process_id: Option<String>,
+        container_id: Option<String>,
+        command_transcript_digest: String,
+        started_at: i64,
+        ended_at: i64,
+        recorded_at: i64,
+        provider_run_id: Option<String>,
+        provider_run_id_issuer: Option<String>,
+    ) -> Result<Self, ApplyProofError> {
+        let runtime_identity = RuntimeProofIdentity::from_parts(process_id, container_id)?;
+        let provider_run_identity =
+            ProviderRunProofIdentity::optional_from_parts(provider_run_id, provider_run_id_issuer)?;
+        if ended_at < started_at {
+            return Err(ApplyProofError::Verification(
+                "runtime attestation ended_at must be greater than or equal to started_at".into(),
+            ));
+        }
+        Ok(Self {
+            session_token,
+            agent_principal_id,
+            agent_instance_id,
+            role,
+            provider,
+            model,
+            runtime_identity,
+            command_transcript_digest,
+            started_at,
+            ended_at,
+            recorded_at,
+            provider_run_identity,
+        })
+    }
+
+    fn process_id(&self) -> Option<&str> {
+        self.runtime_identity.process_id()
+    }
+
+    fn container_id(&self) -> Option<&str> {
+        self.runtime_identity.container_id()
+    }
+
+    fn provider_run_id(&self) -> Option<&str> {
+        self.provider_run_identity
+            .as_ref()
+            .map(|identity| identity.provider_run_id.as_str())
+    }
+
+    fn provider_run_id_issuer(&self) -> Option<&str> {
+        self.provider_run_identity
+            .as_ref()
+            .map(|identity| identity.provider_run_id_issuer.as_str())
+    }
+}
+
+impl RuntimeProofIdentity {
+    fn from_parts(
+        process_id: Option<String>,
+        container_id: Option<String>,
+    ) -> Result<Self, ApplyProofError> {
+        let process_id = normalize_optional_runtime_field(process_id, "process_id")?;
+        let container_id = normalize_optional_runtime_field(container_id, "container_id")?;
+        match (process_id, container_id) {
+            (Some(process_id), Some(container_id)) => Ok(Self::ProcessAndContainer {
+                process_id,
+                container_id,
+            }),
+            (Some(process_id), None) => Ok(Self::Process { process_id }),
+            (None, Some(container_id)) => Ok(Self::Container { container_id }),
+            (None, None) => Err(ApplyProofError::Verification(
+                "runtime attestation requires process_id or container_id".into(),
+            )),
+        }
+    }
+
+    fn process_id(&self) -> Option<&str> {
+        match self {
+            Self::Process { process_id } | Self::ProcessAndContainer { process_id, .. } => {
+                Some(process_id)
+            }
+            Self::Container { .. } => None,
+        }
+    }
+
+    fn container_id(&self) -> Option<&str> {
+        match self {
+            Self::Container { container_id } | Self::ProcessAndContainer { container_id, .. } => {
+                Some(container_id)
+            }
+            Self::Process { .. } => None,
+        }
+    }
+}
+
+impl ProviderRunProofIdentity {
+    fn optional_from_parts(
+        provider_run_id: Option<String>,
+        provider_run_id_issuer: Option<String>,
+    ) -> Result<Option<Self>, ApplyProofError> {
+        let provider_run_id = normalize_optional_runtime_field(provider_run_id, "provider_run_id")?;
+        let provider_run_id_issuer =
+            normalize_optional_runtime_field(provider_run_id_issuer, "provider_run_id_issuer")?;
+        match (provider_run_id, provider_run_id_issuer) {
+            (Some(provider_run_id), Some(provider_run_id_issuer)) => Ok(Some(Self {
+                provider_run_id,
+                provider_run_id_issuer,
+            })),
+            (None, None) => Ok(None),
+            _ => Err(ApplyProofError::Verification(
+                "runtime attestation provider run identity must include both id and issuer".into(),
+            )),
+        }
+    }
+}
+
+impl Serialize for RuntimeAttestationRow {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        RawRuntimeAttestationRow {
+            session_token: &self.session_token,
+            agent_principal_id: &self.agent_principal_id,
+            agent_instance_id: &self.agent_instance_id,
+            role: &self.role,
+            provider: &self.provider,
+            model: &self.model,
+            process_id: self.process_id(),
+            container_id: self.container_id(),
+            command_transcript_digest: &self.command_transcript_digest,
+            started_at: self.started_at,
+            ended_at: self.ended_at,
+            recorded_at: self.recorded_at,
+            provider_run_id: self.provider_run_id(),
+            provider_run_id_issuer: self.provider_run_id_issuer(),
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1589,21 +1773,24 @@ fn load_runtime_attestation(
         "SELECT session_token, agent_principal_id, agent_instance_id, role, provider, model, process_id, container_id, command_transcript_digest, started_at, ended_at, recorded_at, {provider_columns} FROM runtime_attestations WHERE session_token = ?1"
     );
     conn.query_row(&query, params![token], |row| {
-        Ok(RuntimeAttestationRow {
-            session_token: row.get(0)?,
-            agent_principal_id: row.get(1)?,
-            agent_instance_id: row.get(2)?,
-            role: row.get(3)?,
-            provider: row.get(4)?,
-            model: row.get(5)?,
-            process_id: row.get(6)?,
-            container_id: row.get(7)?,
-            command_transcript_digest: row.get(8)?,
-            started_at: row.get(9)?,
-            ended_at: row.get(10)?,
-            recorded_at: row.get(11)?,
-            provider_run_id: row.get(12)?,
-            provider_run_id_issuer: row.get(13)?,
+        RuntimeAttestationRow::from_db_parts(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
+        )
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
         })
     })
     .map_err(Into::into)
@@ -1627,23 +1814,14 @@ fn attestation_matches(session: &SessionRow, attestation: &RuntimeAttestationRow
         && !attestation.provider.is_empty()
         && !attestation.model.is_empty()
         && !attestation.command_transcript_digest.is_empty()
-        && (non_empty(&attestation.process_id) || non_empty(&attestation.container_id))
         && attestation.ended_at >= attestation.started_at
 }
 
 fn runtime_ref(attestation: &RuntimeAttestationRow) -> String {
-    if let Some(container_id) = attestation
-        .container_id
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(container_id) = attestation.container_id() {
         return format!("container:{container_id}");
     }
-    if let Some(process_id) = attestation
-        .process_id
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(process_id) = attestation.process_id() {
         return format!("process:{process_id}");
     }
     String::new()
@@ -1651,8 +1829,7 @@ fn runtime_ref(attestation: &RuntimeAttestationRow) -> String {
 
 fn observed_process_id(attestation: &RuntimeAttestationRow) -> bool {
     attestation
-        .process_id
-        .as_ref()
+        .process_id()
         .and_then(|value| value.parse::<u64>().ok())
         .is_some_and(|value| value > 0)
 }
@@ -1710,12 +1887,12 @@ fn verify_host_signed_runtime_claim(
         insert_object(
             &mut expected,
             "provider_run_id",
-            option_string(attestation.provider_run_id.clone()),
+            option_string(attestation.provider_run_id().map(str::to_owned)),
         );
         insert_object(
             &mut expected,
             "provider_run_id_issuer",
-            option_string(attestation.provider_run_id_issuer.clone()),
+            option_string(attestation.provider_run_id_issuer().map(str::to_owned)),
         );
     }
     if payload != expected {
@@ -1766,10 +1943,13 @@ fn runtime_claim_payload(actor_role: &str, attestation: &RuntimeAttestationRow) 
         ("role", Value::String(attestation.role.clone())),
         ("provider", Value::String(attestation.provider.clone())),
         ("model", Value::String(attestation.model.clone())),
-        ("process_id", option_string(attestation.process_id.clone())),
+        (
+            "process_id",
+            option_string(attestation.process_id().map(str::to_owned)),
+        ),
         (
             "container_id",
-            option_string(attestation.container_id.clone()),
+            option_string(attestation.container_id().map(str::to_owned)),
         ),
         (
             "command_transcript_digest",
@@ -2227,8 +2407,21 @@ fn contains_all<const N: usize>(values: &BTreeSet<String>, required: [&str; N]) 
     required.iter().all(|value| values.contains(*value))
 }
 
-fn non_empty(value: &Option<String>) -> bool {
-    value.as_ref().is_some_and(|value| !value.is_empty())
+fn normalize_optional_runtime_field(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, ApplyProofError> {
+    value
+        .map(|value| {
+            if value.trim().is_empty() {
+                Err(ApplyProofError::Verification(format!(
+                    "runtime attestation {field} must not be empty"
+                )))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
 }
 
 fn blake3_file(path: &Path) -> Result<String, ApplyProofError> {
@@ -2362,6 +2555,30 @@ fn make_temp_dir(prefix: &str) -> Result<PathBuf, ApplyProofError> {
 mod tests {
     use super::*;
 
+    fn runtime_attestation_row(
+        process_id: Option<String>,
+        container_id: Option<String>,
+        provider_run_id: Option<String>,
+        provider_run_id_issuer: Option<String>,
+    ) -> Result<RuntimeAttestationRow, ApplyProofError> {
+        RuntimeAttestationRow::from_db_parts(
+            "session-1".into(),
+            "agent-1".into(),
+            "instance-1".into(),
+            "executor".into(),
+            "provider-1".into(),
+            "model-1".into(),
+            process_id,
+            container_id,
+            "blake3:transcript".into(),
+            10,
+            11,
+            12,
+            provider_run_id,
+            provider_run_id_issuer,
+        )
+    }
+
     #[test]
     fn ready_queue_proof_row_requires_fence_for_applied_state() {
         let err = ReadyQueueRow::from_db_parts(
@@ -2416,5 +2633,51 @@ mod tests {
         assert_eq!(row.state(), "queued");
         assert_eq!(row.applied_claim_fence_seq(), None);
         assert_eq!(value["claim_fence_seq"], Value::Null);
+    }
+
+    #[test]
+    fn runtime_attestation_proof_row_requires_runtime_identity() {
+        let err = runtime_attestation_row(
+            None,
+            None,
+            Some("provider-run-1".into()),
+            Some("provider-issuer-1".into()),
+        )
+        .expect_err("runtime proof rows require a process or container identity");
+
+        assert!(
+            err.to_string()
+                .contains("runtime attestation requires process_id or container_id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_attestation_proof_row_rejects_partial_provider_run_identity() {
+        let err = runtime_attestation_row(
+            Some("1234".into()),
+            None,
+            Some("provider-run-1".into()),
+            None,
+        )
+        .expect_err("provider run proof identity requires both fields");
+
+        assert!(
+            err.to_string().contains(
+                "runtime attestation provider run identity must include both id and issuer"
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_attestation_proof_row_preserves_old_schema_provider_nulls() {
+        let row = runtime_attestation_row(Some("1234".into()), None, None, None)
+            .expect("old runtime rows without provider run columns remain observable");
+        let value = serde_json::to_value(&row).expect("runtime row should serialize");
+
+        assert_eq!(runtime_ref(&row), "process:1234");
+        assert_eq!(value["provider_run_id"], Value::Null);
+        assert_eq!(value["provider_run_id_issuer"], Value::Null);
     }
 }

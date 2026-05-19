@@ -25,9 +25,10 @@ pub use records::{
 pub use requests::*;
 pub use state::*;
 pub use types::{
-    ArtifactDigest, BaseRev, ClaimId, CommandTranscriptDigest, CoveyTypeValidationError, FenceSeq,
-    FindingsDigest, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, ProviderId, QueueId,
-    RepoopsClaimRef, ReservationId, ReviewId, SessionToken, SubtaskId, TimestampMs,
+    ArtifactDigest, BaseRev, ChangedPathsDigest, ClaimId, CommandTranscriptDigest,
+    CoveyTypeValidationError, FenceSeq, FindingsDigest, LeaseDeadlineMs, LeaseDurationMs,
+    MetaTaskId, ModelId, ProviderId, QueueId, RepoopsClaimRef, ReservationId, ReviewId,
+    SessionToken, SubtaskId, TimestampMs,
 };
 pub use views::*;
 
