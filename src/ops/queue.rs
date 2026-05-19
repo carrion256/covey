@@ -8,11 +8,11 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimReadyQueueReq, EnqueueForApplyReq, EventType, LandingAuthorizationStatus,
-        MarkAppliedReq, MarkInFlightReq, ObjectType, ReadyQueueClaim, ReadyQueueItem,
-        ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RuntimeAttestation,
-        Session, SessionRole, SessionToken, SubtaskState, SupersedeQueueItemReq,
-        VerifyLandingAuthorizationReq,
+        ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
+        LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, ObjectType, ReadyQueueClaim,
+        ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, ReviewId,
+        RuntimeAttestation, Session, SessionRole, SessionToken, SubtaskState,
+        SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
     },
     queries::{
         collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
@@ -448,11 +448,13 @@ impl Covey {
                     let apply_gate_session = load_session_tx(tx, &req.session_token)?;
                     let live_evidence =
                         require_live_apply_gate_evidence(tx, &item, &apply_gate_session)?;
+                    let claim_fence_seq =
+                        parse_landing_value(&req.queue_id, req.claim_fence_seq)?;
                     require_recorded_apply_verification(
                         tx,
                         &item,
                         &live_evidence,
-                        req.claim_fence_seq,
+                        claim_fence_seq,
                     )?;
                     let queue_updated = tx.execute(
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4 AND claimed_by_session_token = ?5 AND claim_fence_seq = ?6",
@@ -718,10 +720,10 @@ where
 }
 
 struct LiveApplyGateEvidence {
-    review_id: String,
-    findings_digest: String,
-    producer_session_token: String,
-    reviewer_session_token: String,
+    review_id: ReviewId,
+    findings_digest: FindingsDigest,
+    producer_session_token: SessionToken,
+    reviewer_session_token: SessionToken,
     producer_principal_id: String,
     reviewer_principal_id: String,
 }
@@ -731,7 +733,14 @@ fn require_live_apply_gate_evidence(
     item: &ReadyQueueItem,
     apply_gate_session: &Session,
 ) -> Result<LiveApplyGateEvidence> {
-    let evidence = tx
+    let (
+        review_id,
+        findings_digest,
+        producer_session_token,
+        reviewer_session_token,
+        producer_principal_id,
+        reviewer_principal_id,
+    ) = tx
         .query_row(
             r#"
             SELECT review.review_id,
@@ -764,14 +773,14 @@ fn require_live_apply_gate_evidence(
                 crate::model::ReviewVerdict::Approve.to_string()
             ],
             |row| {
-                Ok(LiveApplyGateEvidence {
-                    review_id: row.get(0)?,
-                    findings_digest: row.get(1)?,
-                    producer_session_token: row.get(2)?,
-                    reviewer_session_token: row.get(3)?,
-                    producer_principal_id: row.get(4)?,
-                    reviewer_principal_id: row.get(5)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
             },
         )
         .optional()?
@@ -779,6 +788,14 @@ fn require_live_apply_gate_evidence(
             queue_id: item.queue_id().to_owned(),
             reason: "approved review with findings digest not found for queued artifact".to_owned(),
         })?;
+    let evidence = LiveApplyGateEvidence {
+        review_id: parse_landing_value(item.queue_id(), review_id)?,
+        findings_digest: parse_landing_value(item.queue_id(), findings_digest)?,
+        producer_session_token: parse_landing_value(item.queue_id(), producer_session_token)?,
+        reviewer_session_token: parse_landing_value(item.queue_id(), reviewer_session_token)?,
+        producer_principal_id,
+        reviewer_principal_id,
+    };
 
     if evidence.producer_principal_id == evidence.reviewer_principal_id {
         return Err(CoveyError::ApplyGateEvidenceMissing {
@@ -875,7 +892,7 @@ fn require_recorded_apply_verification(
     tx: &Transaction<'_>,
     item: &ReadyQueueItem,
     evidence: &LiveApplyGateEvidence,
-    claim_fence_seq: i64,
+    claim_fence_seq: FenceSeq,
 ) -> Result<()> {
     let exists = tx
         .query_row(
@@ -894,7 +911,7 @@ fn require_recorded_apply_verification(
                 item.artifact_digest(),
                 evidence.review_id.as_str(),
                 evidence.findings_digest.as_str(),
-                claim_fence_seq
+                claim_fence_seq.get()
             ],
             |_| Ok(()),
         )
