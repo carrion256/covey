@@ -168,7 +168,10 @@ impl Covey {
         let started_at = Instant::now();
         let result = self.with_read_tx(|tx| {
             let meta_task = load_meta_task_tx(tx, meta_task_id)?;
-            let subtasks = load_subtasks_for_meta_task_tx(tx, meta_task_id)?;
+            let subtasks = load_subtasks_for_meta_task_tx(tx, meta_task_id)?
+                .into_iter()
+                .map(crate::model::SubtaskView::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok(MetaTaskStatus::new(meta_task, subtasks))
         });
         self.log_operation(

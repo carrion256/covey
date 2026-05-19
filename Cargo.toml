@@ -8,11 +8,8 @@ autobins = false
 name = "covey"
 path = "src/bin/covey.rs"
 
-[[bin]]
-name = "better-droid"
-path = "src/bin/better_droid.rs"
-
 [dependencies]
+better-droid = { path = "../better-droid" }
 blake3 = "1.8.2"
 clap = { version = "4.5.50", features = ["derive"] }
 derive-new = "0.7.0"

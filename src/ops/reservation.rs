@@ -157,7 +157,8 @@ impl Covey {
                             lease_deadline: reservation.lease_deadline,
                             state: ReservationState::Released,
                             created_at: reservation.created_at,
-                            updated_at: now,
+                            updated_at: crate::model::TimestampMs::parse(now)
+                                .expect("wall clock timestamps are non-negative"),
                         },
                         now,
                     )?;
@@ -201,11 +202,11 @@ impl Covey {
                     }
                     if reservation.lease_deadline <= lease_now {
                         return Err(CoveyError::LeaseExpired {
-                            object_id: reservation.reservation_id.clone(),
+                            object_id: reservation.reservation_id.to_string(),
                         });
                     }
                     let renewed_deadline =
-                        reservation.lease_deadline.max(lease_now) + req.extend_by_ms;
+                        reservation.lease_deadline.get().max(lease_now) + req.extend_by_ms;
                     let updated = tx.execute(
                         "UPDATE reservations SET lease_deadline = ?2, updated_at = ?3 WHERE reservation_id = ?1 AND state = ?4",
                         params![
@@ -228,10 +229,12 @@ impl Covey {
                         scope_class: reservation.scope_class,
                         scope_key: reservation.scope_key,
                         generated_members: reservation.generated_members,
-                        lease_deadline: renewed_deadline,
+                        lease_deadline: crate::model::LeaseDeadlineMs::parse(renewed_deadline)
+                            .expect("renewed lease deadlines are non-negative"),
                         state: ReservationState::Active,
                         created_at: reservation.created_at,
-                        updated_at: now,
+                        updated_at: crate::model::TimestampMs::parse(now)
+                            .expect("wall clock timestamps are non-negative"),
                     };
                     append_session_event(
                         tx,

@@ -1,12 +1,14 @@
 use super::{
-    AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimResult,
-    ConflictResolutionState, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, Event,
-    EventPayload, EventType, ExitSessionReq, ExpiredCountPayload, HeartbeatReq,
-    ImportOpenSpecAction, ImportOpenSpecEvent, MarkAppliedReq, ObjectType,
-    OpenSpecImportProvenance, OpenSpecSourceDigest, PublishArtifactReq, ReadyQueueClaim,
-    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, Reservation, ReservationState,
-    ResolveConflictReq, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SettlementTarget,
-    StaleSessionsPayload, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SupersedeQueueItemReq,
+    AbandonSubtaskReq, ActorKind, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, ClaimId,
+    ClaimResult, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
+    EnqueueForApplyReq, Event, EventPayload, EventType, ExitSessionReq, ExpiredCountPayload,
+    HeartbeatReq, ImportOpenSpecAction, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq,
+    MetaTaskId, ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, PublishArtifactReq,
+    ReadyQueueClaim, ReadyQueueItem, ReadyQueueState, ReleaseClaimReq, RequestReservationReq,
+    RequestReviewReq, Reservation, ReservationId, ReservationState, ResolveConflictReq, Review,
+    ReviewTarget, ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SessionToken,
+    SettlementTarget, StaleSessionsPayload, StartSubtaskReq, SubmitMetaTaskReq, Subtask, SubtaskId,
+    SubtaskKind, SubtaskRow, SubtaskState, SubtaskView, SupersedeQueueItemReq, TimestampMs,
     bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::CoveyError;
@@ -59,6 +61,276 @@ fn parse_generated_members_rejects_non_array_payloads() {
 }
 
 #[test]
+fn subtask_row_converts_to_domain_and_view_without_leaking_row_shape() {
+    let row = SubtaskRow {
+        subtask_id: SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        meta_task_id: MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+        title: "implement".to_owned(),
+        kind: SubtaskKind::Work,
+        review_target_subtask_id: None,
+        review_target_artifact_digest: None,
+        state: SubtaskState::Claimed,
+        current_claim_id: Some(ClaimId::parse("claim-1").expect("valid claim id")),
+        artifact_digest: None,
+        priority: 10,
+        created_at: TimestampMs::parse(100).expect("valid timestamp"),
+        updated_at: TimestampMs::parse(200).expect("valid timestamp"),
+    };
+
+    let domain = Subtask::try_from(row.clone()).expect("valid work row");
+    assert_eq!(domain.kind(), SubtaskKind::Work);
+    assert!(domain.review_target().is_none());
+    assert_eq!(
+        domain.lifecycle().active_claim_id().map(AsRef::as_ref),
+        Some("claim-1")
+    );
+
+    let view = SubtaskView::try_from(row).expect("valid work row view");
+    assert_eq!(view.kind, SubtaskKind::Work);
+    assert!(view.review_target.is_none());
+    assert_eq!(
+        view.active_claim_id.as_ref().map(AsRef::as_ref),
+        Some("claim-1")
+    );
+}
+
+#[test]
+fn subtask_lifecycle_requires_active_claim_for_claimed_state() {
+    let row = work_subtask_row(SubtaskState::Claimed, None, None);
+
+    let err = Subtask::try_from(row).expect_err("claimed subtask without claim must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("claimed subtask is missing active claim"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn subtask_lifecycle_rejects_stale_fields_on_available_state() {
+    let row = work_subtask_row(
+        SubtaskState::Available,
+        Some(ClaimId::parse("claim-1").expect("valid claim id")),
+        Some(ArtifactDigest::parse("blake3:artifact").expect("valid digest")),
+    );
+
+    let err = Subtask::try_from(row)
+        .expect_err("available subtask with claim or artifact state must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("available subtask cannot carry claim or artifact state"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn subtask_lifecycle_requires_artifact_for_artifact_published_state() {
+    let row = work_subtask_row(
+        SubtaskState::ArtifactPublished,
+        Some(ClaimId::parse("claim-1").expect("valid claim id")),
+        None,
+    );
+
+    let err = Subtask::try_from(row)
+        .expect_err("artifact-published subtask without artifact must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("artifact-published subtask is missing artifact digest"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn subtask_lifecycle_accepts_artifact_published_with_artifact() {
+    let artifact_digest = ArtifactDigest::parse("blake3:artifact").expect("valid digest");
+    let row = work_subtask_row(
+        SubtaskState::ArtifactPublished,
+        Some(ClaimId::parse("claim-1").expect("valid claim id")),
+        Some(artifact_digest.clone()),
+    );
+
+    let domain = Subtask::try_from(row).expect("artifact-published row must be valid");
+
+    assert_eq!(domain.lifecycle().state(), SubtaskState::ArtifactPublished);
+    assert_eq!(domain.lifecycle().artifact_digest(), Some(&artifact_digest));
+}
+
+#[test]
+fn review_subtask_domain_requires_a_target_artifact() {
+    let row = SubtaskRow {
+        subtask_id: SubtaskId::parse("review-1").expect("valid subtask id"),
+        meta_task_id: MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+        title: "review artifact".to_owned(),
+        kind: SubtaskKind::Review,
+        review_target_subtask_id: Some(SubtaskId::parse("subtask-1").expect("valid subtask id")),
+        review_target_artifact_digest: Some(
+            ArtifactDigest::parse("blake3:artifact").expect("valid digest"),
+        ),
+        state: SubtaskState::Available,
+        current_claim_id: None,
+        artifact_digest: None,
+        priority: 10,
+        created_at: TimestampMs::parse(100).expect("valid timestamp"),
+        updated_at: TimestampMs::parse(200).expect("valid timestamp"),
+    };
+
+    let domain = Subtask::try_from(row).expect("valid review row");
+    assert_eq!(
+        domain.review_target(),
+        Some(&ReviewTarget::new(
+            SubtaskId::parse("subtask-1").expect("valid subtask id"),
+            ArtifactDigest::parse("blake3:artifact").expect("valid digest")
+        ))
+    );
+}
+
+fn work_subtask_row(
+    state: SubtaskState,
+    current_claim_id: Option<ClaimId>,
+    artifact_digest: Option<ArtifactDigest>,
+) -> SubtaskRow {
+    SubtaskRow {
+        subtask_id: SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        meta_task_id: MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+        title: "implement".to_owned(),
+        kind: SubtaskKind::Work,
+        review_target_subtask_id: None,
+        review_target_artifact_digest: None,
+        state,
+        current_claim_id,
+        artifact_digest,
+        priority: 10,
+        created_at: TimestampMs::parse(100).expect("valid timestamp"),
+        updated_at: TimestampMs::parse(200).expect("valid timestamp"),
+    }
+}
+
+#[test]
+fn review_domain_rejects_decided_state_without_decision_evidence() {
+    let raw = serde_json::json!({
+        "review_id": "review-1",
+        "subtask_id": "subtask-1",
+        "artifact_digest": "blake3:artifact",
+        "reviewer_session": "session-1",
+        "review_subtask_id": "review-subtask-1",
+        "verdict": null,
+        "findings_digest": null,
+        "state": "decided",
+        "created_at": 100,
+        "updated_at": 200
+    });
+
+    let err = serde_json::from_value::<Review>(raw)
+        .expect_err("decided review without verdict and findings must be rejected");
+
+    assert!(
+        err.to_string().contains("decided reviews require verdict"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn review_domain_rejects_open_state_with_decision_evidence() {
+    let raw = serde_json::json!({
+        "review_id": "review-1",
+        "subtask_id": "subtask-1",
+        "artifact_digest": "blake3:artifact",
+        "reviewer_session": "session-1",
+        "review_subtask_id": "review-subtask-1",
+        "verdict": "approve",
+        "findings_digest": "blake3:findings",
+        "state": "requested",
+        "created_at": 100,
+        "updated_at": 200
+    });
+
+    let err = serde_json::from_value::<Review>(raw)
+        .expect_err("requested review with decision evidence must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("requested reviews cannot carry decision evidence"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn ready_queue_domain_requires_active_claim_fields_for_in_flight_items() {
+    let raw = serde_json::json!({
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "subtask_id": "subtask-1",
+        "settlement_target": "canonical",
+        "state": "in_flight",
+        "claimed_by_session_token": null,
+        "claim_fence_seq": null,
+        "claim_lease_deadline": null,
+        "enqueued_at": 100,
+        "updated_at": 200
+    });
+
+    let err = serde_json::from_value::<ReadyQueueItem>(raw)
+        .expect_err("in-flight queue item without claim fields must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("in-flight ready-queue items require claimed_by_session_token"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn ready_queue_domain_rejects_active_claim_fields_on_queued_items() {
+    let raw = serde_json::json!({
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "subtask_id": "subtask-1",
+        "settlement_target": "canonical",
+        "state": "queued",
+        "claimed_by_session_token": "session-1",
+        "claim_fence_seq": 7,
+        "claim_lease_deadline": 300,
+        "enqueued_at": 100,
+        "updated_at": 200
+    });
+
+    let err = serde_json::from_value::<ReadyQueueItem>(raw)
+        .expect_err("queued item with active claim fields must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("queued ready-queue items cannot carry an active claim"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn ready_queue_domain_preserves_applied_fence_without_active_claim() {
+    let raw = serde_json::json!({
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "subtask_id": "subtask-1",
+        "settlement_target": "canonical",
+        "state": "applied",
+        "claimed_by_session_token": null,
+        "claim_fence_seq": 7,
+        "claim_lease_deadline": null,
+        "enqueued_at": 100,
+        "updated_at": 200
+    });
+
+    let item = serde_json::from_value::<ReadyQueueItem>(raw)
+        .expect("applied queue item keeps the accepted fence");
+
+    assert_eq!(item.state(), ReadyQueueState::Applied);
+    assert_eq!(item.claim_fence_seq(), Some(7));
+    assert_eq!(item.claimed_by_session_token(), None);
+}
+
+#[test]
 fn event_payload_from_json_decodes_typed_payloads() {
     let payload = SessionHandle::new(
         "session-1".to_owned(),
@@ -104,10 +376,10 @@ fn event_typed_decodes_payload_and_preserves_event_metadata() {
         object_type: ObjectType::Session,
         object_id: "session-1".to_owned(),
         actor_kind: ActorKind::Session,
-        session_token: Some("session-1".to_owned()),
+        session_token: Some(SessionToken::parse("session-1").expect("valid session token")),
         payload_json: serde_json::to_string(&payload)
             .expect("heartbeat serialization must succeed"),
-        created_at: 1_234,
+        created_at: TimestampMs::parse(1_234).expect("valid timestamp"),
     };
 
     let typed = event.typed().expect("event payload must decode");
@@ -125,9 +397,9 @@ fn event_typed_propagates_payload_decode_failures() {
         object_type: ObjectType::Session,
         object_id: "session-1".to_owned(),
         actor_kind: ActorKind::Session,
-        session_token: Some("session-1".to_owned()),
+        session_token: Some(SessionToken::parse("session-1").expect("valid session token")),
         payload_json: "{".to_owned(),
-        created_at: 99,
+        created_at: TimestampMs::parse(99).expect("valid timestamp"),
     };
 
     let err = event
@@ -143,15 +415,15 @@ fn payload_json<T: Serialize>(payload: &T) -> String {
 
 fn sample_reservation() -> Reservation {
     Reservation {
-        reservation_id: "reservation-1".to_owned(),
-        owner_subtask_id: "subtask-1".to_owned(),
+        reservation_id: ReservationId::parse("reservation-1").expect("valid reservation id"),
+        owner_subtask_id: SubtaskId::parse("subtask-1").expect("valid subtask id"),
         scope_class: ScopeClass::ExactPath,
         scope_key: "src/lib.rs".to_owned(),
         generated_members: vec![],
-        lease_deadline: 200,
+        lease_deadline: LeaseDeadlineMs::parse(200).expect("valid lease deadline"),
         state: ReservationState::Active,
-        created_at: 10,
-        updated_at: 11,
+        created_at: TimestampMs::parse(10).expect("valid timestamp"),
+        updated_at: TimestampMs::parse(11).expect("valid timestamp"),
     }
 }
 
@@ -183,7 +455,7 @@ fn sample_openspec_event() -> ImportOpenSpecEvent {
             mission_artifact_digests: vec![],
             mission_artifacts: vec![],
             task_digest: Some("blake3:task".to_owned()),
-            updated_at: 123,
+            updated_at: TimestampMs::parse(123).expect("valid timestamp"),
         },
     }
 }
@@ -214,14 +486,11 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         meta_task_id: "meta-1".to_owned(),
         idempotency_key: "idem-cancel".to_owned(),
     };
-    let create = CreateSubtaskReq {
+    let create = CreateSubtaskRequest {
         session_token: "session-1".to_owned(),
         meta_task_id: "meta-1".to_owned(),
         subtask_id: Some("subtask-1".to_owned()),
         title: "implement".to_owned(),
-        kind: SubtaskKind::Work,
-        review_target_subtask_id: None,
-        review_target_artifact_digest: None,
         priority: 10,
         idempotency_key: "idem-create".to_owned(),
     };

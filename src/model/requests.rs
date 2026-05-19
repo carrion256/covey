@@ -1,9 +1,14 @@
+//! Wire request/response DTOs for the public Covey API.
+//!
+//! These structs intentionally keep CLI/API payloads in their JSON-compatible
+//! primitive form. Operations parse the values into validated domain newtypes
+//! before storing them or building durable domain records.
+
 use derive_new::new;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ArtifactKind, ConflictResolutionState, ReviewVerdict, ScopeClass, SessionRole,
-    SettlementTarget, SubtaskKind,
+    ArtifactKind, ConflictResolutionState, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
 };
 
 /// Request to register a session with immutable identity metadata.
@@ -71,16 +76,13 @@ pub struct RecordRuntimeAttestationReq {
     pub idempotency_key: String,
 }
 
-/// Request to create a work or review subtask.
+/// Request to create a work subtask from orchestrator-owned input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateSubtaskReq {
+pub struct CreateSubtaskRequest {
     pub session_token: String,
     pub meta_task_id: String,
     pub subtask_id: Option<String>,
     pub title: String,
-    pub kind: SubtaskKind,
-    pub review_target_subtask_id: Option<String>,
-    pub review_target_artifact_digest: Option<String>,
     pub priority: i64,
     pub idempotency_key: String,
 }

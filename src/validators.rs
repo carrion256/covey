@@ -88,7 +88,7 @@ pub(crate) fn require_runtime_attestation(
         || attestation.role != session.role
     {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: session.session_token.clone(),
+            session_token: session.session_token.to_string(),
             reason: "attestation identity does not match the session identity".to_owned(),
         });
     }
@@ -96,7 +96,7 @@ pub(crate) fn require_runtime_attestation(
         || attestation.provider_run_id_issuer == MISSING_PROVIDER_RUN_ID_ISSUER
     {
         return Err(CoveyError::InvalidRuntimeAttestation {
-            session_token: session.session_token.clone(),
+            session_token: session.session_token.to_string(),
             reason: "provider run identity is required".to_owned(),
         });
     }
@@ -244,12 +244,12 @@ pub(crate) fn require_current_claim(
     if claim.owner_session_token != session_token {
         return Err(CoveyError::NotClaimOwner {
             session_token: session_token.to_owned(),
-            claim_owner: claim.owner_session_token,
+            claim_owner: claim.owner_session_token.to_string(),
         });
     }
     if claim.fence_seq != fence_seq {
         return Err(CoveyError::StaleFenceToken {
-            expected: claim.fence_seq,
+            expected: claim.fence_seq.get(),
             provided: fence_seq,
         });
     }
@@ -490,22 +490,23 @@ mod tests {
         CoveyError,
         model::{
             ClaimState, ObjectType, ReadyQueueState, ReservationState, Session, SessionRole,
-            SessionState, StateValue, SubtaskKind, SubtaskState,
+            SessionState, SessionToken, StateValue, SubtaskKind, SubtaskState, TimestampMs,
         },
     };
 
     fn session(role: SessionRole) -> Session {
         Session {
-            session_token: format!("session-{role}"),
+            session_token: SessionToken::parse(format!("session-{role}"))
+                .expect("valid session token"),
             agent_principal_id: "principal-1".to_owned(),
             agent_instance_id: "instance-1".to_owned(),
             role,
             state: SessionState::Active,
             active_subtask_id: None,
-            last_heartbeat_at: 0,
+            last_heartbeat_at: TimestampMs::parse(0).expect("valid timestamp"),
             last_heartbeat_tick: 0,
-            created_at: 0,
-            updated_at: 0,
+            created_at: TimestampMs::parse(0).expect("valid timestamp"),
+            updated_at: TimestampMs::parse(0).expect("valid timestamp"),
         }
     }
 

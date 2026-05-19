@@ -4,7 +4,7 @@ use rusqlite::{Transaction, params};
 
 use crate::{
     error::{CoveyError, Result},
-    model::{CreateSubtaskReq, ImportOpenSpecAction, ObjectType, SubtaskKind, SubtaskState},
+    model::{CreateSubtaskRequest, ImportOpenSpecAction, ObjectType, SubtaskState},
     ops::workflow::create_subtask_tx,
 };
 
@@ -67,14 +67,11 @@ pub(super) fn apply_openspec_import_diff_tx(
                     })?;
                 create_subtask_tx(
                     tx,
-                    &CreateSubtaskReq {
+                    &CreateSubtaskRequest {
                         session_token: session_token.to_owned(),
                         meta_task_id: meta_task_id.clone(),
                         subtask_id: Some(record.object_id.clone()),
                         title,
-                        kind: SubtaskKind::Work,
-                        review_target_subtask_id: None,
-                        review_target_artifact_digest: None,
                         priority: 100,
                         idempotency_key: format!("import-openspec:{}", record.object_id),
                     },

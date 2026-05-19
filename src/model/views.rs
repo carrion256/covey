@@ -1,21 +1,66 @@
 use derive_new::new;
 use serde::{Deserialize, Serialize};
 
-use super::{Artifact, Claim, MetaTask, ReadyQueueItem, Review, Session, Subtask};
+use super::{
+    Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask, MetaTaskId,
+    QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget, Session,
+    SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskRow, SubtaskState, TimestampMs,
+};
+
+/// Read model for CLI and API responses that expose subtask lifecycle state.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+pub struct SubtaskView {
+    pub subtask_id: SubtaskId,
+    pub meta_task_id: MetaTaskId,
+    pub title: String,
+    pub kind: SubtaskKind,
+    pub review_target: Option<ReviewTarget>,
+    pub state: SubtaskState,
+    pub active_claim_id: Option<ClaimId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub priority: i64,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+impl TryFrom<SubtaskRow> for SubtaskView {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: SubtaskRow) -> Result<Self, Self::Error> {
+        let domain = Subtask::try_from(row.clone())?;
+        let lifecycle = domain.lifecycle();
+
+        Ok(Self::new(
+            row.subtask_id,
+            row.meta_task_id,
+            row.title,
+            domain.kind(),
+            domain.review_target().cloned(),
+            lifecycle.state(),
+            lifecycle.active_claim_id().cloned(),
+            lifecycle.artifact_digest().cloned(),
+            row.priority,
+            row.created_at,
+            row.updated_at,
+        ))
+    }
+}
 
 /// Snapshot view of a session and its currently active subtask, if any.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct SessionStatus {
     pub session: Session,
-    pub active_subtask: Option<Subtask>,
+    pub active_subtask: Option<SubtaskView>,
 }
 
 /// Snapshot view of a subtask and its attached stateful records.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct SubtaskStatus {
-    pub subtask: Subtask,
+    pub subtask: SubtaskView,
     pub claim: Option<Claim>,
     pub artifact: Option<Artifact>,
     pub reviews: Vec<Review>,
@@ -27,14 +72,14 @@ pub struct SubtaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct MetaTaskStatus {
     pub meta_task: MetaTask,
-    pub subtasks: Vec<Subtask>,
+    pub subtasks: Vec<SubtaskView>,
 }
 
 /// Observability row for a subtask that has not moved recently enough to merit attention.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct StuckSubtask {
-    pub subtask: Subtask,
+    pub subtask: SubtaskView,
     pub claim: Option<Claim>,
     pub session: Option<Session>,
     pub idle_for_ms: i64,
@@ -45,7 +90,7 @@ pub struct StuckSubtask {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ExpiringClaim {
     pub claim: Claim,
-    pub subtask: Subtask,
+    pub subtask: SubtaskView,
     pub session: Session,
     pub expires_in_ms: i64,
 }
@@ -62,18 +107,19 @@ pub struct ReadyQueueMetrics {
 
 /// Live authorization check for a git landing side effect.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct LandingAuthorizationStatus {
     pub accepted: bool,
-    pub queue_id: String,
-    pub artifact_digest: String,
-    pub review_id: String,
-    pub findings_digest: String,
-    pub claim_fence_seq: i64,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub review_id: ReviewId,
+    pub findings_digest: FindingsDigest,
+    pub claim_fence_seq: FenceSeq,
     pub verifier: String,
-    pub verdict_digest: String,
-    pub seal_digest: String,
-    pub recorded_by_session: String,
+    pub verdict_digest: ArtifactDigest,
+    pub seal_digest: ArtifactDigest,
+    pub recorded_by_session: SessionToken,
 }
 
 /// Policy facts passed through to mutAI repoops preflight.
@@ -89,7 +135,7 @@ pub struct RepoopsAuthorityPolicyFact {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct RepoopsAuthorityClaimFact {
-    pub claim_id: String,
+    pub claim_id: ClaimId,
     pub status: String,
     pub owner: String,
     pub scope_in: Vec<String>,
@@ -114,7 +160,7 @@ pub struct RepoopsAuthorityScopeFact {
 pub struct RepoopsAuthorityLockFact {
     pub path: String,
     pub owner: String,
-    pub claim_id: String,
+    pub claim_id: RepoopsClaimRef,
     pub status: String,
 }
 
@@ -135,7 +181,7 @@ pub struct RepoopsAuthorityGitContextFact {
 pub struct RepoopsAuthoritySnapshot {
     pub schema_version: String,
     pub agent_id: String,
-    pub claim_id: Option<String>,
+    pub claim_id: Option<ClaimId>,
     pub ownership_token: Option<String>,
     pub override_token: Option<String>,
     pub policy: RepoopsAuthorityPolicyFact,

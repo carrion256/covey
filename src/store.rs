@@ -443,8 +443,8 @@ pub(crate) fn claim_ready_queue_item(
     now: i64,
 ) -> Result<Option<ReadyQueueClaim>> {
     let item = load_queue_item_tx(tx, queue_id)?;
-    ensure_ready_queue_transition(item.state, ReadyQueueState::InFlight)?;
-    let subtask = load_subtask_tx(tx, &item.subtask_id)?;
+    ensure_ready_queue_transition(item.state(), ReadyQueueState::InFlight)?;
+    let subtask = load_subtask_tx(tx, item.subtask_id())?;
     match ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id) {
         Ok(()) => {}
         Err(CoveyError::MetaTaskUnavailable { .. }) => {
@@ -463,7 +463,7 @@ pub(crate) fn claim_ready_queue_item(
     }
 
     if subtask.state != SubtaskState::ReadyForApply
-        || subtask.artifact_digest.as_deref() != Some(item.artifact_digest.as_str())
+        || subtask.artifact_digest.as_deref() != Some(item.artifact_digest())
     {
         tx.execute(
             "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4",
@@ -506,10 +506,10 @@ pub(crate) fn claim_ready_queue_item(
     };
 
     Ok(Some(ReadyQueueClaim::new(
-        item.queue_id,
-        item.artifact_digest,
-        item.subtask_id,
-        item.settlement_target,
+        item.queue_id().to_owned(),
+        item.artifact_digest().to_owned(),
+        item.subtask_id().to_owned(),
+        item.settlement_target(),
         claim_fence_seq,
         lease_deadline,
     )))

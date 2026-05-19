@@ -40,6 +40,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Commands {
     Session {
         #[command(subcommand)]
@@ -133,6 +134,7 @@ pub(crate) enum ProofCommand {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ProofApplyCommand {
     /// Verify and seal one Covey-bound apply proof.
     Verify(ApplyProofVerifyArgs),

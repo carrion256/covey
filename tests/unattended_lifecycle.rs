@@ -6,7 +6,7 @@ use std::sync::{
 mod support;
 
 use covey::{
-    ArtifactKind, ClaimNextReq, Covey, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq,
+    ArtifactKind, ClaimNextReq, Covey, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     HeartbeatReq, ManualClock, MarkAppliedReq, MarkInFlightReq, PublishArtifactReq,
     RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
     RequestReservationReq, RequestReviewReq, ScopeClass, SessionRole, SessionState,
@@ -71,7 +71,7 @@ fn attest(covey: &Covey, session_token: &str) {
             provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
-            command_transcript_digest: format!("blake3:{session_token}:transcript"),
+            command_transcript_digest: format!("blake3:{session_token}-transcript"),
             started_at: 1_700_000_000_000,
             ended_at: 1_700_000_000_001,
             idempotency_key: format!("record-runtime-attestation-{session_token}"),
@@ -94,14 +94,11 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
         })
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orchestrator.clone(),
             meta_task_id,
             subtask_id: Some("codex_disappears_work".into()),
             title: "codex disappears work".into(),
-            kind: covey::SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -187,14 +184,11 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         })
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orchestrator.clone(),
             meta_task_id,
             subtask_id: Some("unattended_work".into()),
             title: "unattended work".into(),
-            kind: covey::SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })

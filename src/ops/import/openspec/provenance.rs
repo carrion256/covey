@@ -2,7 +2,7 @@ use rusqlite::{Transaction, params};
 
 use crate::{
     error::Result,
-    model::{EventType, ImportOpenSpecEvent, ObjectType, OpenSpecImportProvenance},
+    model::{EventType, ImportOpenSpecEvent, ObjectType, OpenSpecImportProvenance, TimestampMs},
     store::append_session_event,
 };
 
@@ -30,7 +30,7 @@ pub(super) fn meta_provenance(
         mission_artifact_digests: source.mission_artifact_digests.clone(),
         mission_artifacts: source.mission_artifacts.clone(),
         task_digest: None,
-        updated_at: now,
+        updated_at: timestamp_ms(now),
     }
 }
 
@@ -55,7 +55,7 @@ pub(super) fn task_provenance(
         mission_artifact_digests: source.mission_artifact_digests.clone(),
         mission_artifacts: source.mission_artifacts.clone(),
         task_digest: Some(task.task_digest.clone()),
-        updated_at: now,
+        updated_at: timestamp_ms(now),
     }
 }
 pub(super) fn provenance_equivalent(
@@ -136,7 +136,7 @@ pub(super) fn append_openspec_import_event_tx(
     now: i64,
 ) -> Result<()> {
     let mut provenance = record.provenance.clone();
-    provenance.updated_at = now;
+    provenance.updated_at = timestamp_ms(now);
     let payload = ImportOpenSpecEvent {
         change_id: provenance.openspec_change_id.clone(),
         object_type: record.object_type,
@@ -154,4 +154,8 @@ pub(super) fn append_openspec_import_event_tx(
         &payload,
         now,
     )
+}
+
+fn timestamp_ms(value: i64) -> TimestampMs {
+    TimestampMs::parse(value).expect("wall clock timestamps are non-negative")
 }

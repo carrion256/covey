@@ -1,8 +1,14 @@
+//! Import boundary DTOs for historical Beads and OpenSpec planning input.
+//!
+//! Raw IDs and tokens here represent external source or CLI payload shape.
+//! Imported records are converted into Covey's validated domain records before
+//! becoming live lifecycle state.
+
 use derive_new::new;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use super::ObjectType;
+use super::{ObjectType, TimestampMs};
 
 /// Request to import eligible bd issues from a beads database into Covey as work subtasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +168,7 @@ pub struct OpenSpecImportProvenance {
     pub mission_artifact_digests: Vec<OpenSpecSourceDigest>,
     pub mission_artifacts: Vec<String>,
     pub task_digest: Option<String>,
-    pub updated_at: i64,
+    pub updated_at: TimestampMs,
 }
 
 /// Digest for one OpenSpec source file.

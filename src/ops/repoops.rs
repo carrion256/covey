@@ -8,7 +8,7 @@ use crate::{
     model::{
         Claim, RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
         RepoopsAuthorityPolicyFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshot,
-        RepoopsAuthoritySnapshotReq, Reservation, ScopeClass, Session,
+        RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation, ScopeClass, Session,
     },
     queries::{load_active_reservations_tx, load_subtask_tx},
     validators::require_current_claim,
@@ -58,7 +58,7 @@ impl Covey {
             Ok(RepoopsAuthoritySnapshot::new(
                 REPOOPS_AUTHORITY_SNAPSHOT_VERSION.to_owned(),
                 session.agent_principal_id,
-                Some(claim.claim_id),
+                Some(claim.claim_id.clone()),
                 Some(caller_ownership_token),
                 None,
                 RepoopsAuthorityPolicyFact::new("enforce".to_owned(), 2, None),
@@ -179,14 +179,14 @@ fn lock_facts_for_paths(
                 locks.push(RepoopsAuthorityLockFact::new(
                     path.clone(),
                     session.agent_principal_id.clone(),
-                    claim.claim_id.clone(),
+                    repoops_claim_ref(claim.claim_id.as_str()),
                     "owned".to_owned(),
                 ));
             } else {
                 locks.push(RepoopsAuthorityLockFact::new(
                     path.clone(),
                     format!("subtask:{}", reservation.owner_subtask_id),
-                    format!("unknown:{}", reservation.owner_subtask_id),
+                    repoops_claim_ref(format!("unknown:{}", reservation.owner_subtask_id)),
                     "foreign_owner".to_owned(),
                 ));
             }
@@ -197,6 +197,10 @@ fn lock_facts_for_paths(
     });
     locks.dedup();
     locks
+}
+
+fn repoops_claim_ref(value: impl Into<String>) -> RepoopsClaimRef {
+    RepoopsClaimRef::parse(value).expect("repoops claim refs are derived from validated ids")
 }
 
 fn reservation_covers_path(reservation: &Reservation, path: &str) -> bool {
@@ -217,7 +221,10 @@ fn reservation_covers_path(reservation: &Reservation, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClaimState, ReservationState, SubtaskState};
+    use crate::model::{
+        ClaimId, ClaimState, FenceSeq, LeaseDeadlineMs, ReservationId, ReservationState,
+        SessionToken, SubtaskId, SubtaskState, TimestampMs,
+    };
 
     fn reservation(
         scope_class: ScopeClass,
@@ -225,15 +232,15 @@ mod tests {
         owner_subtask_id: &str,
     ) -> Reservation {
         Reservation {
-            reservation_id: "reservation-1".to_owned(),
-            owner_subtask_id: owner_subtask_id.to_owned(),
+            reservation_id: ReservationId::parse("reservation-1").expect("valid reservation id"),
+            owner_subtask_id: SubtaskId::parse(owner_subtask_id).expect("valid subtask id"),
             scope_class,
             scope_key: scope_key.to_owned(),
             generated_members: Vec::new(),
-            lease_deadline: 1_000,
+            lease_deadline: LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
             state: ReservationState::Active,
-            created_at: 1,
-            updated_at: 1,
+            created_at: TimestampMs::parse(1).expect("valid timestamp"),
+            updated_at: TimestampMs::parse(1).expect("valid timestamp"),
         }
     }
 
@@ -252,26 +259,26 @@ mod tests {
     #[test]
     fn lock_facts_distinguish_owned_and_foreign_reservations() {
         let claim = Claim {
-            claim_id: "claim-1".to_owned(),
-            subtask_id: "task-1".to_owned(),
-            owner_session_token: "session-1".to_owned(),
-            fence_seq: 7,
-            lease_deadline: 1_000,
+            claim_id: ClaimId::parse("claim-1").expect("valid claim id"),
+            subtask_id: SubtaskId::parse("task-1").expect("valid subtask id"),
+            owner_session_token: SessionToken::parse("session-1").expect("valid session token"),
+            fence_seq: FenceSeq::parse(7).expect("valid fence"),
+            lease_deadline: LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
             state: ClaimState::Held,
-            created_at: 1,
-            updated_at: 1,
+            created_at: TimestampMs::parse(1).expect("valid timestamp"),
+            updated_at: TimestampMs::parse(1).expect("valid timestamp"),
         };
         let session = Session {
-            session_token: "session-1".to_owned(),
+            session_token: SessionToken::parse("session-1").expect("valid session token"),
             agent_principal_id: "worker-1".to_owned(),
             agent_instance_id: "worker-1-instance".to_owned(),
             role: crate::model::SessionRole::Executor,
             state: crate::model::SessionState::Active,
-            active_subtask_id: Some("task-1".to_owned()),
-            last_heartbeat_at: 1,
+            active_subtask_id: Some(SubtaskId::parse("task-1").expect("valid subtask id")),
+            last_heartbeat_at: TimestampMs::parse(1).expect("valid timestamp"),
             last_heartbeat_tick: 1,
-            created_at: 1,
-            updated_at: 1,
+            created_at: TimestampMs::parse(1).expect("valid timestamp"),
+            updated_at: TimestampMs::parse(1).expect("valid timestamp"),
         };
         let reservations = vec![
             reservation(ScopeClass::ExactPath, "src/lib.rs", "task-1"),

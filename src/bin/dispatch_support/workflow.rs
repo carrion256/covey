@@ -3,14 +3,17 @@ use super::*;
 pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey::Result<Rendered> {
     match command {
         SubtaskCommand::Create(args) => {
-            let subtask_id = store.create_subtask(CreateSubtaskReq {
+            if SubtaskKind::from(args.kind) != SubtaskKind::Work
+                || args.review_target_subtask_id.is_some()
+                || args.review_target_artifact_digest.is_some()
+            {
+                return Err(covey::CoveyError::ReviewKindMismatch);
+            }
+            let subtask_id = store.create_subtask(CreateSubtaskRequest {
                 session_token: args.session_token,
                 meta_task_id: args.meta_task_id,
                 subtask_id: args.subtask_id,
                 title: args.title,
-                kind: args.kind.into(),
-                review_target_subtask_id: args.review_target_subtask_id,
-                review_target_artifact_digest: args.review_target_artifact_digest,
                 priority: args.priority,
                 idempotency_key: args
                     .idempotency_key
@@ -420,18 +423,18 @@ mod tests {
                 session_token: executor_c,
                 claim_id: claim_c_id,
                 fence_seq: claim_c_fence,
-                artifact_digest: "artifact-digest-work-review".to_owned(),
+                artifact_digest: "blake3:artifact-digest-work-review".to_owned(),
                 artifact_kind: ArtifactKindArg::PatchBundle,
                 base_rev: "base-rev".to_owned(),
                 manifest_path: "manifest.json".to_owned(),
-                changed_paths_digest: "changed-paths-digest".to_owned(),
+                changed_paths_digest: "blake3:changed-paths-digest".to_owned(),
                 idempotency_key: None,
             }),
         )
         .expect("publish artifact");
         assert_eq!(
             artifact.data["artifact_digest"],
-            "artifact-digest-work-review"
+            "blake3:artifact-digest-work-review"
         );
 
         let review = dispatch_review(
@@ -439,7 +442,7 @@ mod tests {
             ReviewCommand::Request(RequestReviewArgs {
                 session_token: orchestrator,
                 subtask_id: "work-review".to_owned(),
-                artifact_digest: "artifact-digest-work-review".to_owned(),
+                artifact_digest: "blake3:artifact-digest-work-review".to_owned(),
                 priority: 5,
                 review_subtask_id: Some("review-work-review".to_owned()),
                 idempotency_key: None,

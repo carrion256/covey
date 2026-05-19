@@ -9,8 +9,8 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         AbandonSubtaskReq, ClaimNextReq, ClaimResult, ClaimState, ClaimSubtaskReq,
-        CreateSubtaskReq, EventType, ObjectType, ReviewState, Session, SessionRole, SessionState,
-        StartSubtaskReq, SubtaskKind, SubtaskState,
+        CreateSubtaskRequest, EventType, ObjectType, ReviewState, Session, SessionRole,
+        SessionState, StartSubtaskReq, SubtaskKind, SubtaskState,
     },
     queries::load_subtask_tx,
     schema::advance_lease_clock,
@@ -29,7 +29,7 @@ use crate::{
 
 impl Covey {
     /// Creates a new work or review subtask under an existing meta-task.
-    pub fn create_subtask(&self, req: CreateSubtaskReq) -> Result<String> {
+    pub fn create_subtask(&self, req: CreateSubtaskRequest) -> Result<String> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
@@ -70,7 +70,7 @@ impl Covey {
                     if let Some(active_subtask_id) = session.active_subtask_id {
                         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
                             session_token: req.session_token.clone(),
-                            active_subtask_id,
+                            active_subtask_id: active_subtask_id.to_string(),
                         });
                     }
                     let (kind, candidate_states) = match session.role {
@@ -154,7 +154,7 @@ impl Covey {
                     if let Some(active_subtask_id) = session.active_subtask_id {
                         return Err(CoveyError::SessionAlreadyHasActiveSubtask {
                             session_token: req.session_token.clone(),
-                            active_subtask_id,
+                            active_subtask_id: active_subtask_id.to_string(),
                         });
                     }
                     if !subtask_exists(tx, &req.subtask_id)? {
@@ -448,7 +448,7 @@ impl Covey {
                         req.fence_seq,
                         lease_now,
                     )?;
-                    let renewed_deadline = claim.lease_deadline.max(lease_now) + req.extend_by_ms;
+                    let renewed_deadline = claim.lease_deadline.get().max(lease_now) + req.extend_by_ms;
                     let updated = tx.execute(
                         "UPDATE claims SET lease_deadline = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4 AND owner_session_token = ?5 AND fence_seq = ?6",
                         params![
@@ -468,9 +468,9 @@ impl Covey {
                         });
                     }
                     let result = ClaimResult::new(
-                        claim.claim_id,
-                        claim.subtask_id,
-                        claim.fence_seq,
+                        claim.claim_id.to_string(),
+                        claim.subtask_id.to_string(),
+                        claim.fence_seq.get(),
                         renewed_deadline,
                     );
                     append_session_event(
@@ -541,7 +541,7 @@ fn claim_selected_subtask_tx(
     )?;
 
     let subtask_updated = tx.execute(
-        "UPDATE subtasks SET state = ?2, current_claim_id = ?3, updated_at = ?4 WHERE subtask_id = ?1 AND state = ?5 AND current_claim_id IS NULL",
+        "UPDATE subtasks SET state = ?2, current_claim_id = ?3, artifact_digest = NULL, updated_at = ?4 WHERE subtask_id = ?1 AND state = ?5 AND current_claim_id IS NULL",
         params![
             subtask_id,
             SubtaskState::Claimed.to_string(),
@@ -573,6 +573,7 @@ fn claim_selected_subtask_tx(
             session_token: session_token.to_owned(),
             active_subtask_id: crate::validators::require_session(tx, session_token)?
                 .active_subtask_id
+                .map(|active_subtask_id| active_subtask_id.to_string())
                 .unwrap_or_else(|| subtask_id.to_owned()),
         });
     }
@@ -592,7 +593,7 @@ fn claim_selected_subtask_tx(
 
 pub(crate) fn create_subtask_tx(
     tx: &rusqlite::Transaction<'_>,
-    req: &CreateSubtaskReq,
+    req: &CreateSubtaskRequest,
     now: i64,
 ) -> Result<String> {
     crate::validators::require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
@@ -600,13 +601,6 @@ pub(crate) fn create_subtask_tx(
     ensure_length("meta_task_id", &req.meta_task_id, MAX_OBJECT_ID_LEN)?;
     ensure_meta_task_exists(tx, &req.meta_task_id)?;
     ensure_meta_task_is_schedulable(tx, &req.meta_task_id)?;
-
-    if req.kind == SubtaskKind::Review
-        || req.review_target_subtask_id.is_some()
-        || req.review_target_artifact_digest.is_some()
-    {
-        return Err(CoveyError::ReviewKindMismatch);
-    }
 
     let subtask_id = req
         .subtask_id
@@ -629,9 +623,9 @@ pub(crate) fn create_subtask_tx(
             subtask_id,
             req.meta_task_id,
             req.title,
-            req.kind.to_string(),
-            req.review_target_subtask_id,
-            req.review_target_artifact_digest,
+            SubtaskKind::Work.to_string(),
+            Option::<String>::None,
+            Option::<String>::None,
             SubtaskState::Available.to_string(),
             req.priority,
             now,

@@ -14,7 +14,7 @@ mod support;
 
 use covey::{
     AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimNextReq,
-    ClaimReadyQueueReq, ClaimResult, ClaimSubtaskReq, Covey, CoveyError, CreateSubtaskReq,
+    ClaimReadyQueueReq, ClaimResult, ClaimSubtaskReq, Covey, CoveyError, CreateSubtaskRequest,
     DecideReviewReq, EnqueueForApplyReq, EventPayload, EventType, ExitSessionReq, HeartbeatReq,
     ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason, ManualClock,
     MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType, OverlapQueryReq,
@@ -89,7 +89,7 @@ fn attest(covey: &Covey, session_token: &str) {
             provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
-            command_transcript_digest: format!("blake3:{session_token}:transcript"),
+            command_transcript_digest: format!("blake3:{session_token}-transcript"),
             started_at: 1_700_000_000_000,
             ended_at: 1_700_000_000_001,
             idempotency_key: format!("record-runtime-attestation-{session_token}"),
@@ -109,14 +109,11 @@ fn seed_work_subtask(rig: &Rig) -> (String, String) {
         .expect("submit meta task");
     rig.tick(1);
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch,
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("work_1".into()),
             title: "implement covey".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -236,8 +233,8 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
         .expect("work status")
         .reviews
         .into_iter()
-        .find(|review| review.review_id == review_id)
-        .and_then(|review| review.review_subtask_id)
+        .find(|review| review.review_id() == review_id)
+        .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask id");
     let review_claim = covey
         .claim_next_subtask(ClaimNextReq {
@@ -722,9 +719,9 @@ fn import_repeat_is_deterministic() {
     assert_eq!(imported.subtask_id, first_subtask_id);
     assert_eq!(imported.kind, SubtaskKind::Work);
     assert_eq!(imported.state, SubtaskState::Available);
-    assert!(imported.current_claim_id.is_none());
-    assert!(imported.review_target_subtask_id.is_none());
-    assert!(imported.review_target_artifact_digest.is_none());
+    assert!(imported.active_claim_id.is_none());
+    assert!(imported.review_target.is_none());
+    assert!(imported.review_target.is_none());
 
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
@@ -824,7 +821,7 @@ fn import_bd_reimport_allowed_non_task_types_is_deterministic() {
     assert!(imported.subtask_id.starts_with("bdwork_bd_feature_1_"));
     assert_eq!(imported.kind, SubtaskKind::Work);
     assert_eq!(imported.state, SubtaskState::Available);
-    assert!(imported.current_claim_id.is_none());
+    assert!(imported.active_claim_id.is_none());
 
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
@@ -1087,9 +1084,9 @@ fn import_bd_creates_available_work_subtasks() {
     for subtask in &meta_status.subtasks {
         assert_eq!(subtask.kind, SubtaskKind::Work);
         assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.current_claim_id.is_none());
-        assert!(subtask.review_target_subtask_id.is_none());
-        assert!(subtask.review_target_artifact_digest.is_none());
+        assert!(subtask.active_claim_id.is_none());
+        assert!(subtask.review_target.is_none());
+        assert!(subtask.review_target.is_none());
     }
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1129,14 +1126,11 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
         })
         .expect("submit meta task");
     let manual_subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("manual_existing_work".into()),
             title: "manual existing work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -1181,7 +1175,7 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
     for subtask in imported_subtasks {
         assert_eq!(subtask.kind, SubtaskKind::Work);
         assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.current_claim_id.is_none());
+        assert!(subtask.active_claim_id.is_none());
     }
 
     let session_status = covey.session_status(&orch).expect("session status");
@@ -1450,7 +1444,7 @@ fn import_bd_allowed_type_labels_and_casefolding_behave_correctly() {
     for subtask in &meta_status.subtasks {
         assert_eq!(subtask.kind, SubtaskKind::Work);
         assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.current_claim_id.is_none());
+        assert!(subtask.active_claim_id.is_none());
     }
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1560,7 +1554,7 @@ fn import_claim_composition_remains_deferred() {
         .expect("meta-task status");
     for subtask in &meta_status.subtasks {
         assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.current_claim_id.is_none());
+        assert!(subtask.active_claim_id.is_none());
     }
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1840,7 +1834,7 @@ fn claim_subtask_claims_known_available_work_subtask() {
     let status = covey.subtask_status(&subtask_id).expect("subtask status");
     assert_eq!(status.subtask.state, SubtaskState::Claimed);
     assert_eq!(
-        status.subtask.current_claim_id.as_deref(),
+        status.subtask.active_claim_id.as_deref(),
         Some(claim.claim_id.as_str())
     );
     let held_claim = status.claim.expect("held claim status");
@@ -1994,8 +1988,8 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
         .expect("work status")
         .reviews
         .into_iter()
-        .find(|review| review.review_id == review_id)
-        .and_then(|review| review.review_subtask_id)
+        .find(|review| review.review_id() == review_id)
+        .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask id");
     let before_review_events = count_subtask_claim_events(&covey);
 
@@ -2063,14 +2057,11 @@ fn claim_subtask_rejects_session_occupancy() {
         SessionRole::Orchestrator,
     );
     let second_subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch,
             meta_task_id,
             subtask_id: Some("work_2".into()),
             title: "second work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         })
@@ -2519,7 +2510,7 @@ fn claim_subtask_mixed_path_race_single_winner() {
         .expect("subtask status after race");
     assert_eq!(status.subtask.state, SubtaskState::Claimed);
     assert_eq!(
-        status.subtask.current_claim_id.as_deref(),
+        status.subtask.active_claim_id.as_deref(),
         Some(winner.claim_id.as_str())
     );
     assert_eq!(
@@ -2607,9 +2598,9 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
     let review = status
         .reviews
         .into_iter()
-        .find(|review| review.review_id == review_id)
+        .find(|review| review.review_id() == review_id)
         .expect("review exists");
-    assert_eq!(review.state, covey::ReviewState::Superseded);
+    assert_eq!(review.state(), covey::ReviewState::Superseded);
 }
 
 #[test]
@@ -2687,8 +2678,8 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
         .expect("status")
         .reviews
         .into_iter()
-        .find(|review| review.review_id == review_id)
-        .and_then(|review| review.review_subtask_id)
+        .find(|review| review.review_id() == review_id)
+        .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask");
 
     let review_claim = covey
@@ -2738,27 +2729,21 @@ fn ready_queue_orders_items_and_applies_in_order() {
         })
         .expect("meta task");
     let first = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("ready_1".into()),
             title: "first".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask1");
     let second = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("ready_2".into()),
             title: "second".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         })
@@ -2868,8 +2853,8 @@ fn ready_queue_orders_items_and_applies_in_order() {
 
     let queued = covey.fetch_ready_queue(10).expect("fetch queue");
     assert_eq!(queued.len(), 2);
-    assert_eq!(queued[0].subtask_id, first);
-    assert_eq!(queued[1].subtask_id, second);
+    assert_eq!(queued[0].subtask_id(), first);
+    assert_eq!(queued[1].subtask_id(), second);
 
     let queue_claim = covey
         .claim_next_ready_queue_item(ClaimReadyQueueReq {
@@ -2926,14 +2911,11 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
         })
         .expect("meta");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("queue_reclaim".into()),
             title: "queue reclaim".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -3212,14 +3194,11 @@ fn overlapping_reservations_surface_open_typed_conflicts() {
         SessionRole::Orchestrator,
     );
     let second_subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("shadow_work".into()),
             title: "shadow work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         })
@@ -3289,14 +3268,11 @@ fn concurrent_pool_claims_distribute_exactly_once() {
     let mut session_tokens = Vec::new();
     for idx in 0..10 {
         covey
-            .create_subtask(CreateSubtaskReq {
+            .create_subtask(CreateSubtaskRequest {
                 session_token: orch.clone(),
                 meta_task_id: meta_task_id.clone(),
                 subtask_id: Some(format!("task_{idx}")),
                 title: format!("task {idx}"),
-                kind: SubtaskKind::Work,
-                review_target_subtask_id: None,
-                review_target_artifact_digest: None,
                 priority: idx,
                 idempotency_key: id_key("create-subtask"),
             })
@@ -3656,9 +3632,9 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
     let first_review = status
         .reviews
         .iter()
-        .find(|review| review.review_id == first_review_id)
+        .find(|review| review.review_id() == first_review_id)
         .expect("first review");
-    assert_eq!(first_review.state, covey::ReviewState::Superseded);
+    assert_eq!(first_review.state(), covey::ReviewState::Superseded);
 
     covey
         .request_review(RequestReviewReq {
@@ -3686,27 +3662,21 @@ fn reservation_overlap_conflicts_resolve_when_reservations_release_or_expire() {
         })
         .expect("meta");
     let subtask_a = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("reservation_a".into()),
             title: "reservation a".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask a");
     let subtask_b = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("reservation_b".into()),
             title: "reservation b".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         })
@@ -3868,14 +3838,11 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
         })
         .expect("meta task");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("queue_target".into()),
             title: "queue target".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -4006,14 +3973,11 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
         })
         .expect("meta task");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("queue_drift_target".into()),
             title: "queue drift target".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -4191,14 +4155,11 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
         })
         .expect("meta");
     covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: second_meta,
             subtask_id: Some("work_2".into()),
             title: "second work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         })
@@ -4254,14 +4215,11 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
         Err(CoveyError::ConflictNotFound)
     ));
     assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
+        covey.create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: "meta_does_not_exist".into(),
             subtask_id: Some("review_bad".into()),
             title: "bad review".into(),
-            kind: SubtaskKind::Review,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         }),
@@ -4291,62 +4249,28 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
         })
         .expect("meta");
     covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("dup".into()),
             title: "dup".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
         .expect("first subtask");
 
     assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
+        covey.create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("dup".into()),
             title: "dup".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
         idempotency_key: id_key("create-subtask"),
         }),
         Err(CoveyError::DuplicateSubtaskId { subtask_id }) if subtask_id == "dup"
     ));
 
-    assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("bad_review".into()),
-            title: "bad review".into(),
-            kind: SubtaskKind::Review,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
-            priority: 2,
-            idempotency_key: id_key("create-subtask"),
-        }),
-        Err(CoveyError::ReviewKindMismatch)
-    ));
-    assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("missing_review_target".into()),
-            title: "missing review target".into(),
-            kind: SubtaskKind::Review,
-            review_target_subtask_id: Some("no_such_subtask".into()),
-            review_target_artifact_digest: Some("blake3:missing".into()),
-            priority: 2,
-            idempotency_key: id_key("create-subtask"),
-        }),
-        Err(CoveyError::ReviewKindMismatch)
-    ));
     assert!(matches!(
         covey.subtask_status("missing_subtask"),
         Err(CoveyError::SubtaskNotFound)
@@ -4382,47 +4306,15 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
         })
         .expect("publish");
     covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("other_work".into()),
             title: "other work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 3,
             idempotency_key: id_key("create-subtask"),
         })
         .expect("other work subtask");
-    assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("review_bad_digest".into()),
-            title: "review bad digest".into(),
-            kind: SubtaskKind::Review,
-            review_target_subtask_id: Some("dup".into()),
-            review_target_artifact_digest: Some("blake3:missing".into()),
-            priority: 2,
-            idempotency_key: id_key("create-subtask"),
-        }),
-        Err(CoveyError::ReviewKindMismatch)
-    ));
-    assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("review_wrong_target".into()),
-            title: "review wrong target".into(),
-            kind: SubtaskKind::Review,
-            review_target_subtask_id: Some("other_work".into()),
-            review_target_artifact_digest: Some("blake3:dup".into()),
-            priority: 2,
-            idempotency_key: id_key("create-subtask"),
-        }),
-        Err(CoveyError::ReviewKindMismatch)
-    ));
-
     assert!(matches!(
         covey.request_review(RequestReviewReq {
             session_token: worker.clone(),
@@ -4446,14 +4338,11 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
         })
         .expect("request review");
     covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("wrong_claim_subtask".into()),
             title: "wrong claim subtask".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 0,
             idempotency_key: id_key("create-subtask"),
         })
@@ -4797,27 +4686,21 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
         })
         .expect("submit");
     let apply_subtask = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("apply_me".into()),
             title: "apply me".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask a");
     let abandon_subtask = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("abandon_me".into()),
             title: "abandon me".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 2,
             idempotency_key: id_key("create-subtask"),
         })
@@ -5020,14 +4903,11 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
     );
 
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some("meta_flow_work".into()),
             title: "meta flow work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -5196,14 +5076,11 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
         })
         .expect("submit meta");
     assert!(matches!(
-        covey.create_subtask(CreateSubtaskReq {
+        covey.create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: Some(long.clone()),
             title: "too long".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         }),
@@ -5211,14 +5088,11 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
     ));
 
     let subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("bounds_work".into()),
             title: "bounds work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })

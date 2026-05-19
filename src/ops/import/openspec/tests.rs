@@ -4,9 +4,9 @@ use super::{
     source::load_openspec_source_snapshot,
     util::{blake3_digest, normalize_relative_path},
 };
-use crate::better_droid::{CompileOptions, compile_change};
 use crate::error::CoveyError;
 use crate::{Covey, ObjectType, RegisterSessionReq, SessionRole, model::ImportOpenSpecReq};
+use better_droid::{CompileOptions, compile_change};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, fs, path::Path};
 use tempfile::TempDir;
@@ -75,10 +75,13 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
 #[test]
 fn openspec_task_parser_rejects_duplicate_ids_and_malformed_tasks() {
     let duplicate = parse_openspec_tasks("- [ ] 1.1 Add CLI\n- [ ] 1.1 Parse tasks\n", "tasks.md");
-    assert!(matches!(
-        duplicate,
-        Err(CoveyError::InvalidSourceSchema { detail, .. }) if detail.contains("duplicate task id")
-    ));
+    assert!(
+        matches!(
+            duplicate,
+            Err(CoveyError::InvalidSourceSchema { ref detail, .. }) if detail.contains("duplicate task id")
+        ),
+        "duplicate task id should fail with duplicate detail: {duplicate:?}"
+    );
 
     let malformed = parse_openspec_tasks("- [ ] Add CLI\n", "tasks.md");
     assert!(matches!(
@@ -234,10 +237,13 @@ fn openspec_mission_packet_loader_rejects_duplicate_ids_and_missing_task_digest(
         tmp.path().to_str().expect("root path"),
         "invalid-task-packet",
     );
-    assert!(matches!(
-        duplicate,
-        Err(CoveyError::InvalidSourceSchema { detail, .. }) if detail.contains("duplicate task id")
-    ));
+    assert!(
+        matches!(
+            duplicate,
+            Err(CoveyError::InvalidSourceSchema { ref detail, .. }) if detail.contains("duplicate task id")
+        ),
+        "duplicate task id should fail with duplicate detail: {duplicate:?}"
+    );
 
     compile_better_droid_change(tmp.path(), "invalid-task-packet");
     mutate_compile_report(&mission_dir, |report| {
@@ -640,6 +646,7 @@ fn refresh_artifact_digests(mission_dir: &Path) {
     let mut digests = BTreeMap::new();
     for artifact in [
         "mission.json",
+        "mission-packet.json",
         "traceability.json",
         "validation.json",
         "path-policy.json",

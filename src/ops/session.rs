@@ -6,8 +6,9 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        EventType, ExitSessionReq, HeartbeatReq, ObjectType, RecordRuntimeAttestationReq,
-        RegisterSessionReq, RuntimeAttestation, SessionHandle, SessionState,
+        CommandTranscriptDigest, EventType, ExitSessionReq, HeartbeatReq, ModelId, ObjectType,
+        ProviderId, RecordRuntimeAttestationReq, RegisterSessionReq, RuntimeAttestation,
+        SessionHandle, SessionState, TimestampMs,
     },
     queries::{load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
@@ -107,22 +108,50 @@ impl Covey {
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
                     validate_runtime_attestation_req(&req)?;
-                    let attestation = RuntimeAttestation {
-                        session_token: session.session_token.clone(),
-                        agent_principal_id: session.agent_principal_id.clone(),
-                        agent_instance_id: session.agent_instance_id.clone(),
-                        role: session.role,
-                        provider: req.provider.clone(),
-                        model: req.model.clone(),
-                        provider_run_id: req.provider_run_id.clone(),
-                        provider_run_id_issuer: req.provider_run_id_issuer.clone(),
-                        process_id: req.process_id.clone(),
-                        container_id: req.container_id.clone(),
-                        command_transcript_digest: req.command_transcript_digest.clone(),
-                        started_at: req.started_at,
-                        ended_at: req.ended_at,
-                        recorded_at: now,
-                    };
+                    let attestation =
+                        RuntimeAttestation {
+                            session_token: session.session_token.clone(),
+                            agent_principal_id: session.agent_principal_id.clone(),
+                            agent_instance_id: session.agent_instance_id.clone(),
+                            role: session.role,
+                            provider: ProviderId::parse(req.provider.clone()).map_err(|err| {
+                                CoveyError::InvalidRuntimeAttestation {
+                                    session_token: req.session_token.clone(),
+                                    reason: err.to_string(),
+                                }
+                            })?,
+                            model: ModelId::parse(req.model.clone()).map_err(|err| {
+                                CoveyError::InvalidRuntimeAttestation {
+                                    session_token: req.session_token.clone(),
+                                    reason: err.to_string(),
+                                }
+                            })?,
+                            provider_run_id: req.provider_run_id.clone(),
+                            provider_run_id_issuer: req.provider_run_id_issuer.clone(),
+                            process_id: req.process_id.clone(),
+                            container_id: req.container_id.clone(),
+                            command_transcript_digest: CommandTranscriptDigest::parse(
+                                req.command_transcript_digest.clone(),
+                            )
+                            .map_err(|err| CoveyError::InvalidRuntimeAttestation {
+                                session_token: req.session_token.clone(),
+                                reason: err.to_string(),
+                            })?,
+                            started_at: TimestampMs::parse(req.started_at).map_err(|err| {
+                                CoveyError::InvalidRuntimeAttestation {
+                                    session_token: req.session_token.clone(),
+                                    reason: err.to_string(),
+                                }
+                            })?,
+                            ended_at: TimestampMs::parse(req.ended_at).map_err(|err| {
+                                CoveyError::InvalidRuntimeAttestation {
+                                    session_token: req.session_token.clone(),
+                                    reason: err.to_string(),
+                                }
+                            })?,
+                            recorded_at: TimestampMs::parse(now)
+                                .expect("wall clock timestamps are non-negative"),
+                        };
                     tx.execute(
                         r#"
                         INSERT INTO runtime_attestations (
@@ -283,6 +312,8 @@ impl Covey {
                 .active_subtask_id
                 .as_deref()
                 .map(|subtask_id| load_subtask_tx(tx, subtask_id))
+                .transpose()?
+                .map(crate::model::SubtaskView::try_from)
                 .transpose()?;
             Ok(crate::model::SessionStatus::new(session, active_subtask))
         });

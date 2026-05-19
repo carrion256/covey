@@ -5,7 +5,10 @@ use rusqlite::{OptionalExtension, params};
 use crate::{
     Covey,
     error::Result,
-    model::{Claim, ClaimState, ExpiringClaim, StuckSubtask, Subtask, SubtaskState, SubtaskStatus},
+    model::{
+        Claim, ClaimState, ExpiringClaim, StuckSubtask, SubtaskRow, SubtaskState, SubtaskStatus,
+        SubtaskView,
+    },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_claim_conn, load_claim_tx,
         load_queue_items_for_subtask_tx, load_reviews_for_subtask_tx, load_session_conn,
@@ -32,7 +35,7 @@ impl Covey {
             let reviews = load_reviews_for_subtask_tx(tx, subtask_id)?;
             let ready_queue = load_queue_items_for_subtask_tx(tx, subtask_id)?;
             Ok(SubtaskStatus::new(
-                subtask,
+                SubtaskView::try_from(subtask)?,
                 claim,
                 artifact,
                 reviews,
@@ -75,7 +78,7 @@ impl Covey {
                     cutoff,
                     limit as i64,
                 ],
-                deserialize_row::<Subtask>,
+                deserialize_row::<SubtaskRow>,
             )?;
             let subtasks = collect_rows(rows)?;
             subtasks
@@ -90,11 +93,12 @@ impl Covey {
                         .as_ref()
                         .map(|held| load_session_conn(conn, &held.owner_session_token))
                         .transpose()?;
+                    let idle_for_ms = (now - subtask.updated_at.get()).max(0);
                     Ok(StuckSubtask::new(
-                        subtask.clone(),
+                        SubtaskView::try_from(subtask)?,
                         claim,
                         session,
-                        (now - subtask.updated_at).max(0),
+                        idle_for_ms,
                     ))
                 })
                 .collect()
@@ -146,13 +150,13 @@ impl Covey {
             claims
                 .into_iter()
                 .map(|claim| {
-                    let subtask = load_subtask_conn(conn, &claim.subtask_id)?;
+                    let subtask = SubtaskView::try_from(load_subtask_conn(conn, &claim.subtask_id)?)?;
                     let session = load_session_conn(conn, &claim.owner_session_token)?;
                     Ok(ExpiringClaim::new(
                         claim.clone(),
                         subtask,
                         session,
-                        (claim.lease_deadline - lease_now).max(0),
+                        (claim.lease_deadline.get() - lease_now).max(0),
                     ))
                 })
                 .collect()

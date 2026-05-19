@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use covey::better_droid::{CompileOptions, compile_change};
+use better_droid::{CompileOptions, compile_change};
 use covey::{
     ClaimSubtaskReq, Covey, CoveyError, ImportBdV1Req, MetaTaskState, RegisterSessionReq,
     SessionRole, SubmitMetaTaskReq,
@@ -52,7 +52,7 @@ fn stderr_code(output: &std::process::Output) -> String {
 fn attest_session(db_path: &Path, session_token: &str, role_label: &str) {
     let process_id = format!("pid-{role_label}");
     let provider_run_id = format!("provider-run-{role_label}");
-    let transcript_digest = format!("blake3:{role_label}:transcript");
+    let transcript_digest = format!("blake3:{role_label}-transcript");
     let idempotency_key = format!("record-runtime-attestation-{role_label}");
     success_data(&run_db(
         db_path,
@@ -259,7 +259,7 @@ fn no_args_emit_short_json_help_for_piped_output() {
     assert_eq!(payload["data"]["usage"], "covey <group> <command> [flags]");
     assert_eq!(
         payload["data"]["groups"].as_array().expect("groups").len(),
-        13
+        15
     );
 }
 

@@ -7,13 +7,13 @@ mod support;
 
 use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
-    Covey, CoveyError, CreateSubtaskReq, DecideReviewReq, EnqueueForApplyReq, ManualClock,
+    Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ManualClock,
     MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
     RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
     ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
     RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind, SubtaskState,
-    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SupersedeQueueItemReq,
+    VerifyLandingAuthorizationReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -70,7 +70,7 @@ fn attest(covey: &Covey, session_token: &str) {
             provider_run_id_issuer: "covey-test-provider".into(),
             process_id: Some(format!("pid-{session_token}")),
             container_id: None,
-            command_transcript_digest: format!("blake3:{session_token}:transcript"),
+            command_transcript_digest: format!("blake3:{session_token}-transcript"),
             started_at: 1_700_000_000_000,
             ended_at: 1_700_000_000_001,
             idempotency_key: format!("record-runtime-attestation-{session_token}"),
@@ -140,14 +140,11 @@ fn seed_work(covey: &Covey, subtask_id: &str) -> (String, String) {
         })
         .expect("submit meta task");
     let actual_subtask_id = covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some(subtask_id.into()),
             title: format!("work {subtask_id}"),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -176,7 +173,7 @@ fn prepare_approved_artifact(rig: &Rig, subtask_id: &str, worker: &str, digest: 
             subtask_id,
             worker,
             format!("{subtask_id}.json"),
-            format!("{digest}:paths"),
+            format!("{digest}-paths"),
             1_700_000_000_000_i64,
         ],
     )
@@ -197,7 +194,7 @@ fn prepare_approved_artifact(rig: &Rig, subtask_id: &str, worker: &str, digest: 
             digest,
             reviewer,
             ReviewVerdict::Approve.to_string(),
-            format!("{digest}:findings"),
+            format!("{digest}-findings"),
             ReviewState::Decided.to_string(),
             1_700_000_000_001_i64,
         ],
@@ -240,8 +237,8 @@ fn record_apply_verification(
             findings_digest: findings_digest.to_owned(),
             claim_fence_seq,
             verifier: "mutai-rs".to_owned(),
-            verdict_digest: format!("{digest}:verdict"),
-            seal_digest: format!("{digest}:seal"),
+            verdict_digest: format!("{digest}-verdict"),
+            seal_digest: format!("{digest}-seal"),
             idempotency_key: id_key("record-apply-verification"),
         })
         .expect("record apply verification");
@@ -255,7 +252,7 @@ fn ready_queue_alternate_paths_cover_fetch_claim_supersede_and_owner_errors(rig:
 
     let queued = rig.covey.fetch_ready_queue(10).expect("fetch queue");
     assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].queue_id, queue_id);
+    assert_eq!(queued[0].queue_id(), queue_id);
 
     let claim = rig
         .covey
@@ -426,7 +423,7 @@ fn ready_queue_error_and_metrics_paths_are_observable(rig: Rig) {
         &queue_id,
         "queue_error_paths",
         "blake3:queue_error_paths",
-        "blake3:queue_error_paths:findings",
+        "blake3:queue_error_paths-findings",
         claim.claim_fence_seq,
     );
 
@@ -477,11 +474,11 @@ fn apply_verification_requires_runtime_attestation(rig: Rig) {
             queue_id,
             artifact_digest: "blake3:queue_requires_runtime_attestation".into(),
             review_id: "review_queue_requires_runtime_attestation".into(),
-            findings_digest: "blake3:queue_requires_runtime_attestation:findings".into(),
+            findings_digest: "blake3:queue_requires_runtime_attestation-findings".into(),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: "blake3:queue_requires_runtime_attestation:verdict".into(),
-            seal_digest: "blake3:queue_requires_runtime_attestation:seal".into(),
+            verdict_digest: "blake3:queue_requires_runtime_attestation-verdict".into(),
+            seal_digest: "blake3:queue_requires_runtime_attestation-seal".into(),
             idempotency_key: id_key("record-apply-verification"),
         }),
         Err(CoveyError::RuntimeAttestationMissing { session_token }) if session_token == gate
@@ -524,11 +521,11 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
             queue_id,
             artifact_digest: digest.into(),
             review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}:findings"),
+            findings_digest: format!("{digest}-findings"),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}:verdict"),
-            seal_digest: format!("{digest}:seal"),
+            verdict_digest: format!("{digest}-verdict"),
+            seal_digest: format!("{digest}-seal"),
             idempotency_key: id_key("record-apply-verification"),
         }),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
@@ -558,11 +555,11 @@ fn apply_verification_rejects_shared_actor_runtime_evidence(rig: Rig) {
             queue_id,
             artifact_digest: digest.into(),
             review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}:findings"),
+            findings_digest: format!("{digest}-findings"),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}:verdict"),
-            seal_digest: format!("{digest}:seal"),
+            verdict_digest: format!("{digest}-verdict"),
+            seal_digest: format!("{digest}-seal"),
             idempotency_key: id_key("record-apply-verification"),
         }),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
@@ -600,11 +597,11 @@ fn apply_verification_rejects_shared_provider_run_identity(rig: Rig) {
             queue_id,
             artifact_digest: digest.into(),
             review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}:findings"),
+            findings_digest: format!("{digest}-findings"),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}:verdict"),
-            seal_digest: format!("{digest}:seal"),
+            verdict_digest: format!("{digest}-verdict"),
+            seal_digest: format!("{digest}-seal"),
             idempotency_key: id_key("record-apply-verification"),
         }),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
@@ -719,7 +716,7 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
         &queue_id,
         subtask_id,
         digest,
-        &format!("{digest}:findings"),
+        &format!("{digest}-findings"),
         claim.claim_fence_seq,
     );
     rig.covey
@@ -738,11 +735,11 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
             queue_id: queue_id.clone(),
             artifact_digest: digest.into(),
             review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}:findings"),
+            findings_digest: format!("{digest}-findings"),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}:verdict"),
-            seal_digest: format!("{digest}:seal"),
+            verdict_digest: format!("{digest}-verdict"),
+            seal_digest: format!("{digest}-seal"),
         })
         .expect("verify landing authorization");
     assert!(status.accepted);
@@ -750,14 +747,14 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
 
     assert!(matches!(
         rig.covey.verify_landing_authorization(VerifyLandingAuthorizationReq {
-            session_token: status.recorded_by_session,
+            session_token: status.recorded_by_session.to_string(),
             queue_id,
             artifact_digest: digest.into(),
             review_id: format!("review_{subtask_id}"),
-            findings_digest: format!("{digest}:findings"),
+            findings_digest: format!("{digest}-findings"),
             claim_fence_seq: claim.claim_fence_seq,
             verifier: "mutai-rs".into(),
-            verdict_digest: format!("{digest}:verdict"),
+            verdict_digest: format!("{digest}-verdict"),
             seal_digest: "blake3:wrong-apply-verification-seal".into(),
         }),
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
@@ -784,7 +781,7 @@ fn prepare_approved_artifact_without_review(
             subtask_id,
             worker,
             format!("{subtask_id}.json"),
-            format!("{digest}:paths"),
+            format!("{digest}-paths"),
             1_700_000_000_000_i64,
         ],
     )
@@ -923,28 +920,22 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
         .expect("submit meta task");
     let generated = rig
         .covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: None,
             title: "generated".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-generated-subtask"),
         })
         .expect("create generated subtask");
     assert!(generated.starts_with("subtask_"));
     assert!(matches!(
-        rig.covey.create_subtask(CreateSubtaskReq {
+        rig.covey.create_subtask(CreateSubtaskRequest {
             session_token: orch,
             meta_task_id,
             subtask_id: Some(generated),
             title: "duplicate".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-duplicate-subtask"),
         }),

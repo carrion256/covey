@@ -7,8 +7,8 @@ use crate::{
     Covey, SessionRole,
     error::{CoveyError, Result},
     model::{
-        CreateSubtaskReq, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
-        ImportBdV1SkipReason, SubtaskKind, bd_import_v1_subtask_id,
+        CreateSubtaskRequest, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
+        ImportBdV1SkipReason, bd_import_v1_subtask_id,
     },
     ops::meta_task::submit_meta_task_tx,
     ops::workflow::create_subtask_tx,
@@ -209,14 +209,11 @@ fn import_bd_v1_work_subtask_tx(
         return Ok(subtask_id);
     }
 
-    let create_req = CreateSubtaskReq {
+    let create_req = CreateSubtaskRequest {
         session_token: req.session_token.clone(),
         meta_task_id: destination_meta_task_id.clone(),
         subtask_id: Some(subtask_id.clone()),
         title: req.title.clone(),
-        kind: SubtaskKind::Work,
-        review_target_subtask_id: None,
-        review_target_artifact_digest: None,
         priority: req.priority,
         idempotency_key: req.idempotency_key.clone(),
     };

@@ -135,9 +135,9 @@ pub(crate) fn record_reservation_overlap_conflicts(
     for overlap in overlaps {
         let payload = ReservationOverlapConflictPayload {
             reservation_id: reservation_id.to_owned(),
-            overlapping_reservation_id: overlap.reservation_id.clone(),
+            overlapping_reservation_id: overlap.reservation_id.to_string(),
             owner_subtask_id: req.owner_subtask_id.clone(),
-            overlapping_owner_subtask_id: overlap.owner_subtask_id.clone(),
+            overlapping_owner_subtask_id: overlap.owner_subtask_id.to_string(),
             scope_class: req.scope_class,
             scope_key: req.scope_key.clone(),
             overlapping_scope_class: overlap.scope_class,

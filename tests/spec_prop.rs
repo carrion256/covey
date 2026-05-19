@@ -6,8 +6,8 @@ use std::sync::{
 mod support;
 
 use covey::{
-    ClaimNextReq, Covey, CreateSubtaskReq, ManualClock, RegisterSessionReq, ReleaseClaimReq,
-    RequestReservationReq, ScopeClass, SessionRole, SubmitMetaTaskReq, SubtaskKind,
+    ClaimNextReq, Covey, CreateSubtaskRequest, ManualClock, RegisterSessionReq, ReleaseClaimReq,
+    RequestReservationReq, ScopeClass, SessionRole, SubmitMetaTaskReq,
 };
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -43,14 +43,11 @@ fn seed_single_work_subtask(covey: &Covey) -> String {
         })
         .expect("meta task");
     covey
-        .create_subtask(CreateSubtaskReq {
+        .create_subtask(CreateSubtaskRequest {
             session_token: orch.clone(),
             meta_task_id,
             subtask_id: Some("work".into()),
             title: "work".into(),
-            kind: SubtaskKind::Work,
-            review_target_subtask_id: None,
-            review_target_artifact_digest: None,
             priority: 1,
             idempotency_key: id_key("create-subtask"),
         })
@@ -77,14 +74,11 @@ fn seed_two_work_subtasks(covey: &Covey) {
         .expect("meta task");
     for (subtask_id, priority) in [("work_a", 1_i64), ("work_b", 2_i64)] {
         covey
-            .create_subtask(CreateSubtaskReq {
+            .create_subtask(CreateSubtaskRequest {
                 session_token: orch.clone(),
                 meta_task_id: meta_task_id.clone(),
                 subtask_id: Some(subtask_id.into()),
                 title: subtask_id.into(),
-                kind: SubtaskKind::Work,
-                review_target_subtask_id: None,
-                review_target_artifact_digest: None,
                 priority,
                 idempotency_key: id_key("create-subtask"),
             })

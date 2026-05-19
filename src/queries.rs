@@ -9,8 +9,8 @@ use crate::{
     model::{
         ActorKind, Artifact, Claim, ClaimState, Event, MetaTask, MutationIdempotencyRecord,
         ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
-        ReservationState, Review, RuntimeAttestation, Session, SessionState, Subtask,
-        parse_generated_members,
+        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
+        SubtaskRow, TimestampMs, parse_generated_members,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -123,23 +123,23 @@ pub(crate) fn load_meta_task_tx(tx: &Transaction<'_>, meta_task_id: &str) -> Res
     )
 }
 
-pub(crate) fn load_subtask_conn(conn: &Connection, subtask_id: &str) -> Result<Subtask> {
+pub(crate) fn load_subtask_conn(conn: &Connection, subtask_id: &str) -> Result<SubtaskRow> {
     map_missing_row(
         conn.query_row(
             "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at FROM subtasks WHERE subtask_id = ?1",
             params![subtask_id],
-            deserialize_row::<Subtask>,
+            deserialize_row::<SubtaskRow>,
         ),
         CoveyError::SubtaskNotFound,
     )
 }
 
-pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<Subtask> {
+pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<SubtaskRow> {
     map_missing_row(
         tx.query_row(
             "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at FROM subtasks WHERE subtask_id = ?1",
             params![subtask_id],
-            deserialize_row::<Subtask>,
+            deserialize_row::<SubtaskRow>,
         ),
         CoveyError::SubtaskNotFound,
     )
@@ -314,11 +314,11 @@ pub(crate) fn load_queue_items_for_subtask_tx(
 pub(crate) fn load_subtasks_for_meta_task_tx(
     tx: &Transaction<'_>,
     meta_task_id: &str,
-) -> Result<Vec<Subtask>> {
+) -> Result<Vec<SubtaskRow>> {
     let mut stmt = tx.prepare(
         "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at FROM subtasks WHERE meta_task_id = ?1 ORDER BY priority ASC, created_at ASC",
     )?;
-    let rows = stmt.query_map(params![meta_task_id], deserialize_row::<Subtask>)?;
+    let rows = stmt.query_map(params![meta_task_id], deserialize_row::<SubtaskRow>)?;
     collect_rows(rows)
 }
 
@@ -396,7 +396,7 @@ pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         if actor_kind == ActorKind::System && raw_session_token == SYSTEM_EVENT_SESSION_TOKEN {
             None
         } else {
-            Some(raw_session_token)
+            Some(SessionToken::parse(raw_session_token).map_err(to_sql_err)?)
         };
     Ok(Event {
         seq: row.get(0)?,
@@ -406,7 +406,7 @@ pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         actor_kind,
         session_token,
         payload_json: row.get(6)?,
-        created_at: row.get(7)?,
+        created_at: row.get::<_, TimestampMs>(7)?,
     })
 }
 

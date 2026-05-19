@@ -471,19 +471,19 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         "artifact_targets_subtask".into(),
         req.subtask_id
             .as_ref()
-            .map_or(true, |id| artifact.produced_by_subtask_id == *id),
+            .is_none_or(|id| artifact.produced_by_subtask_id == *id),
     );
     checks.insert(
         "review_targets_requested_subtask".into(),
         req.subtask_id
             .as_ref()
-            .map_or(true, |id| review.subtask_id == *id),
+            .is_none_or(|id| review.subtask_id == *id),
     );
     checks.insert(
         "queue_targets_requested_subtask".into(),
         req.subtask_id
             .as_ref()
-            .map_or(true, |id| queue.subtask_id == *id),
+            .is_none_or(|id| queue.subtask_id == *id),
     );
     checks.insert(
         "review_approved".into(),
@@ -543,13 +543,13 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             "apply_verification_verdict_digest_matches_requested".into(),
             req.verdict_digest
                 .as_ref()
-                .map_or(true, |digest| apply.verdict_digest == *digest),
+                .is_none_or(|digest| apply.verdict_digest == *digest),
         );
         checks.insert(
             "apply_verification_seal_digest_matches_requested".into(),
             req.apply_verification_seal_digest
                 .as_ref()
-                .map_or(true, |digest| apply.seal_digest == *digest),
+                .is_none_or(|digest| apply.seal_digest == *digest),
         );
     } else {
         for name in [
@@ -635,7 +635,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
     );
     checks.insert(
         "success_text_found".into(),
-        req.success_text.as_ref().map_or(true, |text| {
+        req.success_text.as_ref().is_none_or(|text| {
             fs::read_to_string(&success_file)
                 .map(|contents| contents.contains(text))
                 .unwrap_or(false)
@@ -787,10 +787,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             .map(ToOwned::to_owned);
         checks.insert(
             "landing_proof_commit_hash_absent_or_non_empty".into(),
-            !commit_hash_claimed
-                || commit_hash
-                    .as_ref()
-                    .map_or(false, |value| !value.is_empty()),
+            !commit_hash_claimed || commit_hash.as_ref().is_some_and(|value| !value.is_empty()),
         );
         let resolved = commit_hash
             .as_ref()
@@ -840,7 +837,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
     }
     checks.insert(
         "worktree_clean".into(),
-        git(&req.repo, ["status", "--short"])? == "",
+        git(&req.repo, ["status", "--short"])?.is_empty(),
     );
 
     let blockers = check_blockers(&checks);
@@ -945,33 +942,33 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         "seal_digest",
         Value::String(seal_digest.clone()),
     );
-    if blockers.is_empty() {
-        if let Some(apply) = &apply_verification {
-            let target_ref = req
-                .target_ref
-                .clone()
-                .unwrap_or_else(|| req.mainline_ref.clone());
-            let auth = LandingAuthorization {
-                schema_version: "codex_hook_landing_authorization.v1",
-                accepted: true,
-                queue_id: queue_id.clone(),
-                artifact_digest: artifact_digest.clone(),
-                review_id: review_id.clone(),
-                findings_digest: findings_digest.clone(),
-                claim_fence_seq: queue.claim_fence_seq,
-                verifier: apply.verifier.clone(),
-                verdict_digest: apply.verdict_digest.clone(),
-                apply_verification_seal_digest: apply.seal_digest.clone(),
-                seal_digest: seal_digest.clone(),
-                head_commit: head,
-                target_ref,
-            };
-            insert_object(
-                &mut manifest,
-                "landing_authorization",
-                serde_json::to_value(auth)?,
-            );
-        }
+    if blockers.is_empty()
+        && let Some(apply) = &apply_verification
+    {
+        let target_ref = req
+            .target_ref
+            .clone()
+            .unwrap_or_else(|| req.mainline_ref.clone());
+        let auth = LandingAuthorization {
+            schema_version: "codex_hook_landing_authorization.v1",
+            accepted: true,
+            queue_id: queue_id.clone(),
+            artifact_digest: artifact_digest.clone(),
+            review_id: review_id.clone(),
+            findings_digest: findings_digest.clone(),
+            claim_fence_seq: queue.claim_fence_seq,
+            verifier: apply.verifier.clone(),
+            verdict_digest: apply.verdict_digest.clone(),
+            apply_verification_seal_digest: apply.seal_digest.clone(),
+            seal_digest: seal_digest.clone(),
+            head_commit: head,
+            target_ref,
+        };
+        insert_object(
+            &mut manifest,
+            "landing_authorization",
+            serde_json::to_value(auth)?,
+        );
     }
 
     write_json_file(&req.output, &manifest)?;
@@ -1145,13 +1142,13 @@ impl VerifyRequest {
     fn from_args(mut args: ApplyProofVerifyArgs) -> Result<Self, ApplyProofError> {
         if let Some(input) = &args.input {
             let file: VerifyRequestFile = serde_json::from_str(&fs::read_to_string(input)?)?;
-            if let Some(schema) = &file.schema {
-                if schema != REQUEST_SCHEMA {
-                    return Err(request_error(
-                        format!("--input schema must be {REQUEST_SCHEMA}"),
-                        file.output.or(args.output),
-                    ));
-                }
+            if let Some(schema) = &file.schema
+                && schema != REQUEST_SCHEMA
+            {
+                return Err(request_error(
+                    format!("--input schema must be {REQUEST_SCHEMA}"),
+                    file.output.or(args.output),
+                ));
             }
             args.repo = args.repo.or(file.repo);
             args.covey_db = args.covey_db.or(file.covey_db);
@@ -1166,10 +1163,10 @@ impl VerifyRequest {
             args.apply_gate_session_token = args
                 .apply_gate_session_token
                 .or(file.apply_gate_session_token);
-            if args.verifier == "mutai-rs" {
-                if let Some(verifier) = file.verifier {
-                    args.verifier = verifier;
-                }
+            if args.verifier == "mutai-rs"
+                && let Some(verifier) = file.verifier
+            {
+                args.verifier = verifier;
             }
             args.verdict_digest = args.verdict_digest.or(file.verdict_digest);
             args.apply_verification_seal_digest = args
@@ -1177,20 +1174,20 @@ impl VerifyRequest {
                 .or(file.apply_verification_seal_digest);
             args.mainline_ref = args.mainline_ref.or(file.mainline_ref);
             args.subject_ref = args.subject_ref.or(file.subject_ref);
-            if args.artifact_file == "feature.patch" {
-                if let Some(value) = file.artifact_file {
-                    args.artifact_file = value;
-                }
+            if args.artifact_file == "feature.patch"
+                && let Some(value) = file.artifact_file
+            {
+                args.artifact_file = value;
             }
-            if args.verdict_file == "apply-gate-output.json" {
-                if let Some(value) = file.verdict_file {
-                    args.verdict_file = value;
-                }
+            if args.verdict_file == "apply-gate-output.json"
+                && let Some(value) = file.verdict_file
+            {
+                args.verdict_file = value;
             }
-            if args.success_file == "full-suite-output.txt" {
-                if let Some(value) = file.success_file {
-                    args.success_file = value;
-                }
+            if args.success_file == "full-suite-output.txt"
+                && let Some(value) = file.success_file
+            {
+                args.success_file = value;
             }
             args.success_text = args.success_text.or(file.success_text);
             args.mission_packet_file = args.mission_packet_file.or(file.mission_packet_file);
@@ -1705,10 +1702,13 @@ fn openssl_verify_ed25519(
     Ok(verify.status.success())
 }
 
+type MissionPacketIdentityContractChecks =
+    (BTreeMap<String, bool>, Option<Value>, BTreeSet<String>);
+
 fn mission_packet_identity_contract_checks(
     path: &Path,
     enforce: bool,
-) -> Result<(BTreeMap<String, bool>, Option<Value>, BTreeSet<String>), ApplyProofError> {
+) -> Result<MissionPacketIdentityContractChecks, ApplyProofError> {
     let mut checks = BTreeMap::new();
     checks.insert("mission_packet_file_present".into(), path.is_file());
     if !path.is_file() {
