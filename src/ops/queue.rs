@@ -689,8 +689,7 @@ impl Covey {
                         .to_owned(),
                 })?;
 
-            Ok(LandingAuthorizationStatus::new(
-                true,
+            Ok(LandingAuthorizationStatus::accepted(
                 parse_landing_value(&queue_id, req.queue_id.clone())?,
                 parse_landing_value(&queue_id, req.artifact_digest.clone())?,
                 parse_landing_value(&queue_id, req.review_id.clone())?,
@@ -707,7 +706,7 @@ impl Covey {
             &session_token_for_log,
             started_at,
             &result,
-            |status| vec![format!("queue:{}", status.queue_id)],
+            |status| vec![format!("queue:{}", status.queue_id())],
         );
         result
     }

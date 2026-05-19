@@ -210,14 +210,122 @@ struct ReviewRow {
     state: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 struct ReadyQueueRow {
     queue_id: String,
     artifact_digest: String,
     subtask_id: String,
-    state: String,
-    claimed_by_session_token: Option<String>,
-    claim_fence_seq: i64,
+    lifecycle: ReadyQueueProofLifecycle,
+}
+
+#[derive(Debug, Clone)]
+enum ReadyQueueProofLifecycle {
+    Applied {
+        claim_fence_seq: i64,
+    },
+    Other {
+        state: String,
+        claimed_by_session_token: Option<String>,
+        claim_fence_seq: Option<i64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RawReadyQueueRow<'a> {
+    queue_id: &'a str,
+    artifact_digest: &'a str,
+    subtask_id: &'a str,
+    state: &'a str,
+    claimed_by_session_token: Option<&'a str>,
+    claim_fence_seq: Option<i64>,
+}
+
+impl ReadyQueueRow {
+    fn from_db_parts(
+        queue_id: String,
+        artifact_digest: String,
+        subtask_id: String,
+        state: String,
+        claimed_by_session_token: Option<String>,
+        claim_fence_seq: Option<i64>,
+    ) -> Result<Self, ApplyProofError> {
+        let lifecycle = if state == "applied" {
+            if claimed_by_session_token.is_some() {
+                return Err(ApplyProofError::Verification(
+                    "applied ready queue row must not carry active claimant".into(),
+                ));
+            }
+            ReadyQueueProofLifecycle::Applied {
+                claim_fence_seq: claim_fence_seq.ok_or_else(|| {
+                    ApplyProofError::Verification(
+                        "applied ready queue row requires claim_fence_seq".into(),
+                    )
+                })?,
+            }
+        } else {
+            ReadyQueueProofLifecycle::Other {
+                state,
+                claimed_by_session_token,
+                claim_fence_seq,
+            }
+        };
+        Ok(Self {
+            queue_id,
+            artifact_digest,
+            subtask_id,
+            lifecycle,
+        })
+    }
+
+    fn state(&self) -> &str {
+        match &self.lifecycle {
+            ReadyQueueProofLifecycle::Applied { .. } => "applied",
+            ReadyQueueProofLifecycle::Other { state, .. } => state.as_str(),
+        }
+    }
+
+    fn applied_claim_fence_seq(&self) -> Option<i64> {
+        match self.lifecycle {
+            ReadyQueueProofLifecycle::Applied { claim_fence_seq } => Some(claim_fence_seq),
+            ReadyQueueProofLifecycle::Other { .. } => None,
+        }
+    }
+
+    fn claim_fence_seq(&self) -> Option<i64> {
+        match self.lifecycle {
+            ReadyQueueProofLifecycle::Applied { claim_fence_seq } => Some(claim_fence_seq),
+            ReadyQueueProofLifecycle::Other {
+                claim_fence_seq, ..
+            } => claim_fence_seq,
+        }
+    }
+
+    fn claimed_by_session_token(&self) -> Option<&str> {
+        match &self.lifecycle {
+            ReadyQueueProofLifecycle::Applied { .. } => None,
+            ReadyQueueProofLifecycle::Other {
+                claimed_by_session_token,
+                ..
+            } => claimed_by_session_token.as_deref(),
+        }
+    }
+}
+
+impl Serialize for ReadyQueueRow {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        RawReadyQueueRow {
+            queue_id: &self.queue_id,
+            artifact_digest: &self.artifact_digest,
+            subtask_id: &self.subtask_id,
+            state: self.state(),
+            claimed_by_session_token: self.claimed_by_session_token(),
+            claim_fence_seq: self.claim_fence_seq(),
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -418,21 +526,31 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
     let artifact = load_artifact(&conn, &artifact_digest)?;
     let review = load_review(&conn, &review_id)?;
     let queue = load_queue(&conn, &queue_id)?;
-    let apply_verification = load_apply_verification(
-        &conn,
-        &queue_id,
-        &artifact_digest,
-        &review_id,
-        &findings_digest,
-        queue.claim_fence_seq,
-        &req.verifier,
-        req.verdict_digest.as_deref(),
-        req.apply_verification_seal_digest.as_deref(),
-    )?;
-    let apply_verification_lookup_error = if apply_verification.is_none() {
-        Some("expected exactly one apply verification row, got 0".to_owned())
-    } else {
-        None
+    let applied_claim_fence_seq = queue.applied_claim_fence_seq();
+    let (apply_verification, apply_verification_lookup_error) = match applied_claim_fence_seq {
+        Some(claim_fence_seq) => {
+            let apply_verification = load_apply_verification(
+                &conn,
+                &queue_id,
+                &artifact_digest,
+                &review_id,
+                &findings_digest,
+                claim_fence_seq,
+                &req.verifier,
+                req.verdict_digest.as_deref(),
+                req.apply_verification_seal_digest.as_deref(),
+            )?;
+            let lookup_error = if apply_verification.is_none() {
+                Some("expected exactly one apply verification row, got 0".to_owned())
+            } else {
+                None
+            };
+            (apply_verification, lookup_error)
+        }
+        None => (
+            None,
+            Some("ready queue row is not applied; apply verification lookup skipped".to_owned()),
+        ),
     };
     let producer = load_session(&conn, &artifact.produced_by_session)?;
     let reviewer = load_session(&conn, &review.reviewer_session)?;
@@ -501,7 +619,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         "queue_targets_reviewed_subtask".into(),
         queue.subtask_id == review.subtask_id,
     );
-    checks.insert("queue_applied".into(), queue.state == "applied");
+    checks.insert("queue_applied".into(), queue.state() == "applied");
     checks.insert(
         "apply_verification_recorded".into(),
         apply_verification.is_some(),
@@ -525,7 +643,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         );
         checks.insert(
             "apply_verification_targets_fence".into(),
-            apply.claim_fence_seq == queue.claim_fence_seq,
+            Some(apply.claim_fence_seq) == applied_claim_fence_seq,
         );
         checks.insert(
             "apply_verification_uses_expected_verifier".into(),
@@ -956,7 +1074,8 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             artifact_digest: artifact_digest.clone(),
             review_id: review_id.clone(),
             findings_digest: findings_digest.clone(),
-            claim_fence_seq: queue.claim_fence_seq,
+            claim_fence_seq: applied_claim_fence_seq
+                .expect("accepted proof requires an applied ready queue fence"),
             verifier: apply.verifier.clone(),
             verdict_digest: apply.verdict_digest.clone(),
             apply_verification_seal_digest: apply.seal_digest.clone(),
@@ -1336,14 +1455,19 @@ fn load_queue(conn: &Connection, queue_id: &str) -> Result<ReadyQueueRow, ApplyP
         "SELECT queue_id, artifact_digest, subtask_id, state, claimed_by_session_token, claim_fence_seq FROM ready_queue WHERE queue_id = ?1",
         params![queue_id],
         |row| {
-            Ok(ReadyQueueRow {
-                queue_id: row.get(0)?,
-                artifact_digest: row.get(1)?,
-                subtask_id: row.get(2)?,
-                state: row.get(3)?,
-                claimed_by_session_token: row.get(4)?,
-                claim_fence_seq: row.get::<_, Option<i64>>(5)?.unwrap_or_default(),
-            })
+            ReadyQueueRow::from_db_parts(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            )
+            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            ))
         },
     )
     .map_err(Into::into)
@@ -2232,4 +2356,65 @@ fn make_temp_dir(prefix: &str) -> Result<PathBuf, ApplyProofError> {
     ));
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_queue_proof_row_requires_fence_for_applied_state() {
+        let err = ReadyQueueRow::from_db_parts(
+            "queue-1".into(),
+            "blake3:artifact".into(),
+            "subtask-1".into(),
+            "applied".into(),
+            None,
+            None,
+        )
+        .expect_err("applied ready queue proof rows require a fence");
+
+        assert!(
+            err.to_string()
+                .contains("applied ready queue row requires claim_fence_seq"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ready_queue_proof_row_rejects_active_claimant_for_applied_state() {
+        let err = ReadyQueueRow::from_db_parts(
+            "queue-1".into(),
+            "blake3:artifact".into(),
+            "subtask-1".into(),
+            "applied".into(),
+            Some("session-1".into()),
+            Some(7),
+        )
+        .expect_err("applied ready queue proof rows must not carry active claimants");
+
+        assert!(
+            err.to_string()
+                .contains("applied ready queue row must not carry active claimant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ready_queue_proof_row_preserves_non_applied_rows_without_fabricated_fence() {
+        let row = ReadyQueueRow::from_db_parts(
+            "queue-1".into(),
+            "blake3:artifact".into(),
+            "subtask-1".into(),
+            "queued".into(),
+            None,
+            None,
+        )
+        .expect("non-applied queue rows remain observable proof blockers");
+        let value = serde_json::to_value(&row).expect("ready queue row should serialize");
+
+        assert_eq!(row.state(), "queued");
+        assert_eq!(row.applied_claim_fence_seq(), None);
+        assert_eq!(value["claim_fence_seq"], Value::Null);
+    }
 }

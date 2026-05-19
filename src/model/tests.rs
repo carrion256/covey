@@ -1,15 +1,17 @@
 use super::{
-    AbandonSubtaskReq, ActorKind, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, ClaimId,
-    ClaimResult, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
-    EnqueueForApplyReq, Event, EventPayload, EventType, ExitSessionReq, ExpiredCountPayload,
-    HeartbeatReq, ImportOpenSpecAction, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq,
-    MetaTaskId, ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, PublishArtifactReq,
-    ReadyQueueClaim, ReadyQueueItem, ReadyQueueState, ReleaseClaimReq, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationId, ReservationState, ResolveConflictReq, Review,
-    ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
-    SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq, SubmitMetaTaskReq,
-    Subtask, SubtaskId, SubtaskKind, SubtaskRow, SubtaskState, SubtaskView, SupersedeQueueItemReq,
-    TimestampMs, bd_import_v1_subtask_id, make_id, parse_generated_members,
+    AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, ClaimId, ClaimResult,
+    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, Event,
+    EventPayload, EventType, ExitSessionReq, ExpiredCountPayload, HeartbeatReq,
+    ImportOpenSpecAction, ImportOpenSpecConflict, ImportOpenSpecEvent, ImportOpenSpecItemResult,
+    LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId, ObjectType,
+    OpenSpecImportProvenance, OpenSpecImportProvenanceCommon, OpenSpecSourceDigest,
+    PublishArtifactReq, ReadyQueueClaim, ReadyQueueItem, ReadyQueueState, ReleaseClaimReq,
+    RequestReservationReq, RequestReviewReq, Reservation, ReservationId, ReservationState,
+    ResolveConflictReq, Review, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
+    SessionRole, SessionState, SessionToken, SettlementTarget, StaleSessionsPayload,
+    StartSubtaskReq, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskRow, SubtaskState,
+    SubtaskView, SupersedeQueueItemReq, TimestampMs, bd_import_v1_subtask_id, make_id,
+    parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
@@ -122,11 +124,98 @@ fn subtask_row_converts_to_domain_and_view_without_leaking_row_shape() {
     );
 
     let view = SubtaskView::try_from(row).expect("valid work row view");
-    assert_eq!(view.kind, SubtaskKind::Work);
-    assert!(view.review_target.is_none());
-    assert_eq!(
-        view.active_claim_id.as_ref().map(AsRef::as_ref),
-        Some("claim-1")
+    assert_eq!(view.kind(), SubtaskKind::Work);
+    assert!(view.review_target().is_none());
+    assert_eq!(view.active_claim_id().map(AsRef::as_ref), Some("claim-1"));
+}
+
+#[test]
+fn subtask_view_rejects_invalid_lifecycle_shapes() {
+    let available_with_claim = json!({
+        "subtask_id": "subtask-1",
+        "meta_task_id": "meta-1",
+        "title": "implement",
+        "kind": "work",
+        "review_target": null,
+        "state": "available",
+        "active_claim_id": "claim-1",
+        "artifact_digest": null,
+        "priority": 10,
+        "created_at": 100,
+        "updated_at": 200
+    });
+    let err = serde_json::from_value::<SubtaskView>(available_with_claim)
+        .expect_err("available view must not carry active claim state");
+    assert!(
+        err.to_string()
+            .contains("available subtask cannot carry claim or artifact state"),
+        "unexpected error: {err}"
+    );
+
+    let claimed_without_claim = json!({
+        "subtask_id": "subtask-1",
+        "meta_task_id": "meta-1",
+        "title": "implement",
+        "kind": "work",
+        "review_target": null,
+        "state": "claimed",
+        "active_claim_id": null,
+        "artifact_digest": null,
+        "priority": 10,
+        "created_at": 100,
+        "updated_at": 200
+    });
+    let err = serde_json::from_value::<SubtaskView>(claimed_without_claim)
+        .expect_err("claimed view requires active claim state");
+    assert!(
+        err.to_string()
+            .contains("claimed subtask is missing active claim"),
+        "unexpected error: {err}"
+    );
+
+    let work_with_review_target = json!({
+        "subtask_id": "subtask-1",
+        "meta_task_id": "meta-1",
+        "title": "implement",
+        "kind": "work",
+        "review_target": {
+            "subtask_id": "subtask-2",
+            "artifact_digest": "blake3:artifact"
+        },
+        "state": "available",
+        "active_claim_id": null,
+        "artifact_digest": null,
+        "priority": 10,
+        "created_at": 100,
+        "updated_at": 200
+    });
+    let err = serde_json::from_value::<SubtaskView>(work_with_review_target)
+        .expect_err("work view must not carry a review target");
+    assert!(
+        err.to_string()
+            .contains("work subtask view cannot carry review target"),
+        "unexpected error: {err}"
+    );
+
+    let review_without_target = json!({
+        "subtask_id": "review-1",
+        "meta_task_id": "meta-1",
+        "title": "review",
+        "kind": "review",
+        "review_target": null,
+        "state": "available",
+        "active_claim_id": null,
+        "artifact_digest": null,
+        "priority": 10,
+        "created_at": 100,
+        "updated_at": 200
+    });
+    let err = serde_json::from_value::<SubtaskView>(review_without_target)
+        .expect_err("review view requires a review target");
+    assert!(
+        err.to_string()
+            .contains("review subtask view is missing review target"),
+        "unexpected error: {err}"
     );
 }
 
@@ -367,6 +456,58 @@ fn ready_queue_domain_preserves_applied_fence_without_active_claim() {
 }
 
 #[test]
+fn landing_authorization_status_rejects_unaccepted_flat_json() {
+    let raw = serde_json::json!({
+        "accepted": false,
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "review_id": "review-1",
+        "findings_digest": "blake3:findings",
+        "claim_fence_seq": 7,
+        "verifier": "mutai-rs",
+        "verdict_digest": "blake3:verdict",
+        "seal_digest": "blake3:seal",
+        "recorded_by_session": "session-1"
+    });
+
+    let err = serde_json::from_value::<LandingAuthorizationStatus>(raw)
+        .expect_err("landing authorization status cannot represent rejected checks");
+
+    assert!(
+        err.to_string()
+            .contains("landing authorization status is only emitted for accepted checks"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn landing_authorization_status_preserves_accepted_flat_json() {
+    let raw = serde_json::json!({
+        "accepted": true,
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "review_id": "review-1",
+        "findings_digest": "blake3:findings",
+        "claim_fence_seq": 7,
+        "verifier": "mutai-rs",
+        "verdict_digest": "blake3:verdict",
+        "seal_digest": "blake3:seal",
+        "recorded_by_session": "session-1"
+    });
+
+    let status = serde_json::from_value::<LandingAuthorizationStatus>(raw)
+        .expect("accepted landing authorization status should deserialize");
+    let value = serde_json::to_value(&status).expect("status should serialize");
+
+    assert!(status.accepted_flag());
+    assert_eq!(status.queue_id().as_str(), "queue-1");
+    assert_eq!(status.claim_fence_seq(), 7);
+    assert_eq!(status.recorded_by_session().as_str(), "session-1");
+    assert_eq!(value["accepted"], true);
+    assert_eq!(value["queue_id"], "queue-1");
+}
+
+#[test]
 fn reservation_scope_rejects_invalid_scope_shapes() {
     let exact_with_generated_members = serde_json::json!({
         "reservation_id": "reservation-1",
@@ -485,17 +626,15 @@ fn event_typed_decodes_payload_and_preserves_event_metadata() {
         session_token: "session-1".to_owned(),
         idempotency_key: "idem-1".to_owned(),
     };
-    let event = Event {
-        seq: 42,
-        event_type: EventType::SessionHeartbeat,
-        object_type: ObjectType::Session,
-        object_id: "session-1".to_owned(),
-        actor_kind: ActorKind::Session,
-        session_token: Some(SessionToken::parse("session-1").expect("valid session token")),
-        payload_json: serde_json::to_string(&payload)
-            .expect("heartbeat serialization must succeed"),
-        created_at: TimestampMs::parse(1_234).expect("valid timestamp"),
-    };
+    let event = Event::session(
+        42,
+        EventType::SessionHeartbeat,
+        ObjectType::Session,
+        "session-1".to_owned(),
+        SessionToken::parse("session-1").expect("valid session token"),
+        serde_json::to_string(&payload).expect("heartbeat serialization must succeed"),
+        TimestampMs::parse(1_234).expect("valid timestamp"),
+    );
 
     let typed = event.typed().expect("event payload must decode");
 
@@ -506,22 +645,236 @@ fn event_typed_decodes_payload_and_preserves_event_metadata() {
 
 #[test]
 fn event_typed_propagates_payload_decode_failures() {
-    let event = Event {
-        seq: 1,
-        event_type: EventType::SessionHeartbeat,
-        object_type: ObjectType::Session,
-        object_id: "session-1".to_owned(),
-        actor_kind: ActorKind::Session,
-        session_token: Some(SessionToken::parse("session-1").expect("valid session token")),
-        payload_json: "{".to_owned(),
-        created_at: TimestampMs::parse(99).expect("valid timestamp"),
-    };
+    let event = Event::session(
+        1,
+        EventType::SessionHeartbeat,
+        ObjectType::Session,
+        "session-1".to_owned(),
+        SessionToken::parse("session-1").expect("valid session token"),
+        "{".to_owned(),
+        TimestampMs::parse(99).expect("valid timestamp"),
+    );
 
     let err = event
         .typed()
         .expect_err("malformed payload must fail to decode");
 
     assert!(matches!(err, CoveyError::SerializationError(_)));
+}
+
+#[test]
+fn event_actor_domain_rejects_invalid_token_shapes() {
+    let missing_session_token = r#"{"seq":1,"event_type":"session_heartbeat","object_type":"session","object_id":"session-1","actor_kind":"session","session_token":null,"payload_json":"{}","created_at":99}"#;
+    let missing_err = serde_json::from_str::<Event>(missing_session_token)
+        .expect_err("session actor without token must be rejected");
+    assert!(
+        missing_err
+            .to_string()
+            .contains("session actor events require session_token")
+    );
+
+    let system_with_session = r#"{"seq":2,"event_type":"claims_expired","object_type":"claim","object_id":"system-maintenance","actor_kind":"system","session_token":"session-1","payload_json":"{}","created_at":99}"#;
+    let system_err = serde_json::from_str::<Event>(system_with_session)
+        .expect_err("system actor with token must be rejected");
+    assert!(
+        system_err
+            .to_string()
+            .contains("system actor events must not include session_token")
+    );
+}
+
+#[test]
+fn openspec_import_provenance_rejects_object_kind_mismatches() {
+    let valid_subtask = r#"{"object_type":"subtask","object_id":"subtask-1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":"1.1","proposal_digest":null,"design_digest":null,"tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[{"path":"tasks.md","digest":"blake3:tasks"}],"mission_artifact_digests":[],"mission_artifacts":[],"task_digest":"blake3:task","updated_at":123}"#;
+    let subtask = serde_json::from_str::<OpenSpecImportProvenance>(valid_subtask)
+        .expect("valid subtask provenance should decode");
+    assert_eq!(subtask.object_type(), ObjectType::Subtask);
+    assert_eq!(subtask.openspec_task_id(), Some("1.1"));
+    assert_eq!(subtask.task_digest(), Some("blake3:task"));
+    assert!(subtask.proposal_digest().is_none());
+
+    let subtask_with_meta_fields = r#"{"object_type":"subtask","object_id":"subtask-1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":"1.1","proposal_digest":"blake3:proposal","design_digest":null,"tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[],"mission_artifact_digests":[],"mission_artifacts":[],"task_digest":"blake3:task","updated_at":123}"#;
+    let subtask_err = serde_json::from_str::<OpenSpecImportProvenance>(subtask_with_meta_fields)
+        .expect_err("subtask provenance with metatask fields must be rejected");
+    assert!(
+        subtask_err
+            .to_string()
+            .contains("subtask OpenSpec provenance must not include metatask fields")
+    );
+
+    let metatask_with_task_fields = r#"{"object_type":"meta_task","object_id":"meta-1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":"1.1","proposal_digest":"blake3:proposal","design_digest":"blake3:design","tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[],"mission_artifact_digests":[],"mission_artifacts":[],"task_digest":null,"updated_at":123}"#;
+    let meta_err = serde_json::from_str::<OpenSpecImportProvenance>(metatask_with_task_fields)
+        .expect_err("metatask provenance with task fields must be rejected");
+    assert!(
+        meta_err
+            .to_string()
+            .contains("metatask OpenSpec provenance must not include task fields")
+    );
+
+    let unsupported_object = r#"{"object_type":"claim","object_id":"claim-1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":null,"proposal_digest":null,"design_digest":null,"tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[],"mission_artifact_digests":[],"mission_artifacts":[],"task_digest":null,"updated_at":123}"#;
+    let unsupported_err = serde_json::from_str::<OpenSpecImportProvenance>(unsupported_object)
+        .expect_err("unsupported provenance object type must be rejected");
+    assert!(
+        unsupported_err
+            .to_string()
+            .contains("OpenSpec provenance only supports metatask and subtask objects")
+    );
+}
+
+#[test]
+fn openspec_import_item_rejects_object_kind_mismatches() {
+    let valid_subtask = r#"{"object_type":"subtask","object_id":"subtask-1","openspec_task_id":"1.1","title":"Implement item","task_type":"implementation","task_digest":"blake3:task","source_path":"openspec/changes/change-1/tasks.md","action":"created"}"#;
+    let subtask = serde_json::from_str::<ImportOpenSpecItemResult>(valid_subtask)
+        .expect("valid subtask import item should decode");
+    assert_eq!(subtask.object_type(), ObjectType::Subtask);
+    assert_eq!(subtask.openspec_task_id(), Some("1.1"));
+    assert_eq!(subtask.title(), "Implement item");
+    assert_eq!(subtask.task_type(), Some("implementation"));
+    assert_eq!(subtask.task_digest(), Some("blake3:task"));
+    assert_eq!(
+        subtask.source_path(),
+        Some("openspec/changes/change-1/tasks.md")
+    );
+
+    let metatask_with_task_fields = r#"{"object_type":"meta_task","object_id":"meta-1","openspec_task_id":"1.1","title":"Change prompt","task_type":null,"task_digest":null,"source_path":null,"action":"created"}"#;
+    let meta_err = serde_json::from_str::<ImportOpenSpecItemResult>(metatask_with_task_fields)
+        .expect_err("metatask item with task fields must be rejected");
+    assert!(
+        meta_err
+            .to_string()
+            .contains("metatask OpenSpec import items must not include task fields")
+    );
+
+    let subtask_missing_digest = r#"{"object_type":"subtask","object_id":"subtask-1","openspec_task_id":"1.1","title":"Implement item","task_type":null,"task_digest":null,"source_path":"openspec/changes/change-1/tasks.md","action":"created"}"#;
+    let subtask_err = serde_json::from_str::<ImportOpenSpecItemResult>(subtask_missing_digest)
+        .expect_err("subtask item without task digest must be rejected");
+    assert!(
+        subtask_err
+            .to_string()
+            .contains("subtask OpenSpec import items require task_digest")
+    );
+
+    let unsupported_object = r#"{"object_type":"claim","object_id":"claim-1","openspec_task_id":null,"title":"Claim","task_type":null,"task_digest":null,"source_path":null,"action":"created"}"#;
+    let unsupported_err = serde_json::from_str::<ImportOpenSpecItemResult>(unsupported_object)
+        .expect_err("unsupported import item object must be rejected");
+    assert!(
+        unsupported_err
+            .to_string()
+            .contains("OpenSpec import items only support metatask and subtask objects")
+    );
+}
+
+#[test]
+fn openspec_import_conflict_rejects_non_subtask_shapes() {
+    let valid_conflict = r#"{"object_type":"subtask","object_id":"subtask-1","openspec_task_id":"1.1","reason":"active_claim_changed_source","source_path":"openspec/changes/change-1/tasks.md","task_digest":"blake3:task"}"#;
+    let conflict = serde_json::from_str::<ImportOpenSpecConflict>(valid_conflict)
+        .expect("valid subtask conflict should decode");
+    assert_eq!(conflict.object_type(), ObjectType::Subtask);
+    assert_eq!(conflict.openspec_task_id(), "1.1");
+    assert_eq!(conflict.task_digest(), "blake3:task");
+
+    let missing_task_id = r#"{"object_type":"subtask","object_id":"subtask-1","openspec_task_id":null,"reason":"active_claim_changed_source","source_path":"openspec/changes/change-1/tasks.md","task_digest":"blake3:task"}"#;
+    let missing_task_id_err = serde_json::from_str::<ImportOpenSpecConflict>(missing_task_id)
+        .expect_err("subtask conflict without task id must be rejected");
+    assert!(
+        missing_task_id_err
+            .to_string()
+            .contains("subtask OpenSpec import conflicts require openspec_task_id")
+    );
+
+    let missing_task_digest = r#"{"object_type":"subtask","object_id":"subtask-1","openspec_task_id":"1.1","reason":"active_claim_changed_source","source_path":"openspec/changes/change-1/tasks.md","task_digest":null}"#;
+    let missing_task_digest_err =
+        serde_json::from_str::<ImportOpenSpecConflict>(missing_task_digest)
+            .expect_err("subtask conflict without task digest must be rejected");
+    assert!(
+        missing_task_digest_err
+            .to_string()
+            .contains("subtask OpenSpec import conflicts require task_digest")
+    );
+
+    let unsupported_object = r#"{"object_type":"meta_task","object_id":"meta-1","openspec_task_id":null,"reason":"bad","source_path":"openspec/changes/change-1/tasks.md","task_digest":null}"#;
+    let unsupported_err = serde_json::from_str::<ImportOpenSpecConflict>(unsupported_object)
+        .expect_err("non-subtask conflict object must be rejected");
+    assert!(
+        unsupported_err
+            .to_string()
+            .contains("OpenSpec import conflicts only support subtask objects")
+    );
+}
+
+#[test]
+fn openspec_import_event_rejects_provenance_mismatches() {
+    let valid_event = json!({
+        "change_id": "change-1",
+        "object_type": "subtask",
+        "object_id": "subtask-1",
+        "openspec_task_id": "1.1",
+        "action": "created",
+        "provenance": {
+            "object_type": "subtask",
+            "object_id": "subtask-1",
+            "planning_format": "openspec",
+            "openspec_change_id": "change-1",
+            "openspec_change_path": "openspec/changes/change-1",
+            "openspec_task_id": "1.1",
+            "proposal_digest": null,
+            "design_digest": null,
+            "tasks_digest": "blake3:tasks",
+            "spec_digests": [],
+            "source_digests": [{"path": "tasks.md", "digest": "blake3:tasks"}],
+            "mission_artifact_digests": [],
+            "mission_artifacts": [],
+            "task_digest": "blake3:task",
+            "updated_at": 123
+        }
+    });
+    let event = serde_json::from_value::<ImportOpenSpecEvent>(valid_event.clone())
+        .expect("matching event provenance should decode");
+    assert_eq!(event.change_id(), "change-1");
+    assert_eq!(event.object_type(), ObjectType::Subtask);
+    assert_eq!(event.object_id(), "subtask-1");
+    assert_eq!(event.openspec_task_id(), Some("1.1"));
+    assert_eq!(event.action(), ImportOpenSpecAction::Created);
+
+    let mut wrong_change = valid_event.clone();
+    wrong_change["change_id"] = json!("other-change");
+    let wrong_change_err = serde_json::from_value::<ImportOpenSpecEvent>(wrong_change)
+        .expect_err("event change id must match provenance");
+    assert!(
+        wrong_change_err
+            .to_string()
+            .contains("OpenSpec import event change_id must match provenance")
+    );
+
+    let mut wrong_object_type = valid_event.clone();
+    wrong_object_type["object_type"] = json!("meta_task");
+    let wrong_object_type_err = serde_json::from_value::<ImportOpenSpecEvent>(wrong_object_type)
+        .expect_err("event object type must match provenance");
+    assert!(
+        wrong_object_type_err
+            .to_string()
+            .contains("OpenSpec import event object_type must match provenance")
+    );
+
+    let mut wrong_object_id = valid_event.clone();
+    wrong_object_id["object_id"] = json!("subtask-2");
+    let wrong_object_id_err = serde_json::from_value::<ImportOpenSpecEvent>(wrong_object_id)
+        .expect_err("event object id must match provenance");
+    assert!(
+        wrong_object_id_err
+            .to_string()
+            .contains("OpenSpec import event object_id must match provenance")
+    );
+
+    let mut wrong_task_id = valid_event;
+    wrong_task_id["openspec_task_id"] = json!("1.2");
+    let wrong_task_id_err = serde_json::from_value::<ImportOpenSpecEvent>(wrong_task_id)
+        .expect_err("event task id must match provenance");
+    assert!(
+        wrong_task_id_err
+            .to_string()
+            .contains("OpenSpec import event openspec_task_id must match provenance")
+    );
 }
 
 fn payload_json<T: Serialize>(payload: &T) -> String {
@@ -544,36 +897,27 @@ fn sample_reservation() -> Reservation {
 }
 
 fn sample_openspec_event() -> ImportOpenSpecEvent {
-    ImportOpenSpecEvent {
-        change_id: "change-1".to_owned(),
-        object_type: ObjectType::Subtask,
-        object_id: "subtask-1".to_owned(),
-        openspec_task_id: Some("1.1".to_owned()),
-        action: ImportOpenSpecAction::Created,
-        provenance: OpenSpecImportProvenance {
-            object_type: ObjectType::Subtask,
-            object_id: "subtask-1".to_owned(),
-            planning_format: "openspec".to_owned(),
-            openspec_change_id: "change-1".to_owned(),
-            openspec_change_path: "openspec/changes/change-1".to_owned(),
-            openspec_task_id: Some("1.1".to_owned()),
-            proposal_digest: Some("blake3:proposal".to_owned()),
-            design_digest: Some("blake3:design".to_owned()),
-            tasks_digest: "blake3:tasks".to_owned(),
-            spec_digests: vec![OpenSpecSourceDigest::new(
-                "specs/example/spec.md".to_owned(),
-                "blake3:spec".to_owned(),
-            )],
-            source_digests: vec![OpenSpecSourceDigest::new(
-                "tasks.md".to_owned(),
-                "blake3:tasks".to_owned(),
-            )],
-            mission_artifact_digests: vec![],
-            mission_artifacts: vec![],
-            task_digest: Some("blake3:task".to_owned()),
-            updated_at: TimestampMs::parse(123).expect("valid timestamp"),
-        },
-    }
+    ImportOpenSpecEvent::new(
+        ImportOpenSpecAction::Created,
+        OpenSpecImportProvenance::subtask(
+            OpenSpecImportProvenanceCommon {
+                object_id: "subtask-1".to_owned(),
+                planning_format: "openspec".to_owned(),
+                openspec_change_id: "change-1".to_owned(),
+                openspec_change_path: "openspec/changes/change-1".to_owned(),
+                tasks_digest: "blake3:tasks".to_owned(),
+                source_digests: vec![OpenSpecSourceDigest::new(
+                    "tasks.md".to_owned(),
+                    "blake3:tasks".to_owned(),
+                )],
+                mission_artifact_digests: vec![],
+                mission_artifacts: vec![],
+                updated_at: TimestampMs::parse(123).expect("valid timestamp"),
+            },
+            "1.1".to_owned(),
+            "blake3:task".to_owned(),
+        ),
+    )
 }
 
 #[test]

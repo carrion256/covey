@@ -124,7 +124,7 @@ impl Covey {
                     result
                         .items
                         .iter()
-                        .filter(|item| item.object_type == ObjectType::Subtask)
+                        .filter(|item| item.object_type() == ObjectType::Subtask)
                         .map(|item| format!("subtask:{}", item.object_id)),
                 );
                 affected

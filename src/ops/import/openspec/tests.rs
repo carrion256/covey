@@ -54,7 +54,7 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
     let subtask_id = result
         .items
         .iter()
-        .find(|item| item.object_type == ObjectType::Subtask)
+        .find(|item| item.object_type() == ObjectType::Subtask)
         .map(|item| item.object_id.clone())
         .expect("imported subtask id");
 
@@ -62,11 +62,11 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
         .import_provenance(ObjectType::Subtask, &subtask_id)
         .expect("query provenance")
         .expect("subtask provenance");
-    assert_eq!(provenance.openspec_change_id, "provenance-query");
-    assert_eq!(provenance.openspec_task_id.as_deref(), Some("1.1"));
+    assert_eq!(provenance.openspec_change_id(), "provenance-query");
+    assert_eq!(provenance.openspec_task_id(), Some("1.1"));
     assert!(
         provenance
-            .mission_artifacts
+            .mission_artifacts()
             .iter()
             .any(|artifact| artifact.ends_with("mission-packet.json"))
     );

@@ -278,7 +278,7 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
             .subtask_status(&subtask_id)
             .expect("updated status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::ChangesRequested
     );
     subtask_id
@@ -581,7 +581,7 @@ fn failed_mutations_do_not_append_event_rows_and_artifact_digests_are_unique() {
             .subtask_status(&subtask_id)
             .expect("status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::ArtifactPublished
     );
 }
@@ -725,11 +725,11 @@ fn import_repeat_is_deterministic() {
     assert_eq!(meta_status.subtasks.len(), 1);
     let imported = &meta_status.subtasks[0];
     assert_eq!(imported.subtask_id, first_subtask_id);
-    assert_eq!(imported.kind, SubtaskKind::Work);
-    assert_eq!(imported.state, SubtaskState::Available);
-    assert!(imported.active_claim_id.is_none());
-    assert!(imported.review_target.is_none());
-    assert!(imported.review_target.is_none());
+    assert_eq!(imported.kind(), SubtaskKind::Work);
+    assert_eq!(imported.state(), SubtaskState::Available);
+    assert!(imported.active_claim_id().is_none());
+    assert!(imported.review_target().is_none());
+    assert!(imported.review_target().is_none());
 
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
@@ -794,10 +794,9 @@ fn import_bd_reimport_allowed_non_task_types_is_deterministic() {
     assert_eq!(first_result.skipped_count, 0);
     assert!(first_result.items.iter().any(|item| {
         item.source_issue_id == "BD-FEATURE-1"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_feature_1_"))
     }));
     let destination_meta_task_id = first_result.meta_task_id;
@@ -817,7 +816,7 @@ fn import_bd_reimport_allowed_non_task_types_is_deterministic() {
     assert_eq!(second_result.skipped_count, 1);
     assert!(second_result.items.iter().any(|item| {
         item.source_issue_id == "BD-FEATURE-1"
-            && item.skip_reason == Some(ImportBdV1SkipReason::DeterministicDuplicate)
+            && item.skip_reason() == Some(&ImportBdV1SkipReason::DeterministicDuplicate)
     }));
 
     let meta_status = covey
@@ -827,9 +826,9 @@ fn import_bd_reimport_allowed_non_task_types_is_deterministic() {
     assert_eq!(meta_status.subtasks.len(), 1);
     let imported = &meta_status.subtasks[0];
     assert!(imported.subtask_id.starts_with("bdwork_bd_feature_1_"));
-    assert_eq!(imported.kind, SubtaskKind::Work);
-    assert_eq!(imported.state, SubtaskState::Available);
-    assert!(imported.active_claim_id.is_none());
+    assert_eq!(imported.kind(), SubtaskKind::Work);
+    assert_eq!(imported.state(), SubtaskState::Available);
+    assert!(imported.active_claim_id().is_none());
 
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
@@ -955,22 +954,43 @@ fn import_type_surface_smoke() {
         2,
         1,
         vec![
-            ImportBdV1ItemResult {
-                source_issue_id: "bd-1".to_owned(),
-                subtask_id: Some("subtask-1".to_owned()),
-                skip_reason: None,
-            },
-            ImportBdV1ItemResult {
-                source_issue_id: "bd-2".to_owned(),
-                subtask_id: None,
-                skip_reason: Some(ImportBdV1SkipReason::DeterministicDuplicate),
-            },
+            ImportBdV1ItemResult::imported("bd-1", "subtask-1"),
+            ImportBdV1ItemResult::skipped(
+                "bd-2",
+                Some("subtask-2".to_owned()),
+                ImportBdV1SkipReason::DeterministicDuplicate,
+            ),
         ],
     );
     let result_json = serde_json::to_string(&result).expect("serialize result");
     let result_back: ImportBdV1Result =
         serde_json::from_str(&result_json).expect("deserialize result");
     assert_eq!(result, result_back);
+    assert_eq!(result_back.items[0].subtask_id(), Some("subtask-1"));
+    assert!(result_back.items[0].skip_reason().is_none());
+    assert_eq!(result_back.items[1].subtask_id(), Some("subtask-2"));
+    assert_eq!(
+        result_back.items[1].skip_reason(),
+        Some(&ImportBdV1SkipReason::DeterministicDuplicate)
+    );
+
+    let missing_outcome = r#"{"source_issue_id":"bd-3","subtask_id":null,"skip_reason":null}"#;
+    let missing_outcome_err = serde_json::from_str::<ImportBdV1ItemResult>(missing_outcome)
+        .expect_err("missing item outcome should be rejected");
+    assert!(
+        missing_outcome_err
+            .to_string()
+            .contains("bd import item must include either subtask_id or skip_reason")
+    );
+
+    let invalid_row_with_subtask = r#"{"source_issue_id":"bd-4","subtask_id":"subtask-4","skip_reason":{"InvalidRow":{"detail":"bad row"}}}"#;
+    let invalid_row_err = serde_json::from_str::<ImportBdV1ItemResult>(invalid_row_with_subtask)
+        .expect_err("invalid row with subtask id should be rejected");
+    assert!(
+        invalid_row_err
+            .to_string()
+            .contains("invalid bd import rows must not include subtask_id")
+    );
 
     let tmp = TempDir::new().expect("tempdir");
     let beads_db = tmp.path().join("beads.db");
@@ -1031,55 +1051,51 @@ fn import_bd_creates_available_work_subtasks() {
 
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-1"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_1_"))
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-2"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_2_"))
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-4"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_4_"))
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-5"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_5_"))
     }));
 
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-3"
-            && item.skip_reason
-                == Some(ImportBdV1SkipReason::InvalidRow {
+            && item.skip_reason()
+                == Some(&ImportBdV1SkipReason::InvalidRow {
                     detail: "unsupported status closed".to_owned(),
                 })
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-6"
-            && item.skip_reason
-                == Some(ImportBdV1SkipReason::InvalidRow {
+            && item.skip_reason()
+                == Some(&ImportBdV1SkipReason::InvalidRow {
                     detail: "unsupported labeled issue".to_owned(),
                 })
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-7"
-            && item.skip_reason
-                == Some(ImportBdV1SkipReason::InvalidRow {
+            && item.skip_reason()
+                == Some(&ImportBdV1SkipReason::InvalidRow {
                     detail: "unsupported issue_type bug".to_owned(),
                 })
     }));
@@ -1090,11 +1106,11 @@ fn import_bd_creates_available_work_subtasks() {
     assert_eq!(meta_status.meta_task.state, MetaTaskState::Active);
     assert_eq!(meta_status.subtasks.len(), 4);
     for subtask in &meta_status.subtasks {
-        assert_eq!(subtask.kind, SubtaskKind::Work);
-        assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.active_claim_id.is_none());
-        assert!(subtask.review_target.is_none());
-        assert!(subtask.review_target.is_none());
+        assert_eq!(subtask.kind(), SubtaskKind::Work);
+        assert_eq!(subtask.state(), SubtaskState::Available);
+        assert!(subtask.active_claim_id().is_none());
+        assert!(subtask.review_target().is_none());
+        assert!(subtask.review_target().is_none());
     }
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1181,9 +1197,9 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
         .collect();
     assert_eq!(imported_subtasks.len(), 4);
     for subtask in imported_subtasks {
-        assert_eq!(subtask.kind, SubtaskKind::Work);
-        assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.active_claim_id.is_none());
+        assert_eq!(subtask.kind(), SubtaskKind::Work);
+        assert_eq!(subtask.state(), SubtaskState::Available);
+        assert!(subtask.active_claim_id().is_none());
     }
 
     let session_status = covey.session_status(&orch).expect("session status");
@@ -1275,28 +1291,28 @@ fn import_bd_invalid_rows_are_reported_without_creating_subtasks_or_claims() {
     assert_eq!(result.imported_count, 0);
     assert_eq!(result.skipped_count, 4);
     assert_eq!(result.items.len(), 4);
-    assert!(result.items.iter().all(|item| item.subtask_id.is_none()));
+    assert!(result.items.iter().all(|item| item.subtask_id().is_none()));
     assert!(result.items.iter().any(|item| {
-        item.skip_reason
-            == Some(ImportBdV1SkipReason::InvalidRow {
+        item.skip_reason()
+            == Some(&ImportBdV1SkipReason::InvalidRow {
                 detail: "missing issue id".to_owned(),
             })
     }));
     assert!(result.items.iter().any(|item| {
-        item.skip_reason
-            == Some(ImportBdV1SkipReason::InvalidRow {
+        item.skip_reason()
+            == Some(&ImportBdV1SkipReason::InvalidRow {
                 detail: "missing title".to_owned(),
             })
     }));
     assert!(result.items.iter().any(|item| {
-        item.skip_reason
-            == Some(ImportBdV1SkipReason::InvalidRow {
+        item.skip_reason()
+            == Some(&ImportBdV1SkipReason::InvalidRow {
                 detail: "issue id exceeds max length 256".to_owned(),
             })
     }));
     assert!(result.items.iter().any(|item| {
-        item.skip_reason
-            == Some(ImportBdV1SkipReason::InvalidRow {
+        item.skip_reason()
+            == Some(&ImportBdV1SkipReason::InvalidRow {
                 detail: "title exceeds max length 512".to_owned(),
             })
     }));
@@ -1407,39 +1423,37 @@ fn import_bd_allowed_type_labels_and_casefolding_behave_correctly() {
 
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-FEATURE-MIXED"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_feature_mixed_"))
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-EPIC-MIXED"
-            && item.skip_reason.is_none()
+            && item.skip_reason().is_none()
             && item
-                .subtask_id
-                .as_deref()
+                .subtask_id()
                 .is_some_and(|subtask_id| subtask_id.starts_with("bdwork_bd_epic_mixed_"))
     }));
 
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-REVIEW-TASK"
-            && item.skip_reason
-                == Some(ImportBdV1SkipReason::InvalidRow {
+            && item.skip_reason()
+                == Some(&ImportBdV1SkipReason::InvalidRow {
                     detail: "unsupported labeled issue".to_owned(),
                 })
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-SKIP-TASK"
-            && item.skip_reason
-                == Some(ImportBdV1SkipReason::InvalidRow {
+            && item.skip_reason()
+                == Some(&ImportBdV1SkipReason::InvalidRow {
                     detail: "unsupported labeled issue".to_owned(),
                 })
     }));
     assert!(result.items.iter().any(|item| {
         item.source_issue_id == "BD-BUG-LOWER"
-            && item.skip_reason
-                == Some(ImportBdV1SkipReason::InvalidRow {
+            && item.skip_reason()
+                == Some(&ImportBdV1SkipReason::InvalidRow {
                     detail: "unsupported issue_type bug".to_owned(),
                 })
     }));
@@ -1450,9 +1464,9 @@ fn import_bd_allowed_type_labels_and_casefolding_behave_correctly() {
     assert_eq!(meta_status.meta_task.state, MetaTaskState::Active);
     assert_eq!(meta_status.subtasks.len(), 2);
     for subtask in &meta_status.subtasks {
-        assert_eq!(subtask.kind, SubtaskKind::Work);
-        assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.active_claim_id.is_none());
+        assert_eq!(subtask.kind(), SubtaskKind::Work);
+        assert_eq!(subtask.state(), SubtaskState::Available);
+        assert!(subtask.active_claim_id().is_none());
     }
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1561,8 +1575,8 @@ fn import_claim_composition_remains_deferred() {
         .meta_task_status(&result.meta_task_id)
         .expect("meta-task status");
     for subtask in &meta_status.subtasks {
-        assert_eq!(subtask.state, SubtaskState::Available);
-        assert!(subtask.active_claim_id.is_none());
+        assert_eq!(subtask.state(), SubtaskState::Available);
+        assert!(subtask.active_claim_id().is_none());
     }
 
     let conn = Connection::open(&rig.db_path).expect("open db");
@@ -1840,9 +1854,9 @@ fn claim_subtask_claims_known_available_work_subtask() {
     assert!(claim.fence_seq > 0);
 
     let status = covey.subtask_status(&subtask_id).expect("subtask status");
-    assert_eq!(status.subtask.state, SubtaskState::Claimed);
+    assert_eq!(status.subtask.state(), SubtaskState::Claimed);
     assert_eq!(
-        status.subtask.active_claim_id.as_deref(),
+        status.subtask.active_claim_id().map(AsRef::as_ref),
         Some(claim.claim_id.as_str())
     );
     let held_claim = status.claim.expect("held claim status");
@@ -1902,7 +1916,7 @@ fn claim_subtask_claims_changes_requested_work_subtask() {
             .subtask_status(&claim.subtask_id)
             .expect("subtask status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::Claimed
     );
     assert_eq!(
@@ -2425,12 +2439,12 @@ fn claim_subtask_matches_claim_next_for_changes_requested_work() {
             .subtask_status(&targeted_subtask_id)
             .expect("targeted status")
             .subtask
-            .state,
+            .state(),
         next_covey
             .subtask_status(&next_subtask_id)
             .expect("next status")
             .subtask
-            .state
+            .state()
     );
     assert_eq!(
         targeted_covey
@@ -2524,9 +2538,9 @@ fn claim_subtask_mixed_path_race_single_winner() {
     let status = covey
         .subtask_status(&subtask_id)
         .expect("subtask status after race");
-    assert_eq!(status.subtask.state, SubtaskState::Claimed);
+    assert_eq!(status.subtask.state(), SubtaskState::Claimed);
     assert_eq!(
-        status.subtask.active_claim_id.as_deref(),
+        status.subtask.active_claim_id().map(AsRef::as_ref),
         Some(winner.claim_id.as_str())
     );
     assert_eq!(
@@ -2610,7 +2624,10 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
         .expect("publish b");
 
     let status = covey.subtask_status(&subtask_id).expect("status");
-    assert_eq!(status.subtask.artifact_digest.as_deref(), Some("blake3:b"));
+    assert_eq!(
+        status.subtask.artifact_digest().map(AsRef::as_ref),
+        Some("blake3:b")
+    );
     let review = status
         .reviews
         .into_iter()
@@ -2718,14 +2735,17 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
     ));
 
     let status = covey.subtask_status(&subtask_id).expect("status");
-    assert_eq!(status.subtask.artifact_digest.as_deref(), Some("blake3:b"));
-    assert_eq!(status.subtask.state, SubtaskState::ArtifactPublished);
+    assert_eq!(
+        status.subtask.artifact_digest().map(AsRef::as_ref),
+        Some("blake3:b")
+    );
+    assert_eq!(status.subtask.state(), SubtaskState::ArtifactPublished);
     assert_eq!(
         covey
             .subtask_status(&review_subtask_id)
             .expect("review subtask status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::Claimed
     );
 }
@@ -2902,7 +2922,11 @@ fn ready_queue_orders_items_and_applies_in_order() {
         })
         .expect("applied");
     assert_eq!(
-        covey.subtask_status(&first).expect("status").subtask.state,
+        covey
+            .subtask_status(&first)
+            .expect("status")
+            .subtask
+            .state(),
         SubtaskState::Applied
     );
 }
@@ -3073,7 +3097,7 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
             .subtask_status(&subtask_id)
             .expect("status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::Applied
     );
 }
@@ -3383,13 +3407,13 @@ fn stale_reap_immediately_expires_orphaned_claims_and_clears_session_and_subtask
     assert!(stale_session.session.active_subtask_id().is_none());
     let before_expire = covey.subtask_status(&subtask_id).expect("subtask");
     assert!(before_expire.claim.is_none());
-    assert_eq!(before_expire.subtask.state, SubtaskState::Available);
+    assert_eq!(before_expire.subtask.state(), SubtaskState::Available);
 
     let _ = covey.expire_old_claims().expect("expire claims");
 
     let after_expire = covey.subtask_status(&subtask_id).expect("subtask");
     assert!(after_expire.claim.is_none());
-    assert_eq!(after_expire.subtask.state, SubtaskState::Available);
+    assert_eq!(after_expire.subtask.state(), SubtaskState::Available);
     let session = covey.session_status(&worker).expect("session after expire");
     assert_eq!(session.session.state(), SessionState::Stale);
     assert!(session.session.active_subtask_id().is_none());
@@ -3413,12 +3437,21 @@ fn event_log_windows_are_strictly_monotonic_and_decode_to_typed_payloads() {
     assert_eq!(events[2].seq, 3);
     assert_eq!(events[0].event_type, EventType::SessionRegistered);
     assert_eq!(events[0].object_type, ObjectType::Session);
-    assert_eq!(events[0].actor_kind, ActorKind::Session);
-    assert_eq!(events[0].session_token.as_deref(), Some(sess.as_str()));
-    assert_eq!(events[1].actor_kind, ActorKind::Session);
-    assert_eq!(events[1].session_token.as_deref(), Some(sess.as_str()));
-    assert_eq!(events[2].actor_kind, ActorKind::Session);
-    assert_eq!(events[2].session_token.as_deref(), Some(sess.as_str()));
+    assert_eq!(events[0].actor_kind(), ActorKind::Session);
+    assert_eq!(
+        events[0].session_token().map(SessionToken::as_str),
+        Some(sess.as_str())
+    );
+    assert_eq!(events[1].actor_kind(), ActorKind::Session);
+    assert_eq!(
+        events[1].session_token().map(SessionToken::as_str),
+        Some(sess.as_str())
+    );
+    assert_eq!(events[2].actor_kind(), ActorKind::Session);
+    assert_eq!(
+        events[2].session_token().map(SessionToken::as_str),
+        Some(sess.as_str())
+    );
 
     let typed = events
         .iter()
@@ -3568,8 +3601,8 @@ fn system_events_use_system_actor_without_session_token_and_generated_tokens_are
         .iter()
         .find(|event| event.event_type == EventType::SessionsReaped)
         .expect("system reap event");
-    assert_eq!(system_event.actor_kind, ActorKind::System);
-    assert_eq!(system_event.session_token, None);
+    assert_eq!(system_event.actor_kind(), ActorKind::System);
+    assert_eq!(system_event.session_token(), None);
 }
 
 #[test]
@@ -4862,7 +4895,7 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
             .subtask_status(&apply_subtask)
             .expect("apply status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::Applied
     );
     assert_eq!(
@@ -4870,7 +4903,7 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
             .subtask_status(&abandon_subtask)
             .expect("abandon status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::Abandoned
     );
     assert!(matches!(

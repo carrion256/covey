@@ -51,9 +51,9 @@ fn better_droid_compiled_change_imports_through_covey() {
     assert!(imported.conflicts.is_empty());
     assert_eq!(imported.created, 2);
     assert!(imported.items.iter().any(|item| {
-        item.object_type == ObjectType::Subtask
-            && item.openspec_task_id.as_deref() == Some("1.1")
-            && item.title.as_deref() == Some("Import compiled packet")
+        item.object_type() == ObjectType::Subtask
+            && item.openspec_task_id() == Some("1.1")
+            && item.title() == "Import compiled packet"
     }));
 }
 

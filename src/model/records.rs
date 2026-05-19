@@ -289,7 +289,7 @@ pub enum SubtaskLifecycle {
 }
 
 impl SubtaskLifecycle {
-    fn from_row_parts(
+    pub(super) fn from_row_parts(
         state: SubtaskState,
         active_claim_id: Option<ClaimId>,
         artifact_digest: Option<ArtifactDigest>,
@@ -1435,30 +1435,240 @@ pub struct ApplyVerification {
 /// This log is an audit trail for subscribers, not an event-sourced state engine.
 /// The relational tables remain authoritative; replaying `event_log` is not a
 /// supported recovery path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub seq: i64,
     pub event_type: EventType,
     pub object_type: ObjectType,
     pub object_id: String,
-    pub actor_kind: ActorKind,
-    pub session_token: Option<SessionToken>,
+    pub(super) actor: EventActor,
     pub payload_json: String,
     pub created_at: TimestampMs,
 }
 
 /// Decoded event-log row with typed payload.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedEvent {
     pub seq: i64,
     pub event_type: EventType,
     pub object_type: ObjectType,
     pub object_id: String,
-    pub actor_kind: ActorKind,
-    pub session_token: Option<SessionToken>,
+    pub(super) actor: EventActor,
     pub payload: EventPayload,
     pub created_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum EventActor {
+    Session { session_token: SessionToken },
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawEvent {
+    seq: i64,
+    event_type: EventType,
+    object_type: ObjectType,
+    object_id: String,
+    actor_kind: ActorKind,
+    session_token: Option<SessionToken>,
+    payload_json: String,
+    created_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawTypedEvent {
+    seq: i64,
+    event_type: EventType,
+    object_type: ObjectType,
+    object_id: String,
+    actor_kind: ActorKind,
+    session_token: Option<SessionToken>,
+    payload: EventPayload,
+    created_at: TimestampMs,
+}
+
+impl Event {
+    /// Builds a session-authored event-log record.
+    #[must_use]
+    pub fn session(
+        seq: i64,
+        event_type: EventType,
+        object_type: ObjectType,
+        object_id: String,
+        session_token: SessionToken,
+        payload_json: String,
+        created_at: TimestampMs,
+    ) -> Self {
+        Self {
+            seq,
+            event_type,
+            object_type,
+            object_id,
+            actor: EventActor::Session { session_token },
+            payload_json,
+            created_at,
+        }
+    }
+
+    /// Builds a system-authored event-log record.
+    #[must_use]
+    pub fn system(
+        seq: i64,
+        event_type: EventType,
+        object_type: ObjectType,
+        object_id: String,
+        payload_json: String,
+        created_at: TimestampMs,
+    ) -> Self {
+        Self {
+            seq,
+            event_type,
+            object_type,
+            object_id,
+            actor: EventActor::System,
+            payload_json,
+            created_at,
+        }
+    }
+
+    fn from_raw(raw: RawEvent) -> Result<Self, String> {
+        let actor = EventActor::try_from_parts(raw.actor_kind, raw.session_token)?;
+        Ok(Self {
+            seq: raw.seq,
+            event_type: raw.event_type,
+            object_type: raw.object_type,
+            object_id: raw.object_id,
+            actor,
+            payload_json: raw.payload_json,
+            created_at: raw.created_at,
+        })
+    }
+
+    /// Returns the event actor class.
+    #[must_use]
+    pub const fn actor_kind(&self) -> ActorKind {
+        self.actor.actor_kind()
+    }
+
+    /// Returns the event session token for session-authored events.
+    #[must_use]
+    pub const fn session_token(&self) -> Option<&SessionToken> {
+        self.actor.session_token()
+    }
+}
+
+impl TypedEvent {
+    /// Returns the event actor class.
+    #[must_use]
+    pub const fn actor_kind(&self) -> ActorKind {
+        self.actor.actor_kind()
+    }
+
+    /// Returns the event session token for session-authored events.
+    #[must_use]
+    pub const fn session_token(&self) -> Option<&SessionToken> {
+        self.actor.session_token()
+    }
+}
+
+impl EventActor {
+    fn try_from_parts(
+        actor_kind: ActorKind,
+        session_token: Option<SessionToken>,
+    ) -> Result<Self, String> {
+        match (actor_kind, session_token) {
+            (ActorKind::Session, Some(session_token)) => Ok(Self::Session { session_token }),
+            (ActorKind::Session, None) => Err("session actor events require session_token".into()),
+            (ActorKind::System, None) => Ok(Self::System),
+            (ActorKind::System, Some(_)) => {
+                Err("system actor events must not include session_token".into())
+            }
+        }
+    }
+
+    const fn actor_kind(&self) -> ActorKind {
+        match self {
+            Self::Session { .. } => ActorKind::Session,
+            Self::System => ActorKind::System,
+        }
+    }
+
+    const fn session_token(&self) -> Option<&SessionToken> {
+        match self {
+            Self::Session { session_token } => Some(session_token),
+            Self::System => None,
+        }
+    }
+}
+
+impl Serialize for Event {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawEvent {
+            seq: self.seq,
+            event_type: self.event_type,
+            object_type: self.object_type,
+            object_id: self.object_id.clone(),
+            actor_kind: self.actor.actor_kind(),
+            session_token: self.actor.session_token().cloned(),
+            payload_json: self.payload_json.clone(),
+            created_at: self.created_at,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Event {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawEvent::deserialize(deserializer)?;
+        Self::from_raw(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for TypedEvent {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawTypedEvent {
+            seq: self.seq,
+            event_type: self.event_type,
+            object_type: self.object_type,
+            object_id: self.object_id.clone(),
+            actor_kind: self.actor.actor_kind(),
+            session_token: self.actor.session_token().cloned(),
+            payload: self.payload.clone(),
+            created_at: self.created_at,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TypedEvent {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawTypedEvent::deserialize(deserializer)?;
+        let actor = EventActor::try_from_parts(raw.actor_kind, raw.session_token)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            seq: raw.seq,
+            event_type: raw.event_type,
+            object_type: raw.object_type,
+            object_id: raw.object_id,
+            actor,
+            payload: raw.payload,
+            created_at: raw.created_at,
+        })
+    }
 }
 
 /// Payload emitted when stale sessions are reaped.

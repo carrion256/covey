@@ -8,9 +8,9 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ActorKind, Artifact, Claim, ClaimState, Event, MetaTask, MutationIdempotencyRecord,
-        ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
-        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
-        SubtaskRow, TimestampMs, parse_generated_members,
+        ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, RawOpenSpecImportProvenance,
+        ReadyQueueItem, Reservation, ReservationState, Review, RuntimeAttestation, Session,
+        SessionState, SessionToken, SubtaskRow, TimestampMs, parse_generated_members,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -371,7 +371,7 @@ fn map_import_provenance(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenSpecIm
     let mission_artifacts =
         serde_json::from_str::<Vec<String>>(&mission_artifacts_json).map_err(to_sql_err)?;
 
-    Ok(OpenSpecImportProvenance {
+    OpenSpecImportProvenance::from_raw(RawOpenSpecImportProvenance {
         object_type,
         object_id: row.get(1)?,
         planning_format: row.get(2)?,
@@ -388,6 +388,7 @@ fn map_import_provenance(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenSpecIm
         task_digest: row.get(13)?,
         updated_at: row.get(14)?,
     })
+    .map_err(to_sql_err)
 }
 
 pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
@@ -399,16 +400,37 @@ pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         } else {
             Some(SessionToken::parse(raw_session_token).map_err(to_sql_err)?)
         };
-    Ok(Event {
-        seq: row.get(0)?,
-        event_type: parse_enum(row.get::<_, String>(1)?)?,
-        object_type: parse_enum(row.get::<_, String>(2)?)?,
-        object_id: row.get(3)?,
-        actor_kind,
-        session_token,
-        payload_json: row.get(6)?,
-        created_at: row.get::<_, TimestampMs>(7)?,
-    })
+    let seq = row.get(0)?;
+    let event_type = parse_enum(row.get::<_, String>(1)?)?;
+    let object_type = parse_enum(row.get::<_, String>(2)?)?;
+    let object_id = row.get(3)?;
+    let payload_json = row.get(6)?;
+    let created_at = row.get::<_, TimestampMs>(7)?;
+    match (actor_kind, session_token) {
+        (ActorKind::Session, Some(session_token)) => Ok(Event::session(
+            seq,
+            event_type,
+            object_type,
+            object_id,
+            session_token,
+            payload_json,
+            created_at,
+        )),
+        (ActorKind::Session, None) => Err(to_sql_err(
+            "session actor events require session_token".to_owned(),
+        )),
+        (ActorKind::System, None) => Ok(Event::system(
+            seq,
+            event_type,
+            object_type,
+            object_id,
+            payload_json,
+            created_at,
+        )),
+        (ActorKind::System, Some(_)) => Err(to_sql_err(
+            "system actor events must not include session_token".to_owned(),
+        )),
+    }
 }
 
 pub(crate) fn collect_rows<T>(

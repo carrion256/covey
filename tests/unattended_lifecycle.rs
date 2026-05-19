@@ -388,7 +388,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
             .subtask_status(&subtask_id)
             .expect("final subtask status")
             .subtask
-            .state,
+            .state(),
         SubtaskState::Applied
     );
 }

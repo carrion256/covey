@@ -10,8 +10,7 @@ impl Event {
             event_type: self.event_type,
             object_type: self.object_type,
             object_id: self.object_id.clone(),
-            actor_kind: self.actor_kind,
-            session_token: self.session_token.clone(),
+            actor: self.actor.clone(),
             payload: EventPayload::from_json(self.event_type, &self.payload_json)?,
             created_at: self.created_at,
         })

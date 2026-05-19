@@ -97,7 +97,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             })?;
             Ok(Rendered::summary(
                 &status,
-                format!("landing authorization verified {}", status.queue_id),
+                format!("landing authorization verified {}", status.queue_id()),
             ))
         }
         QueueCommand::MarkApplied(args) => {

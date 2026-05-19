@@ -8,8 +8,8 @@ use crate::{
     model::{
         Claim, RepoopsAuthorityClaimFact, RepoopsAuthorityClaimStatus,
         RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthorityLockStatus,
-        RepoopsAuthorityPolicyFact, RepoopsAuthorityPolicyMode, RepoopsAuthorityScopeFact,
-        RepoopsAuthoritySnapshot, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation,
+        RepoopsAuthorityPolicyFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshot,
+        RepoopsAuthoritySnapshotCommon, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation,
         ScopeClass, Session, SubtaskState,
     },
     queries::{load_active_reservations_tx, load_subtask_tx},
@@ -53,28 +53,35 @@ impl Covey {
                 "reservations:active".to_owned(),
                 "claims.owner_session_token:token_ref".to_owned(),
             ];
-            let claim_fact = RepoopsAuthorityClaimFact::new(
-                claim.claim_id.clone(),
-                repoops_claim_status_for_subtask(subtask.state),
-                session.agent_principal_id.clone(),
-                scope_in.clone(),
-                Vec::new(),
-                !scope_in.is_empty(),
-                Some(active_ownership_token),
-            );
-            Ok(RepoopsAuthoritySnapshot::new(
-                REPOOPS_AUTHORITY_SNAPSHOT_VERSION.to_owned(),
-                session.agent_principal_id,
-                Some(claim.claim_id.clone()),
-                Some(caller_ownership_token),
-                None,
-                RepoopsAuthorityPolicyFact::new(RepoopsAuthorityPolicyMode::Enforce, 2, None),
-                Some(claim_fact),
-                RepoopsAuthorityScopeFact::new(scope_in, Vec::new()),
-                locks,
-                Some(RepoopsAuthorityGitContextFact::new(None, None, None, true)),
-                None,
-                fact_sources,
+            let claim_fact = match repoops_claim_status_for_subtask(subtask.state) {
+                RepoopsAuthorityClaimStatus::InProgress => RepoopsAuthorityClaimFact::in_progress(
+                    claim.claim_id.clone(),
+                    session.agent_principal_id.clone(),
+                    scope_in.clone(),
+                    Vec::new(),
+                    !scope_in.is_empty(),
+                    active_ownership_token,
+                ),
+                RepoopsAuthorityClaimStatus::Open => RepoopsAuthorityClaimFact::open(
+                    claim.claim_id.clone(),
+                    session.agent_principal_id.clone(),
+                    scope_in.clone(),
+                    Vec::new(),
+                    !scope_in.is_empty(),
+                ),
+            };
+            Ok(RepoopsAuthoritySnapshot::claim_bound(
+                RepoopsAuthoritySnapshotCommon {
+                    schema_version: REPOOPS_AUTHORITY_SNAPSHOT_VERSION.to_owned(),
+                    agent_id: session.agent_principal_id,
+                    policy: RepoopsAuthorityPolicyFact::enforce(2),
+                    scope: RepoopsAuthorityScopeFact::new(scope_in, Vec::new()),
+                    locks,
+                    git_context: Some(RepoopsAuthorityGitContextFact::new(None, None, None, true)),
+                    fact_sources,
+                },
+                caller_ownership_token,
+                claim_fact,
             ))
         });
         self.log_operation(
@@ -349,6 +356,30 @@ mod tests {
         serde_json::from_value::<RepoopsAuthorityClaimFact>(unknown_claim_status)
             .expect_err("unknown claim status must be rejected");
 
+        let missing_in_progress_token = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "in_progress",
+            "owner": "worker-1",
+            "scope_in": ["src/**"],
+            "scope_out": [],
+            "has_required_contract_fields": true,
+            "active_ownership_token": null
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(missing_in_progress_token)
+            .expect_err("in-progress claim facts must carry an ownership token");
+
+        let stale_open_token = serde_json::json!({
+            "claim_id": "claim-1",
+            "status": "open",
+            "owner": "worker-1",
+            "scope_in": ["src/**"],
+            "scope_out": [],
+            "has_required_contract_fields": true,
+            "active_ownership_token": "token-ref"
+        });
+        serde_json::from_value::<RepoopsAuthorityClaimFact>(stale_open_token)
+            .expect_err("open claim facts must not carry stale ownership tokens");
+
         let unknown_lock_status = serde_json::json!({
             "path": "src/lib.rs",
             "owner": "worker-1",
@@ -365,5 +396,170 @@ mod tests {
         });
         serde_json::from_value::<RepoopsAuthorityPolicyFact>(unknown_policy_mode)
             .expect_err("unknown policy mode must be rejected");
+
+        let denied_rule_on_enforce_policy = serde_json::json!({
+            "mode": "enforce",
+            "phase": 2,
+            "denied_rule_id": "rule-should-not-be-here"
+        });
+        serde_json::from_value::<RepoopsAuthorityPolicyFact>(denied_rule_on_enforce_policy)
+            .expect_err("enforce policy facts must not carry denied rule ids");
+
+        let valid_claim_bound_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "token-ref",
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": {
+                "claim_id": "claim-1",
+                "status": "in_progress",
+                "owner": "worker-1",
+                "scope_in": ["src/**"],
+                "scope_out": [],
+                "has_required_contract_fields": true,
+                "active_ownership_token": "token-ref"
+            },
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": null,
+            "fact_sources": []
+        });
+        let snapshot =
+            serde_json::from_value::<RepoopsAuthoritySnapshot>(valid_claim_bound_snapshot)
+                .expect("valid claim-bound repoops snapshot");
+        assert_eq!(snapshot.claim_id().map(ClaimId::as_str), Some("claim-1"));
+        assert_eq!(snapshot.ownership_token(), Some("token-ref"));
+        assert!(snapshot.claim().is_some());
+        assert!(snapshot.constraint_reason().is_none());
+
+        let missing_claim_fact_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "token-ref",
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": null,
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": null,
+            "fact_sources": []
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(missing_claim_fact_snapshot)
+            .expect_err("claim-bound snapshots must include the claim fact");
+
+        let mixed_constraint_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "token-ref",
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": {
+                "claim_id": "claim-1",
+                "status": "in_progress",
+                "owner": "worker-1",
+                "scope_in": ["src/**"],
+                "scope_out": [],
+                "has_required_contract_fields": true,
+                "active_ownership_token": "token-ref"
+            },
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": "claim unavailable",
+            "fact_sources": []
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(mixed_constraint_snapshot)
+            .expect_err("repoops snapshots must not mix claim authority and constraints");
+
+        let mismatched_claim_id_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "token-ref",
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": {
+                "claim_id": "claim-other",
+                "status": "in_progress",
+                "owner": "worker-1",
+                "scope_in": ["src/**"],
+                "scope_out": [],
+                "has_required_contract_fields": true,
+                "active_ownership_token": "token-ref"
+            },
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": null,
+            "fact_sources": []
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(mismatched_claim_id_snapshot)
+            .expect_err("repoops snapshots must bind the same top-level and claim-fact ids");
+
+        let override_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": "claim-1",
+            "ownership_token": "token-ref",
+            "override_token": "override-ref",
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": {
+                "claim_id": "claim-1",
+                "status": "in_progress",
+                "owner": "worker-1",
+                "scope_in": ["src/**"],
+                "scope_out": [],
+                "has_required_contract_fields": true,
+                "active_ownership_token": "token-ref"
+            },
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": null,
+            "fact_sources": []
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(override_snapshot)
+            .expect_err("override tokens are not supported in repoops snapshots yet");
     }
 }

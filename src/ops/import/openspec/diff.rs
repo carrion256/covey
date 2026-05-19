@@ -62,16 +62,11 @@ pub(super) fn build_openspec_import_diff_tx(
         action: meta_action,
         provenance: meta_provenance,
     });
-    items.push(ImportOpenSpecItemResult {
-        object_type: ObjectType::MetaTask,
-        object_id: meta_task_id.clone(),
-        openspec_task_id: None,
-        title: Some(meta_prompt),
-        task_type: None,
-        task_digest: None,
-        source_path: None,
-        action: meta_action,
-    });
+    items.push(ImportOpenSpecItemResult::meta_task(
+        meta_task_id.clone(),
+        meta_prompt,
+        meta_action,
+    ));
 
     for task in &source.tasks {
         ensure_length("title", &task.title, MAX_TITLE_LEN)?;
@@ -85,14 +80,13 @@ pub(super) fn build_openspec_import_diff_tx(
             Ok(existing) => {
                 if existing.meta_task_id != meta_task_id {
                     action = ImportOpenSpecAction::Conflict;
-                    conflict = Some(ImportOpenSpecConflict {
-                        object_type: ObjectType::Subtask,
-                        object_id: subtask_id.clone(),
-                        openspec_task_id: Some(task.task_id.clone()),
-                        reason: "existing_subtask_different_meta_task".to_owned(),
-                        source_path: task.source_path.clone(),
-                        task_digest: Some(task.task_digest.clone()),
-                    });
+                    conflict = Some(ImportOpenSpecConflict::subtask(
+                        subtask_id.clone(),
+                        task.task_id.clone(),
+                        "existing_subtask_different_meta_task",
+                        task.source_path.clone(),
+                        task.task_digest.clone(),
+                    ));
                 } else {
                     let existing_provenance =
                         load_import_provenance_tx(tx, ObjectType::Subtask, &subtask_id)?;
@@ -100,14 +94,13 @@ pub(super) fn build_openspec_import_diff_tx(
                         || !provenance_equivalent(existing_provenance.as_ref(), &provenance);
                     if changed && existing.current_claim_id.is_some() {
                         action = ImportOpenSpecAction::Conflict;
-                        conflict = Some(ImportOpenSpecConflict {
-                            object_type: ObjectType::Subtask,
-                            object_id: subtask_id.clone(),
-                            openspec_task_id: Some(task.task_id.clone()),
-                            reason: OPENSPEC_ACTIVE_CLAIM_CONFLICT.to_owned(),
-                            source_path: task.source_path.clone(),
-                            task_digest: Some(task.task_digest.clone()),
-                        });
+                        conflict = Some(ImportOpenSpecConflict::subtask(
+                            subtask_id.clone(),
+                            task.task_id.clone(),
+                            OPENSPEC_ACTIVE_CLAIM_CONFLICT,
+                            task.source_path.clone(),
+                            task.task_digest.clone(),
+                        ));
                     } else if changed {
                         action = ImportOpenSpecAction::Updated;
                     } else {
@@ -132,16 +125,15 @@ pub(super) fn build_openspec_import_diff_tx(
             action,
             provenance,
         });
-        items.push(ImportOpenSpecItemResult {
-            object_type: ObjectType::Subtask,
-            object_id: subtask_id,
-            openspec_task_id: Some(task.task_id.clone()),
-            title: Some(task.title.clone()),
-            task_type: task.task_type.clone(),
-            task_digest: Some(task.task_digest.clone()),
-            source_path: Some(task.source_path.clone()),
+        items.push(ImportOpenSpecItemResult::subtask(
+            subtask_id,
+            task.task_id.clone(),
+            task.title.clone(),
+            task.task_type.clone(),
+            task.task_digest.clone(),
+            task.source_path.clone(),
             action,
-        });
+        ));
     }
 
     Ok(OpenSpecImportDiff {

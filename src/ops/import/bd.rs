@@ -274,27 +274,23 @@ fn import_bd_v1_source_rows_tx(
 
                 if existed_before {
                     skipped_count += 1;
-                    items.push(ImportBdV1ItemResult {
-                        source_issue_id: issue.id.clone(),
-                        subtask_id: Some(subtask_id),
-                        skip_reason: Some(ImportBdV1SkipReason::DeterministicDuplicate),
-                    });
+                    items.push(ImportBdV1ItemResult::skipped(
+                        issue.id.clone(),
+                        Some(subtask_id),
+                        ImportBdV1SkipReason::DeterministicDuplicate,
+                    ));
                 } else {
                     imported_count += 1;
-                    items.push(ImportBdV1ItemResult {
-                        source_issue_id: issue.id.clone(),
-                        subtask_id: Some(subtask_id),
-                        skip_reason: None,
-                    });
+                    items.push(ImportBdV1ItemResult::imported(issue.id.clone(), subtask_id));
                 }
             }
             SourceIssueEligibility::Skip(skip_reason) => {
                 skipped_count += 1;
-                items.push(ImportBdV1ItemResult {
-                    source_issue_id: issue.id.clone(),
-                    subtask_id: None,
-                    skip_reason: Some(skip_reason),
-                });
+                items.push(ImportBdV1ItemResult::skipped(
+                    issue.id.clone(),
+                    None,
+                    skip_reason,
+                ));
             }
         }
     }

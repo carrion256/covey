@@ -742,12 +742,12 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
             seal_digest: format!("{digest}-seal"),
         })
         .expect("verify landing authorization");
-    assert!(status.accepted);
-    assert_eq!(status.recorded_by_session, gate);
+    assert!(status.accepted_flag());
+    assert_eq!(status.recorded_by_session().as_str(), gate);
 
     assert!(matches!(
         rig.covey.verify_landing_authorization(VerifyLandingAuthorizationReq {
-            session_token: status.recorded_by_session.to_string(),
+            session_token: status.recorded_by_session().to_string(),
             queue_id,
             artifact_digest: digest.into(),
             review_id: format!("review_{subtask_id}"),
