@@ -13,7 +13,7 @@ use covey::{
     RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
     ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
-    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    SubtaskTitle, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -124,7 +124,7 @@ fn attest(covey: &Covey, session_token: &str) {
                 None,
                 format!("blake3:{session_token}-transcript"),
                 1_700_000_000_000,
-                1_700_000_000_001,
+                1_700_000_000_000,
                 format!("record-runtime-attestation-{session_token}"),
             )
             .expect("valid runtime attestation request"),
@@ -201,7 +201,7 @@ fn seed_work(covey: &Covey, subtask_id: &str) -> (String, String) {
             session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
             meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
             subtask_id: Some(covey::SubtaskId::parse(subtask_id).expect("valid subtask id")),
-            title: format!("work {subtask_id}"),
+            title: SubtaskTitle::parse(format!("work {subtask_id}")).expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
@@ -1047,7 +1047,7 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
             meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
                 .expect("valid meta-task id"),
             subtask_id: None,
-            title: "generated".into(),
+            title: SubtaskTitle::parse("generated").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-generated-subtask"),
         })
@@ -1058,7 +1058,7 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
             session_token: covey::SessionToken::parse(orch).expect("valid session token"),
             meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
             subtask_id: Some(covey::SubtaskId::parse(generated).expect("valid subtask id")),
-            title: "duplicate".into(),
+            title: SubtaskTitle::parse("duplicate").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-duplicate-subtask"),
         }),

@@ -8,6 +8,7 @@ mod support;
 use covey::{
     ClaimNextReq, Covey, CreateSubtaskRequest, IdempotencyKey, ManualClock, RegisterSessionReq,
     ReleaseClaimReq, RequestReservationReq, ScopeClass, SessionRole, SubmitMetaTaskReq,
+    SubtaskTitle,
 };
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -53,7 +54,7 @@ fn seed_single_work_subtask(covey: &Covey) -> String {
             session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
             meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
             subtask_id: Some(covey::SubtaskId::parse("work").expect("valid subtask id")),
-            title: "work".into(),
+            title: SubtaskTitle::parse("work").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
@@ -88,7 +89,7 @@ fn seed_two_work_subtasks(covey: &Covey) {
                 meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
                     .expect("valid meta-task id"),
                 subtask_id: Some(covey::SubtaskId::parse(subtask_id).expect("valid subtask id")),
-                title: subtask_id.into(),
+                title: SubtaskTitle::parse(subtask_id).expect("valid subtask title"),
                 priority: covey::SubtaskPriority::parse(priority).expect("valid subtask priority"),
                 idempotency_key: id_key("create-subtask"),
             })

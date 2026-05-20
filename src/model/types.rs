@@ -2,6 +2,7 @@ use std::{
     borrow::Borrow,
     fmt,
     ops::{Add, Deref, Sub},
+    str::FromStr,
 };
 
 use rusqlite::{
@@ -149,6 +150,45 @@ fn validate_normalized_text(
     Ok(())
 }
 
+fn validate_prompt_text(field: &'static str, value: &str) -> Result<(), CoveyTypeValidationError> {
+    const MAX_PROMPT_TEXT_LEN: usize = 32 * 1024;
+
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > MAX_PROMPT_TEXT_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 32768 bytes"));
+    }
+    Ok(())
+}
+
+fn validate_subtask_title(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    const MAX_SUBTASK_TITLE_LEN: usize = 512;
+
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > MAX_SUBTASK_TITLE_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 512 bytes"));
+    }
+    if value.trim() != value {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not include leading or trailing whitespace",
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_idempotency_key(
     field: &'static str,
     value: &str,
@@ -208,6 +248,14 @@ macro_rules! string_newtype {
             fn try_from(value: String) -> Result<Self, Self::Error> {
                 $validator($field, &value)?;
                 Ok(Self(value))
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = CoveyTypeValidationError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::parse(value.to_owned())
             }
         }
 
@@ -533,7 +581,9 @@ string_newtype!(SessionToken, "session_token", validate_tokenish);
 string_newtype!(AgentPrincipalId, "agent_principal_id", validate_tokenish);
 string_newtype!(AgentInstanceId, "agent_instance_id", validate_tokenish);
 string_newtype!(MetaTaskId, "meta_task_id", validate_tokenish);
+string_newtype!(PromptText, "prompt_text", validate_prompt_text);
 string_newtype!(SubtaskId, "subtask_id", validate_tokenish);
+string_newtype!(SubtaskTitle, "title", validate_subtask_title);
 string_newtype!(ClaimId, "claim_id", validate_tokenish);
 string_newtype!(RepoopsClaimRef, "repoops_claim_ref", validate_tokenish);
 string_newtype!(QueueId, "queue_id", validate_tokenish);
@@ -591,7 +641,7 @@ i64_newtype!(TimestampMs, "timestamp_ms", validate_non_negative_i64);
 mod tests {
     use super::{
         ArtifactDigest, ArtifactManifestPath, ClaimId, FenceSeq, IdempotencyKey, OpenSpecChangeId,
-        OpenSpecDigest, TimestampMs,
+        OpenSpecDigest, PromptText, SubtaskTitle, TimestampMs,
     };
 
     #[test]
@@ -629,6 +679,21 @@ mod tests {
         assert!(IdempotencyKey::try_from("idem-1".to_owned()).is_ok());
         assert!(IdempotencyKey::try_from(" ".to_owned()).is_err());
         assert!(IdempotencyKey::try_from("x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn prompt_text_rejects_blank_and_oversized_values() {
+        assert!(PromptText::try_from("do work".to_owned()).is_ok());
+        assert!(PromptText::try_from(" ".to_owned()).is_err());
+        assert!(PromptText::try_from("x".repeat(32 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn subtask_titles_reject_blank_padded_and_oversized_values() {
+        assert!(SubtaskTitle::try_from("implement work".to_owned()).is_ok());
+        assert!(SubtaskTitle::try_from(" ".to_owned()).is_err());
+        assert!(SubtaskTitle::try_from(" padded".to_owned()).is_err());
+        assert!(SubtaskTitle::try_from("x".repeat(513)).is_err());
     }
 
     #[test]

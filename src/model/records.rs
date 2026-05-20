@@ -1,5 +1,6 @@
 use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeSet;
 
 use super::{
     AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind,
@@ -8,13 +9,14 @@ use super::{
     CoveyTypeValidationError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     EventObjectId, EventSeq, EventType, ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq,
     ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId, MetaTaskState, ModelId,
-    ObjectType, ProviderId, ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq, QueueId,
-    ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
-    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationId, ReservationState,
-    ResolveConflictReq, ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId,
-    ScopeClass, SessionHandle, SessionHeartbeatTick, SessionRole, SessionState, SessionToken,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskPriority,
-    SubtaskState, SupersedeQueueItemReq, TimestampMs, VerifierId,
+    ObjectType, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq,
+    QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq,
+    RecordRuntimeAttestationReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
+    ReservationId, ReservationState, ResolveConflictReq, ReviewId, ReviewState, ReviewVerdict,
+    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick,
+    SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
+    SubtaskId, SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq,
+    TimestampMs, VerifierId,
 };
 
 /// Persisted session row.
@@ -537,6 +539,9 @@ impl RuntimeAttestationTimestamps {
         if ended_at < started_at {
             return Err("ended_at must be greater than or equal to started_at".to_owned());
         }
+        if recorded_at < ended_at {
+            return Err("recorded_at must be greater than or equal to ended_at".to_owned());
+        }
         Ok(Self {
             started_at,
             ended_at,
@@ -846,6 +851,29 @@ mod runtime_attestation_tests {
     }
 
     #[test]
+    fn runtime_attestation_rejects_recorded_before_ended() {
+        let err = RuntimeAttestation::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "agent-1",
+            "instance-1",
+            SessionRole::Executor,
+            ProviderId::parse("provider-1").expect("valid provider"),
+            ModelId::parse("model-1").expect("valid model"),
+            "provider-run-1",
+            "provider-issuer-1",
+            Some("1234".to_owned()),
+            None,
+            CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(12).expect("valid ended_at"),
+            TimestampMs::parse(11).expect("valid recorded_at"),
+        )
+        .expect_err("runtime attestation recording time should follow the attested span");
+
+        assert_eq!(err, "recorded_at must be greater than or equal to ended_at");
+    }
+
+    #[test]
     fn runtime_attestation_models_legacy_missing_provider_run_identity_explicitly() {
         let attestation = RuntimeAttestation::try_from_parts(
             SessionToken::parse("session-1").expect("valid session token"),
@@ -874,7 +902,7 @@ mod runtime_attestation_tests {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaTask {
     pub meta_task_id: MetaTaskId,
-    pub prompt_text: String,
+    pub prompt_text: PromptText,
     lifecycle: MetaTaskLifecycle,
     pub created_by: SessionToken,
     timestamps: MetaTaskTimestamps,
@@ -920,7 +948,7 @@ impl MetaTask {
     ) -> Result<Self, String> {
         Ok(Self {
             meta_task_id,
-            prompt_text,
+            prompt_text: PromptText::parse(prompt_text).map_err(|err| err.to_string())?,
             lifecycle: MetaTaskLifecycle::from(state),
             created_by,
             timestamps: MetaTaskTimestamps::new(created_at, updated_at)?,
@@ -1028,7 +1056,7 @@ impl From<&MetaTask> for RawMetaTask {
     fn from(meta_task: &MetaTask) -> Self {
         Self {
             meta_task_id: meta_task.meta_task_id.clone(),
-            prompt_text: meta_task.prompt_text.clone(),
+            prompt_text: meta_task.prompt_text.as_str().to_owned(),
             state: meta_task.state(),
             created_by: meta_task.created_by.clone(),
             created_at: meta_task.created_at(),
@@ -1066,7 +1094,7 @@ impl MetaTaskTimestamps {
 pub(crate) struct SubtaskRow {
     pub subtask_id: SubtaskId,
     pub meta_task_id: MetaTaskId,
-    pub title: String,
+    pub title: SubtaskTitle,
     kind: SubtaskRowKind,
     lifecycle: SubtaskLifecycle,
     pub priority: SubtaskPriority,
@@ -1133,7 +1161,8 @@ impl SubtaskRow {
         Ok(Self {
             subtask_id,
             meta_task_id,
-            title,
+            title: SubtaskTitle::parse(title)
+                .map_err(|err| invalid_subtask_row(&err.to_string()))?,
             kind,
             lifecycle,
             priority,
@@ -1228,7 +1257,7 @@ impl From<&SubtaskRow> for RawSubtaskRow {
         Self {
             subtask_id: row.subtask_id.clone(),
             meta_task_id: row.meta_task_id.clone(),
-            title: row.title.clone(),
+            title: row.title.as_str().to_owned(),
             kind: row.kind(),
             review_target_subtask_id: row.review_target().map(|target| target.subtask_id.clone()),
             review_target_artifact_digest: row
@@ -1594,7 +1623,7 @@ impl SubtaskTimestamps {
 pub struct WorkSubtask {
     subtask_id: SubtaskId,
     meta_task_id: MetaTaskId,
-    title: String,
+    title: SubtaskTitle,
     lifecycle: SubtaskLifecycle,
     priority: SubtaskPriority,
     timestamps: SubtaskTimestamps,
@@ -1607,7 +1636,7 @@ pub struct WorkSubtask {
 pub struct ReviewSubtask {
     subtask_id: SubtaskId,
     meta_task_id: MetaTaskId,
-    title: String,
+    title: SubtaskTitle,
     review_target: ReviewTarget,
     lifecycle: SubtaskLifecycle,
     priority: SubtaskPriority,
@@ -1654,6 +1683,8 @@ impl WorkSubtask {
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
         lifecycle.ensure_allowed_for_kind(SubtaskKind::Work)?;
+        let title =
+            SubtaskTitle::parse(title).map_err(|err| invalid_subtask_row(&err.to_string()))?;
         let timestamps = SubtaskTimestamps::new(created_at, updated_at)?;
         Ok(Self {
             subtask_id,
@@ -1684,6 +1715,8 @@ impl ReviewSubtask {
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
         lifecycle.ensure_allowed_for_kind(SubtaskKind::Review)?;
+        let title =
+            SubtaskTitle::parse(title).map_err(|err| invalid_subtask_row(&err.to_string()))?;
         let timestamps = SubtaskTimestamps::new(created_at, updated_at)?;
         Ok(Self {
             subtask_id,
@@ -1718,7 +1751,7 @@ impl From<&WorkSubtask> for RawWorkSubtask {
         Self {
             subtask_id: subtask.subtask_id.clone(),
             meta_task_id: subtask.meta_task_id.clone(),
-            title: subtask.title.clone(),
+            title: subtask.title.as_str().to_owned(),
             lifecycle: subtask.lifecycle.clone(),
             priority: subtask.priority,
             created_at: subtask.timestamps.created_at(),
@@ -1769,7 +1802,7 @@ impl From<&ReviewSubtask> for RawReviewSubtask {
         Self {
             subtask_id: subtask.subtask_id.clone(),
             meta_task_id: subtask.meta_task_id.clone(),
-            title: subtask.title.clone(),
+            title: subtask.title.as_str().to_owned(),
             review_target: subtask.review_target.clone(),
             lifecycle: subtask.lifecycle.clone(),
             priority: subtask.priority,
@@ -1866,7 +1899,7 @@ impl TryFrom<SubtaskRow> for Subtask {
             SubtaskRowKind::Work => Ok(Self::Work(WorkSubtask::new(
                 row.subtask_id,
                 row.meta_task_id,
-                row.title,
+                row.title.into(),
                 row.lifecycle,
                 row.priority,
                 created_at,
@@ -1875,7 +1908,7 @@ impl TryFrom<SubtaskRow> for Subtask {
             SubtaskRowKind::Review { review_target } => Ok(Self::Review(ReviewSubtask::new(
                 row.subtask_id,
                 row.meta_task_id,
-                row.title,
+                row.title.into(),
                 review_target,
                 row.lifecycle,
                 row.priority,
@@ -2170,17 +2203,30 @@ struct ReservationTimestamps {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReservationScope {
     ExactPath {
-        scope_key: String,
+        scope_key: ReservationScopeKey,
     },
     Subtree {
-        scope_key: String,
+        scope_key: ReservationScopeKey,
     },
     RepoGlobal,
     GeneratedSet {
-        scope_key: String,
-        generated_members: Vec<String>,
+        scope_key: ReservationScopeKey,
+        generated_members: GeneratedReservationMembers,
     },
 }
+
+/// Validated non-empty reservation scope key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ReservationScopeKey(String);
+
+/// Validated non-empty member set for generated-set reservations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct GeneratedReservationMembers(Vec<GeneratedReservationMember>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedReservationMember(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawReservation {
@@ -2241,7 +2287,7 @@ impl Reservation {
     }
 
     #[must_use]
-    pub fn generated_members(&self) -> &[String] {
+    pub fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
     }
 
@@ -2291,13 +2337,15 @@ impl ReservationScope {
         match scope_class {
             ScopeClass::ExactPath => {
                 reject_generated_members(scope_class, &generated_members)?;
-                require_non_empty_scope_key(scope_class, &scope_key)?;
-                Ok(Self::ExactPath { scope_key })
+                Ok(Self::ExactPath {
+                    scope_key: ReservationScopeKey::parse_for_scope(scope_class, scope_key)?,
+                })
             }
             ScopeClass::Subtree => {
                 reject_generated_members(scope_class, &generated_members)?;
-                require_non_empty_scope_key(scope_class, &scope_key)?;
-                Ok(Self::Subtree { scope_key })
+                Ok(Self::Subtree {
+                    scope_key: ReservationScopeKey::parse_for_scope(scope_class, scope_key)?,
+                })
             }
             ScopeClass::RepoGlobal => {
                 reject_generated_members(scope_class, &generated_members)?;
@@ -2306,24 +2354,10 @@ impl ReservationScope {
                 }
                 Ok(Self::RepoGlobal)
             }
-            ScopeClass::GeneratedSet => {
-                require_non_empty_scope_key(scope_class, &scope_key)?;
-                if generated_members.is_empty() {
-                    return Err("generated-set reservations require generated_members".to_owned());
-                }
-                if generated_members
-                    .iter()
-                    .any(|member| member.trim().is_empty())
-                {
-                    return Err(
-                        "generated-set reservations require non-empty generated_members".to_owned(),
-                    );
-                }
-                Ok(Self::GeneratedSet {
-                    scope_key,
-                    generated_members,
-                })
-            }
+            ScopeClass::GeneratedSet => Ok(Self::GeneratedSet {
+                scope_key: ReservationScopeKey::parse_for_scope(scope_class, scope_key)?,
+                generated_members: GeneratedReservationMembers::parse_for_scope(generated_members)?,
+            }),
         }
     }
 
@@ -2342,27 +2376,120 @@ impl ReservationScope {
         match self {
             Self::ExactPath { scope_key }
             | Self::Subtree { scope_key }
-            | Self::GeneratedSet { scope_key, .. } => scope_key,
+            | Self::GeneratedSet { scope_key, .. } => scope_key.as_str(),
             Self::RepoGlobal => "repo",
         }
     }
 
     #[must_use]
-    pub fn generated_members(&self) -> &[String] {
+    pub fn generated_members(&self) -> Vec<String> {
         match self {
             Self::GeneratedSet {
                 generated_members, ..
-            } => generated_members,
-            Self::ExactPath { .. } | Self::Subtree { .. } | Self::RepoGlobal => &[],
+            } => generated_members.to_vec(),
+            Self::ExactPath { .. } | Self::Subtree { .. } | Self::RepoGlobal => Vec::new(),
         }
     }
 }
 
-fn require_non_empty_scope_key(scope_class: ScopeClass, scope_key: &str) -> Result<(), String> {
-    if scope_key.trim().is_empty() {
-        Err(format!("{scope_class} reservations require scope_key"))
-    } else {
-        Ok(())
+impl ReservationScopeKey {
+    fn parse_for_scope(scope_class: ScopeClass, scope_key: String) -> Result<Self, String> {
+        if scope_key.trim().is_empty() {
+            Err(format!("{scope_class} reservations require scope_key"))
+        } else {
+            Ok(Self(scope_key))
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReservationScopeKey {
+    type Error = String;
+
+    fn try_from(scope_key: String) -> Result<Self, Self::Error> {
+        if scope_key.trim().is_empty() {
+            Err("reservation scope_key must not be empty".to_owned())
+        } else {
+            Ok(Self(scope_key))
+        }
+    }
+}
+
+impl From<ReservationScopeKey> for String {
+    fn from(scope_key: ReservationScopeKey) -> Self {
+        scope_key.0
+    }
+}
+
+impl GeneratedReservationMembers {
+    fn parse_for_scope(generated_members: Vec<String>) -> Result<Self, String> {
+        if generated_members.is_empty() {
+            return Err("generated-set reservations require generated_members".to_owned());
+        }
+        let mut seen = BTreeSet::new();
+        let mut parsed = Vec::with_capacity(generated_members.len());
+        for member in generated_members {
+            let parsed_member = GeneratedReservationMember::parse_for_scope(member)?;
+            if !seen.insert(parsed_member.as_str().to_owned()) {
+                return Err(
+                    "generated-set reservations require unique generated_members".to_owned(),
+                );
+            }
+            parsed.push(parsed_member);
+        }
+        Ok(Self(parsed))
+    }
+
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(GeneratedReservationMember::to_string)
+            .collect()
+    }
+}
+
+impl GeneratedReservationMember {
+    fn parse_for_scope(member: String) -> Result<Self, String> {
+        if member.trim().is_empty() {
+            return Err(
+                "generated-set reservations require non-empty generated_members".to_owned(),
+            );
+        }
+        if member.trim() != member || member.chars().any(char::is_control) {
+            return Err(
+                "generated-set reservations require normalized generated_members".to_owned(),
+            );
+        }
+        Ok(Self(member))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for GeneratedReservationMember {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<Vec<String>> for GeneratedReservationMembers {
+    type Error = String;
+
+    fn try_from(generated_members: Vec<String>) -> Result<Self, Self::Error> {
+        Self::parse_for_scope(generated_members)
+    }
+}
+
+impl From<GeneratedReservationMembers> for Vec<String> {
+    fn from(generated_members: GeneratedReservationMembers) -> Self {
+        generated_members.to_vec()
     }
 }
 
@@ -2406,7 +2533,7 @@ impl From<&Reservation> for RawReservation {
             owner_subtask_id: reservation.owner_subtask_id.clone(),
             scope_class: reservation.scope_class(),
             scope_key: reservation.scope_key().to_owned(),
-            generated_members: reservation.generated_members().to_vec(),
+            generated_members: reservation.generated_members(),
             lease_deadline: reservation.lease_deadline,
             state: reservation.state(),
             created_at: reservation.created_at(),
@@ -3287,7 +3414,7 @@ pub struct Event {
     object_type: ObjectType,
     pub(super) object_id: EventObjectId,
     pub(super) actor: EventActor,
-    payload_json: String,
+    payload_json: EventPayloadJson,
     pub created_at: TimestampMs,
 }
 
@@ -3332,6 +3459,9 @@ struct RawTypedEvent {
     created_at: TimestampMs,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventPayloadJson(String);
+
 impl Event {
     /// Builds a session-authored event-log record.
     ///
@@ -3348,7 +3478,7 @@ impl Event {
         payload_json: String,
         created_at: TimestampMs,
     ) -> Result<Self, String> {
-        Self::validate_payload_shape(event_type, object_type, &payload_json)?;
+        let payload_json = EventPayloadJson::parse(event_type, object_type, payload_json)?;
         Ok(Self {
             seq: EventSeq::parse(seq).map_err(|err| err.to_string())?,
             event_type,
@@ -3374,7 +3504,7 @@ impl Event {
         payload_json: String,
         created_at: TimestampMs,
     ) -> Result<Self, String> {
-        Self::validate_payload_shape(event_type, object_type, &payload_json)?;
+        let payload_json = EventPayloadJson::parse(event_type, object_type, payload_json)?;
         Ok(Self {
             seq: EventSeq::parse(seq).map_err(|err| err.to_string())?,
             event_type,
@@ -3388,32 +3518,17 @@ impl Event {
 
     fn from_raw(raw: RawEvent) -> Result<Self, String> {
         let actor = EventActor::try_from_parts(raw.actor_kind, raw.session_token)?;
-        Self::validate_payload_shape(raw.event_type, raw.object_type, &raw.payload_json)?;
+        let payload_json =
+            EventPayloadJson::parse(raw.event_type, raw.object_type, raw.payload_json)?;
         Ok(Self {
             seq: EventSeq::parse(raw.seq).map_err(|err| err.to_string())?,
             event_type: raw.event_type,
             object_type: raw.object_type,
             object_id: EventObjectId::parse(raw.object_id).map_err(|err| err.to_string())?,
             actor,
-            payload_json: raw.payload_json,
+            payload_json,
             created_at: raw.created_at,
         })
-    }
-
-    fn validate_payload_shape(
-        event_type: EventType,
-        object_type: ObjectType,
-        payload_json: &str,
-    ) -> Result<(), String> {
-        let payload = EventPayload::from_json(event_type, payload_json)
-            .map_err(|error| format!("event payload does not match {event_type}: {error}"))?;
-        let expected_object_type = payload.object_type();
-        if object_type != expected_object_type {
-            return Err(format!(
-                "event payload implies object_type {expected_object_type}, got {object_type}"
-            ));
-        }
-        Ok(())
     }
 
     /// Returns the positive event-log sequence number.
@@ -3443,7 +3558,7 @@ impl Event {
     /// Returns the raw JSON payload validated against `event_type`.
     #[must_use]
     pub fn payload_json(&self) -> &str {
-        &self.payload_json
+        self.payload_json.as_str()
     }
 
     /// Returns the event actor class.
@@ -3456,6 +3571,28 @@ impl Event {
     #[must_use]
     pub const fn session_token(&self) -> Option<&SessionToken> {
         self.actor.session_token()
+    }
+}
+
+impl EventPayloadJson {
+    fn parse(
+        event_type: EventType,
+        object_type: ObjectType,
+        payload_json: String,
+    ) -> Result<Self, String> {
+        let payload = EventPayload::from_json(event_type, &payload_json)
+            .map_err(|error| format!("event payload does not match {event_type}: {error}"))?;
+        let expected_object_type = payload.object_type();
+        if object_type != expected_object_type {
+            return Err(format!(
+                "event payload implies object_type {expected_object_type}, got {object_type}"
+            ));
+        }
+        Ok(Self(payload_json))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -3539,7 +3676,7 @@ impl Serialize for Event {
             object_id: self.object_id().to_owned(),
             actor_kind: self.actor.actor_kind(),
             session_token: self.actor.session_token().cloned(),
-            payload_json: self.payload_json.clone(),
+            payload_json: self.payload_json().to_owned(),
             created_at: self.created_at,
         }
         .serialize(serializer)
@@ -3726,7 +3863,7 @@ impl EventPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
     conflict_id: ConflictId,
-    object_id: String,
+    object_id: ReservationId,
     payload: ConflictPayload,
     detected_at: TimestampMs,
     resolution_state: ConflictResolutionState,
@@ -3752,10 +3889,11 @@ impl Conflict {
     fn try_from_raw(raw: RawConflict) -> Result<Self, String> {
         let payload =
             ConflictPayload::from_parts(raw.conflict_kind, raw.object_type, &raw.payload_json)?;
-        payload.validate_object_id(&raw.object_id)?;
+        let object_id = ReservationId::parse(raw.object_id).map_err(|err| err.to_string())?;
+        payload.validate_object_id(&object_id)?;
         Ok(Self {
             conflict_id: raw.conflict_id,
-            object_id: raw.object_id,
+            object_id,
             payload,
             detected_at: raw.detected_at,
             resolution_state: raw.resolution_state,
@@ -3777,7 +3915,7 @@ impl Conflict {
     /// Returns the target object id.
     #[must_use]
     pub fn object_id(&self) -> &str {
-        &self.object_id
+        self.object_id.as_str()
     }
 
     /// Returns the typed conflict kind.
@@ -3813,7 +3951,7 @@ impl Serialize for Conflict {
         RawConflict {
             conflict_id: self.conflict_id.clone(),
             object_type: self.object_type(),
-            object_id: self.object_id.clone(),
+            object_id: self.object_id().to_owned(),
             conflict_kind: self.conflict_kind(),
             payload_json: self.payload_json(),
             detected_at: self.detected_at,
@@ -3875,11 +4013,11 @@ impl ConflictPayload {
         }
     }
 
-    fn validate_object_id(&self, object_id: &str) -> Result<(), String> {
+    fn validate_object_id(&self, object_id: &ReservationId) -> Result<(), String> {
         match self {
             Self::ReservationOverlap(payload) => {
-                if object_id == payload.reservation_id()
-                    || object_id == payload.overlapping_reservation_id()
+                if object_id.as_str() == payload.reservation_id()
+                    || object_id.as_str() == payload.overlapping_reservation_id()
                 {
                     Ok(())
                 } else {
@@ -4257,10 +4395,10 @@ pub struct ReservationOverlapConflictPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReservationOverlapScope {
-    ExactPath { scope_key: String },
-    Subtree { scope_key: String },
+    ExactPath { scope_key: ReservationScopeKey },
+    Subtree { scope_key: ReservationScopeKey },
     RepoGlobal,
-    GeneratedSet { scope_key: String },
+    GeneratedSet { scope_key: ReservationScopeKey },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4361,11 +4499,11 @@ impl ReservationOverlapScope {
     fn from_parts(scope_class: ScopeClass, scope_key: String) -> Result<Self, String> {
         match scope_class {
             ScopeClass::ExactPath => {
-                require_non_empty_overlap_scope_key(scope_class, &scope_key)?;
+                let scope_key = parse_overlap_scope_key(scope_class, scope_key)?;
                 Ok(Self::ExactPath { scope_key })
             }
             ScopeClass::Subtree => {
-                require_non_empty_overlap_scope_key(scope_class, &scope_key)?;
+                let scope_key = parse_overlap_scope_key(scope_class, scope_key)?;
                 Ok(Self::Subtree { scope_key })
             }
             ScopeClass::RepoGlobal => {
@@ -4378,7 +4516,7 @@ impl ReservationOverlapScope {
                 Ok(Self::RepoGlobal)
             }
             ScopeClass::GeneratedSet => {
-                require_non_empty_overlap_scope_key(scope_class, &scope_key)?;
+                let scope_key = parse_overlap_scope_key(scope_class, scope_key)?;
                 Ok(Self::GeneratedSet { scope_key })
             }
         }
@@ -4397,23 +4535,27 @@ impl ReservationOverlapScope {
         match self {
             Self::ExactPath { scope_key }
             | Self::Subtree { scope_key }
-            | Self::GeneratedSet { scope_key } => scope_key,
+            | Self::GeneratedSet { scope_key } => scope_key.as_str(),
             Self::RepoGlobal => "repo",
         }
     }
 }
 
-fn require_non_empty_overlap_scope_key(
+fn parse_overlap_scope_key(
     scope_class: ScopeClass,
-    scope_key: &str,
-) -> Result<(), String> {
+    scope_key: String,
+) -> Result<ReservationScopeKey, String> {
     if scope_key.trim().is_empty() {
-        Err(format!(
+        return Err(format!(
             "{scope_class} reservation overlap scopes require scope_key"
-        ))
-    } else {
-        Ok(())
+        ));
     }
+    if scope_key.trim() != scope_key {
+        return Err(format!(
+            "{scope_class} reservation overlap scope_key must be normalized"
+        ));
+    }
+    ReservationScopeKey::try_from(scope_key)
 }
 
 impl From<&ReservationOverlapConflictPayload> for RawReservationOverlapConflictPayload {
@@ -4508,7 +4650,7 @@ impl OverlapCandidate {
         self.scope.scope_key()
     }
 
-    pub(crate) fn generated_members(&self) -> &[String] {
+    pub(crate) fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
     }
 }
@@ -4538,7 +4680,7 @@ impl From<&OverlapCandidate> for RawOverlapCandidate {
         Self {
             scope_class: candidate.scope_class(),
             scope_key: candidate.scope_key().to_owned(),
-            generated_members: candidate.generated_members().to_vec(),
+            generated_members: candidate.generated_members(),
         }
     }
 }

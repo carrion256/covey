@@ -75,7 +75,8 @@ fn find_overlapping_reservations<E: ReservationExecutor>(
         ScopeClass::ExactPath => query_overlap_ids_for_exact(exec, candidate.scope_key())?,
         ScopeClass::Subtree => query_overlap_ids_for_subtree(exec, candidate.scope_key())?,
         ScopeClass::GeneratedSet => {
-            query_overlap_ids_for_generated(exec, candidate.generated_members())?
+            let generated_members = candidate.generated_members();
+            query_overlap_ids_for_generated(exec, &generated_members)?
         }
     };
     load_reservations_by_ids(exec, &reservation_ids.into_iter().collect::<Vec<_>>())

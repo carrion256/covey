@@ -10,10 +10,10 @@ use super::{
     AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
     CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LeaseDeadlineMs,
-    LeaseDurationMs, MetaTaskId, ModelId, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId,
-    RepoopsPath, ReservationId, ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId,
-    RuntimeProcessId, ScopeClass, SessionRole, SessionToken, SettlementTarget, SubtaskId,
-    SubtaskPriority, TimestampMs, VerifierId,
+    LeaseDurationMs, MetaTaskId, ModelId, PromptText, ProviderId, ProviderRunId,
+    ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope, ReviewId,
+    ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole, SessionToken,
+    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -138,7 +138,7 @@ impl SessionHandle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitMetaTaskReq {
     pub session_token: SessionToken,
-    pub prompt_text: String,
+    pub prompt_text: PromptText,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -147,7 +147,7 @@ impl SubmitMetaTaskReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the session token is invalid.
+    /// Returns an error when the session token or prompt text is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         prompt_text: impl Into<String>,
@@ -155,7 +155,7 @@ impl SubmitMetaTaskReq {
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
             session_token: SessionToken::parse(session_token.into())?,
-            prompt_text: prompt_text.into(),
+            prompt_text: PromptText::parse(prompt_text.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
@@ -489,7 +489,7 @@ pub struct CreateSubtaskRequest {
     pub session_token: SessionToken,
     pub meta_task_id: MetaTaskId,
     pub subtask_id: Option<SubtaskId>,
-    pub title: String,
+    pub title: SubtaskTitle,
     pub priority: SubtaskPriority,
     pub idempotency_key: IdempotencyKey,
 }
@@ -500,7 +500,7 @@ impl CreateSubtaskRequest {
     /// # Errors
     ///
     /// Returns an error when the session token, meta-task id, optional subtask
-    /// id, or priority is invalid.
+    /// id, title, or priority is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         meta_task_id: impl Into<String>,
@@ -513,7 +513,7 @@ impl CreateSubtaskRequest {
             session_token: SessionToken::parse(session_token.into())?,
             meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
             subtask_id: subtask_id.map(SubtaskId::parse).transpose()?,
-            title: title.into(),
+            title: SubtaskTitle::parse(title.into())?,
             priority: SubtaskPriority::parse(priority)?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
@@ -1220,7 +1220,7 @@ impl RequestReservationReq {
 
     /// Returns generated members for generated-set reservations.
     #[must_use]
-    pub fn generated_members(&self) -> &[String] {
+    pub fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
     }
 }
@@ -1232,7 +1232,7 @@ impl From<&RequestReservationReq> for RawRequestReservationReq {
             owner_subtask_id: req.owner_subtask_id.clone(),
             scope_class: req.scope_class(),
             scope_key: req.scope_key().to_owned(),
-            generated_members: req.generated_members().to_vec(),
+            generated_members: req.generated_members(),
             lease_duration_ms: req.lease_duration_ms,
             idempotency_key: req.idempotency_key.to_string(),
         }
@@ -1376,7 +1376,7 @@ impl OverlapQueryReq {
 
     /// Returns generated members for generated-set overlap queries.
     #[must_use]
-    pub fn generated_members(&self) -> &[String] {
+    pub fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
     }
 }
@@ -1386,7 +1386,7 @@ impl From<&OverlapQueryReq> for RawOverlapQueryReq {
         Self {
             scope_class: req.scope_class(),
             scope_key: req.scope_key().to_owned(),
-            generated_members: req.generated_members().to_vec(),
+            generated_members: req.generated_members(),
         }
     }
 }
@@ -1454,12 +1454,26 @@ impl RepoopsAuthoritySnapshotReq {
 }
 
 /// Request to update the resolution state of a surfaced conflict.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolveConflictReq {
-    pub session_token: SessionToken,
-    pub conflict_id: ConflictId,
-    pub resolution_state: ConflictResolutionState,
-    pub idempotency_key: IdempotencyKey,
+    session_token: SessionToken,
+    conflict_id: ConflictId,
+    resolution: ConflictResolutionUpdate,
+    idempotency_key: IdempotencyKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictResolutionUpdate {
+    Acknowledged,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawResolveConflictReq {
+    session_token: SessionToken,
+    conflict_id: ConflictId,
+    resolution_state: ConflictResolutionState,
+    idempotency_key: IdempotencyKey,
 }
 
 impl ResolveConflictReq {
@@ -1477,8 +1491,100 @@ impl ResolveConflictReq {
         Ok(Self {
             session_token: SessionToken::parse(session_token.into())?,
             conflict_id: ConflictId::parse(conflict_id.into())?,
-            resolution_state,
+            resolution: ConflictResolutionUpdate::try_from(resolution_state)?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Returns the session making the resolution update.
+    #[must_use]
+    pub const fn session_token(&self) -> &SessionToken {
+        &self.session_token
+    }
+
+    /// Returns the target conflict id.
+    #[must_use]
+    pub const fn conflict_id(&self) -> &ConflictId {
+        &self.conflict_id
+    }
+
+    /// Returns the non-open resolution state to apply.
+    #[must_use]
+    pub const fn resolution_state(&self) -> ConflictResolutionState {
+        self.resolution.as_state()
+    }
+
+    /// Returns the request idempotency key.
+    #[must_use]
+    pub const fn idempotency_key(&self) -> &IdempotencyKey {
+        &self.idempotency_key
+    }
+}
+
+impl ConflictResolutionUpdate {
+    const fn as_state(self) -> ConflictResolutionState {
+        match self {
+            Self::Acknowledged => ConflictResolutionState::Acknowledged,
+            Self::Resolved => ConflictResolutionState::Resolved,
+        }
+    }
+}
+
+impl TryFrom<ConflictResolutionState> for ConflictResolutionUpdate {
+    type Error = CoveyTypeValidationError;
+
+    fn try_from(state: ConflictResolutionState) -> Result<Self, Self::Error> {
+        match state {
+            ConflictResolutionState::Acknowledged => Ok(Self::Acknowledged),
+            ConflictResolutionState::Resolved => Ok(Self::Resolved),
+            ConflictResolutionState::Open => Err(CoveyTypeValidationError::new(
+                "resolution_state",
+                "resolve conflict requests must acknowledge or resolve conflicts",
+            )),
+        }
+    }
+}
+
+impl Serialize for ResolveConflictReq {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        RawResolveConflictReq::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResolveConflictReq {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        RawResolveConflictReq::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<&ResolveConflictReq> for RawResolveConflictReq {
+    fn from(req: &ResolveConflictReq) -> Self {
+        Self {
+            session_token: req.session_token.clone(),
+            conflict_id: req.conflict_id.clone(),
+            resolution_state: req.resolution_state(),
+            idempotency_key: req.idempotency_key.clone(),
+        }
+    }
+}
+
+impl TryFrom<RawResolveConflictReq> for ResolveConflictReq {
+    type Error = CoveyTypeValidationError;
+
+    fn try_from(raw: RawResolveConflictReq) -> Result<Self, Self::Error> {
+        Ok(Self {
+            session_token: raw.session_token,
+            conflict_id: raw.conflict_id,
+            resolution: ConflictResolutionUpdate::try_from(raw.resolution_state)?,
+            idempotency_key: raw.idempotency_key,
         })
     }
 }

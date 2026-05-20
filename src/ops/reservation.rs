@@ -41,11 +41,12 @@ impl Covey {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("owner_subtask_id", &req.owner_subtask_id, MAX_OBJECT_ID_LEN)?;
                     ensure_subtask_exists(tx, &req.owner_subtask_id)?;
-                    ensure_generated_member_count(req.generated_members().len())?;
+                    let generated_members = req.generated_members();
+                    ensure_generated_member_count(generated_members.len())?;
                     let normalized_scope_key =
                         normalize_scope_key(req.scope_class(), req.scope_key())?;
                     ensure_length("reservation_scope_key", &normalized_scope_key, MAX_PATH_LEN)?;
-                    let normalized_members = normalize_generated_members(req.generated_members())?;
+                    let normalized_members = normalize_generated_members(&generated_members)?;
                     ensure_reservation_scope_shape(
                         req.scope_class(),
                         &normalized_scope_key,
@@ -149,7 +150,7 @@ impl Covey {
                     resolve_reservation_overlap_conflicts(tx, req.reservation_id.as_str(), now)?;
                     let scope_class = reservation.scope_class();
                     let scope_key = reservation.scope_key().to_owned();
-                    let generated_members = reservation.generated_members().to_vec();
+                    let generated_members = reservation.generated_members();
                     let created_at = reservation.created_at();
                     let released = Reservation::try_from_parts(
                         reservation.reservation_id,
@@ -236,7 +237,7 @@ impl Covey {
                     }
                     let scope_class = reservation.scope_class();
                     let scope_key = reservation.scope_key().to_owned();
-                    let generated_members = reservation.generated_members().to_vec();
+                    let generated_members = reservation.generated_members();
                     let created_at = reservation.created_at();
                     let renewed = Reservation::try_from_parts(
                         reservation.reservation_id,
@@ -280,8 +281,9 @@ impl Covey {
         let started_at = Instant::now();
         let normalized_scope_key = normalize_scope_key(req.scope_class(), req.scope_key())?;
         ensure_length("reservation_scope_key", &normalized_scope_key, MAX_PATH_LEN)?;
-        ensure_generated_member_count(req.generated_members().len())?;
-        let normalized_members = normalize_generated_members(req.generated_members())?;
+        let generated_members = req.generated_members();
+        ensure_generated_member_count(generated_members.len())?;
+        let normalized_members = normalize_generated_members(&generated_members)?;
         ensure_reservation_scope_shape(
             req.scope_class(),
             &normalized_scope_key,
@@ -373,16 +375,16 @@ impl Covey {
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
-                &req.session_token,
+                req.session_token(),
                 "resolve_conflict",
-                &req.idempotency_key,
+                req.idempotency_key(),
                 &req,
                 crate::model::TimestampMs::parse(now)?,
                 || {
-                    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
+                    require_role(tx, req.session_token(), &[SessionRole::Orchestrator])?;
                     let updated = tx.execute(
                         "UPDATE conflicts SET resolution_state = ?2 WHERE conflict_id = ?1",
-                        params![req.conflict_id, req.resolution_state.to_string()],
+                        params![req.conflict_id(), req.resolution_state().to_string()],
                     )?;
                     if updated == 0 {
                         return Err(CoveyError::ConflictNotFound);
@@ -391,8 +393,8 @@ impl Covey {
                         tx,
                         EventType::ConflictResolved,
                         ObjectType::Conflict,
-                        req.conflict_id.as_str(),
-                        &req.session_token,
+                        req.conflict_id().as_str(),
+                        req.session_token(),
                         &req,
                         now,
                     )?;
@@ -402,10 +404,10 @@ impl Covey {
         });
         self.log_operation(
             "resolve_conflict",
-            &req.session_token,
+            req.session_token(),
             started_at,
             &result,
-            |_| vec![format!("conflict:{}", req.conflict_id)],
+            |_| vec![format!("conflict:{}", req.conflict_id())],
         );
         result
     }

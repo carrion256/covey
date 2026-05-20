@@ -10,7 +10,7 @@ use covey::{
     HeartbeatReq, IdempotencyKey, ManualClock, MarkAppliedReq, MarkInFlightReq, PublishArtifactReq,
     RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
     RequestReservationReq, RequestReviewReq, ScopeClass, SessionRole, SessionState,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SubtaskTitle,
 };
 use rusqlite::params;
 use tempfile::TempDir;
@@ -328,7 +328,7 @@ fn attest(covey: &Covey, session_token: &str) {
                 None,
                 format!("blake3:{session_token}-transcript"),
                 1_700_000_000_000,
-                1_700_000_000_001,
+                1_700_000_000_000,
                 format!("record-runtime-attestation-{session_token}"),
             )
             .expect("valid runtime attestation request"),
@@ -361,7 +361,7 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
             subtask_id: Some(
                 covey::SubtaskId::parse("codex_disappears_work").expect("valid subtask id"),
             ),
-            title: "codex disappears work".into(),
+            title: SubtaskTitle::parse("codex disappears work").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
@@ -467,7 +467,7 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
                 .expect("valid session token"),
             meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
             subtask_id: Some(covey::SubtaskId::parse("unattended_work").expect("valid subtask id")),
-            title: "unattended work".into(),
+            title: SubtaskTitle::parse("unattended work").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })

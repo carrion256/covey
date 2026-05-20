@@ -12,8 +12,6 @@ mod types;
 mod views;
 
 pub use imports::*;
-#[allow(unused_imports)]
-pub use records::ReservationScope;
 pub use records::{
     AppliedReadyQueueItem, ApplyVerification, Artifact, CancelledReadyQueueItem, Claim, Conflict,
     DecidedReview, Event, EventPayload, ExpiredCountPayload, InFlightReadyQueueItem,
@@ -22,16 +20,18 @@ pub use records::{
     ReviewCommon, ReviewSubtask, ReviewTarget, RuntimeAttestation, Session, StaleSessionsPayload,
     Subtask, SubtaskLifecycle, SupersededReadyQueueItem, SupersededReview, TypedEvent, WorkSubtask,
 };
+#[allow(unused_imports)]
+pub use records::{GeneratedReservationMembers, ReservationScope, ReservationScopeKey};
 pub use requests::*;
 pub use state::*;
 pub use types::{
     AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, CoveyTypeValidationError,
     EventObjectId, EventSeq, FenceSeq, FindingsDigest, IdempotencyKey, LeaseDeadlineMs,
-    LeaseDurationMs, MetaTaskId, ModelId, OpenSpecChangeId, OpenSpecDigest, ProviderId,
+    LeaseDurationMs, MetaTaskId, ModelId, OpenSpecChangeId, OpenSpecDigest, PromptText, ProviderId,
     ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsClaimRef, RepoopsPath, ReservationId,
     ReviewId, RuntimeContainerId, RuntimeProcessId, SessionHeartbeatTick, SessionToken,
-    SourceIssueId, SubtaskId, SubtaskPriority, TimestampMs, VerifierId,
+    SourceIssueId, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
 };
 pub use views::*;
 

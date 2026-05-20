@@ -8,7 +8,7 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         CreateSubtaskRequest, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
-        ImportBdV1SkipReason, SessionToken, bd_import_v1_subtask_id,
+        ImportBdV1SkipReason, SessionToken, SourceIssueId, bd_import_v1_subtask_id,
     },
     ops::meta_task::submit_meta_task_tx,
     ops::workflow::create_subtask_tx,
@@ -278,8 +278,13 @@ fn import_bd_v1_source_rows_tx(
                 }
             }
             SourceIssueEligibility::Skip(skip_reason) => {
+                let source_issue_id = if SourceIssueId::parse(issue.id.clone()).is_ok() {
+                    issue.id.clone()
+                } else {
+                    format!("invalid-source-issue-{}", items.len() + 1)
+                };
                 items.push(ImportBdV1ItemResult::skipped(
-                    issue.id.clone(),
+                    source_issue_id,
                     None,
                     skip_reason,
                 ));

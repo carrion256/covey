@@ -1747,22 +1747,22 @@ enum OpenSpecImportProvenanceObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RawOpenSpecImportProvenance {
-    pub(crate) object_type: ObjectType,
-    pub(crate) object_id: String,
-    pub(crate) planning_format: String,
-    pub(crate) openspec_change_id: String,
-    pub(crate) openspec_change_path: String,
-    pub(crate) openspec_task_id: Option<String>,
-    pub(crate) proposal_digest: Option<String>,
-    pub(crate) design_digest: Option<String>,
-    pub(crate) tasks_digest: String,
-    pub(crate) spec_digests: Vec<OpenSpecSourceDigest>,
-    pub(crate) source_digests: Vec<OpenSpecSourceDigest>,
-    pub(crate) mission_artifact_digests: Vec<OpenSpecSourceDigest>,
-    pub(crate) mission_artifacts: Vec<String>,
-    pub(crate) task_digest: Option<String>,
-    pub(crate) updated_at: TimestampMs,
+struct RawOpenSpecImportProvenance {
+    object_type: ObjectType,
+    object_id: String,
+    planning_format: String,
+    openspec_change_id: String,
+    openspec_change_path: String,
+    openspec_task_id: Option<String>,
+    proposal_digest: Option<String>,
+    design_digest: Option<String>,
+    tasks_digest: String,
+    spec_digests: Vec<OpenSpecSourceDigest>,
+    source_digests: Vec<OpenSpecSourceDigest>,
+    mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+    mission_artifacts: Vec<String>,
+    task_digest: Option<String>,
+    updated_at: TimestampMs,
 }
 
 impl OpenSpecImportProvenanceCommon {
@@ -1905,8 +1905,46 @@ impl OpenSpecImportProvenance {
         })
     }
 
+    /// Parses flat storage columns into object-kind-specific provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_storage_parts(
+        object_type: ObjectType,
+        object_id: String,
+        planning_format: String,
+        openspec_change_id: String,
+        openspec_change_path: String,
+        openspec_task_id: Option<String>,
+        proposal_digest: Option<String>,
+        design_digest: Option<String>,
+        tasks_digest: String,
+        spec_digests: Vec<OpenSpecSourceDigest>,
+        source_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifacts: Vec<String>,
+        task_digest: Option<String>,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        Self::from_raw(RawOpenSpecImportProvenance {
+            object_type,
+            object_id,
+            planning_format,
+            openspec_change_id,
+            openspec_change_path,
+            openspec_task_id,
+            proposal_digest,
+            design_digest,
+            tasks_digest,
+            spec_digests,
+            source_digests,
+            mission_artifact_digests,
+            mission_artifacts,
+            task_digest,
+            updated_at,
+        })
+    }
+
     /// Parses the flat persisted/wire shape into object-kind-specific provenance.
-    pub(crate) fn from_raw(raw: RawOpenSpecImportProvenance) -> Result<Self, String> {
+    fn from_raw(raw: RawOpenSpecImportProvenance) -> Result<Self, String> {
         let object = OpenSpecImportProvenanceObject::try_from_raw_parts(
             raw.object_type,
             raw.object_id,
@@ -1933,7 +1971,7 @@ impl OpenSpecImportProvenance {
 
     /// Returns a flat persisted/wire representation.
     #[must_use]
-    pub(crate) fn to_raw(&self) -> RawOpenSpecImportProvenance {
+    fn to_raw(&self) -> RawOpenSpecImportProvenance {
         RawOpenSpecImportProvenance {
             object_type: self.object_type(),
             object_id: self.object_id().to_owned(),

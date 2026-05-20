@@ -60,18 +60,18 @@ pub(super) fn load_openspec_source_snapshot(
         &spec_digests,
     )?;
 
-    Ok(OpenSpecSourceSnapshot {
-        change_id: change_id.to_owned(),
-        change_path: normalize_relative_path(&change_path),
+    OpenSpecSourceSnapshot::try_from_raw_parts(
+        change_id.to_owned(),
+        normalize_relative_path(&change_path),
+        mission_packet.tasks,
         proposal_digest,
         design_digest,
         tasks_digest,
-        tasks: mission_packet.tasks,
         spec_digests,
-        source_digests: mission_packet.source_digests,
-        mission_artifact_digests: mission_packet.artifact_digests,
-        mission_artifacts: mission_packet.artifact_paths,
-    })
+        mission_packet.source_digests,
+        mission_packet.artifact_digests,
+        mission_packet.artifact_paths,
+    )
 }
 
 fn validate_source_digest_binding(

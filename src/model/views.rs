@@ -5,10 +5,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeErr
 use strum::Display;
 
 use super::{
-    Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask, MetaTaskId,
-    QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget, Session,
+    AgentPrincipalId, Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask,
+    MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget, Session,
     SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow,
-    SubtaskState, TimestampMs, VerifierId,
+    SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -18,7 +18,7 @@ use super::{
 pub struct SubtaskView {
     pub subtask_id: SubtaskId,
     pub meta_task_id: MetaTaskId,
-    pub title: String,
+    pub title: SubtaskTitle,
     kind: SubtaskViewKind,
     lifecycle: SubtaskLifecycle,
     pub priority: SubtaskPriority,
@@ -57,7 +57,7 @@ impl SubtaskView {
     fn new(
         subtask_id: SubtaskId,
         meta_task_id: MetaTaskId,
-        title: String,
+        title: SubtaskTitle,
         kind: SubtaskViewKind,
         lifecycle: SubtaskLifecycle,
         priority: SubtaskPriority,
@@ -186,7 +186,7 @@ impl From<&SubtaskView> for RawSubtaskView {
         Self {
             subtask_id: view.subtask_id.clone(),
             meta_task_id: view.meta_task_id.clone(),
-            title: view.title.clone(),
+            title: view.title.as_str().to_owned(),
             kind: view.kind(),
             review_target: view.review_target().cloned(),
             state: view.state(),
@@ -213,7 +213,8 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
         Self::new(
             raw.subtask_id,
             raw.meta_task_id,
-            raw.title,
+            SubtaskTitle::parse(raw.title)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
             kind,
             lifecycle,
             raw.priority,
@@ -1409,7 +1410,7 @@ pub struct RepoopsAuthorityPolicyFact {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RepoopsAuthorityPolicy {
-    Enforce { phase: u8 },
+    Enforce,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1421,9 +1422,9 @@ struct RawRepoopsAuthorityPolicyFact {
 
 impl RepoopsAuthorityPolicyFact {
     /// Builds one enforce-mode policy fact.
-    pub const fn enforce(phase: u8) -> Self {
+    pub const fn enforce() -> Self {
         Self {
-            policy: RepoopsAuthorityPolicy::Enforce { phase },
+            policy: RepoopsAuthorityPolicy::Enforce,
         }
     }
 
@@ -1446,6 +1447,8 @@ impl RepoopsAuthorityPolicyFact {
 }
 
 impl RepoopsAuthorityPolicy {
+    const ENFORCE_PHASE: u8 = 2;
+
     fn try_from_parts(
         mode: RepoopsAuthorityPolicyMode,
         phase: u8,
@@ -1458,26 +1461,29 @@ impl RepoopsAuthorityPolicy {
                         "enforce repoops policy fact must not include denied_rule_id".into(),
                     );
                 }
-                Ok(Self::Enforce { phase })
+                if phase != Self::ENFORCE_PHASE {
+                    return Err("enforce repoops policy fact phase is not supported".into());
+                }
+                Ok(Self::Enforce)
             }
         }
     }
 
     const fn mode(&self) -> RepoopsAuthorityPolicyMode {
         match self {
-            Self::Enforce { .. } => RepoopsAuthorityPolicyMode::Enforce,
+            Self::Enforce => RepoopsAuthorityPolicyMode::Enforce,
         }
     }
 
     const fn phase(&self) -> u8 {
         match self {
-            Self::Enforce { phase } => *phase,
+            Self::Enforce => Self::ENFORCE_PHASE,
         }
     }
 
     const fn denied_rule_id(&self) -> Option<&String> {
         match self {
-            Self::Enforce { .. } => None,
+            Self::Enforce => None,
         }
     }
 }
@@ -1523,7 +1529,7 @@ pub enum RepoopsAuthorityPolicyMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthorityClaimFact {
     pub claim_id: ClaimId,
-    owner: String,
+    owner: AgentPrincipalId,
     scope_in: Vec<RepoopsScopePattern>,
     scope_out: Vec<RepoopsScopePattern>,
     has_required_contract_fields: bool,
@@ -1568,7 +1574,7 @@ impl RepoopsAuthorityClaimFact {
     /// required contract fields are marked present without an inclusion scope.
     pub fn in_progress(
         claim_id: ClaimId,
-        owner: String,
+        owner: impl Into<String>,
         scope_in: Vec<String>,
         scope_out: Vec<String>,
         has_required_contract_fields: bool,
@@ -1594,7 +1600,7 @@ impl RepoopsAuthorityClaimFact {
     /// required contract fields are marked present without an inclusion scope.
     pub fn open(
         claim_id: ClaimId,
-        owner: String,
+        owner: impl Into<String>,
         scope_in: Vec<String>,
         scope_out: Vec<String>,
         has_required_contract_fields: bool,
@@ -1617,7 +1623,7 @@ impl RepoopsAuthorityClaimFact {
     /// Returns the owner reference for this claim fact.
     #[must_use]
     pub fn owner(&self) -> &str {
-        &self.owner
+        self.owner.as_str()
     }
 
     /// Returns inclusion scope patterns for this claim fact.
@@ -1646,18 +1652,13 @@ impl RepoopsAuthorityClaimFact {
 
     fn from_parts(
         claim_id: ClaimId,
-        owner: String,
+        owner: impl Into<String>,
         scope_in: Vec<String>,
         scope_out: Vec<String>,
         has_required_contract_fields: bool,
         lifecycle: RepoopsAuthorityClaimLifecycle,
     ) -> Result<Self, String> {
-        if owner.trim().is_empty() {
-            return Err("repoops claim facts require an owner".into());
-        }
-        if owner.trim() != owner {
-            return Err("repoops claim fact owner must be normalized".into());
-        }
+        let owner = AgentPrincipalId::parse(owner.into()).map_err(|err| err.to_string())?;
         let scope_in = parse_repoops_scope_patterns("claim.scope_in", scope_in)?;
         let scope_out = parse_repoops_scope_patterns("claim.scope_out", scope_out)?;
         if has_required_contract_fields && scope_in.is_empty() {
@@ -1721,7 +1722,7 @@ impl Serialize for RepoopsAuthorityClaimFact {
         RawRepoopsAuthorityClaimFact {
             claim_id: self.claim_id.clone(),
             status: self.status(),
-            owner: self.owner.clone(),
+            owner: self.owner.to_string(),
             scope_in: self.scope_in.iter().map(ToString::to_string).collect(),
             scope_out: self.scope_out.iter().map(ToString::to_string).collect(),
             has_required_contract_fields: self.has_required_contract_fields,
@@ -1895,16 +1896,22 @@ pub struct RepoopsAuthorityLockFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RepoopsAuthorityLock {
     Owned {
-        path: String,
-        owner: String,
+        path: RepoopsLockPath,
+        owner: RepoopsLockOwner,
         claim_id: RepoopsClaimRef,
     },
     ForeignOwner {
-        path: String,
-        owner: String,
+        path: RepoopsLockPath,
+        owner: RepoopsLockOwner,
         claim_id: RepoopsClaimRef,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsLockPath(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsLockOwner(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawRepoopsAuthorityLockFact {
@@ -1989,8 +1996,8 @@ impl RepoopsAuthorityLock {
         claim_id: RepoopsClaimRef,
         status: RepoopsAuthorityLockStatus,
     ) -> Result<Self, String> {
-        validate_repoops_lock_path(&path)?;
-        validate_repoops_lock_owner(&owner)?;
+        let path = RepoopsLockPath::parse(path)?;
+        let owner = RepoopsLockOwner::parse(owner)?;
         Ok(match status {
             RepoopsAuthorityLockStatus::Owned => Self::Owned {
                 path,
@@ -2007,13 +2014,13 @@ impl RepoopsAuthorityLock {
 
     fn path(&self) -> &str {
         match self {
-            Self::Owned { path, .. } | Self::ForeignOwner { path, .. } => path,
+            Self::Owned { path, .. } | Self::ForeignOwner { path, .. } => path.as_str(),
         }
     }
 
     fn owner(&self) -> &str {
         match self {
-            Self::Owned { owner, .. } | Self::ForeignOwner { owner, .. } => owner,
+            Self::Owned { owner, .. } | Self::ForeignOwner { owner, .. } => owner.as_str(),
         }
     }
 
@@ -2072,24 +2079,37 @@ impl TryFrom<RawRepoopsAuthorityLockFact> for RepoopsAuthorityLockFact {
     }
 }
 
-fn validate_repoops_lock_path(path: &str) -> Result<(), String> {
-    validate_repoops_project_path("repoops lock path", path)?;
-    if path.starts_with('/') || path.starts_with('\\') {
-        return Err("repoops lock path must be repo-relative".to_owned());
-    }
-    if path.contains('\\') {
-        return Err("repoops lock path must be normalized".to_owned());
-    }
-    for part in path.split('/') {
-        if matches!(part, "" | "." | "..") {
+impl RepoopsLockPath {
+    fn parse(path: String) -> Result<Self, String> {
+        validate_repoops_project_path("repoops lock path", &path)?;
+        if path.starts_with('/') || path.starts_with('\\') {
+            return Err("repoops lock path must be repo-relative".to_owned());
+        }
+        if path.contains('\\') {
             return Err("repoops lock path must be normalized".to_owned());
         }
+        for part in path.split('/') {
+            if matches!(part, "" | "." | "..") {
+                return Err("repoops lock path must be normalized".to_owned());
+            }
+        }
+        Ok(Self(path))
     }
-    Ok(())
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-fn validate_repoops_lock_owner(owner: &str) -> Result<(), String> {
-    validate_repoops_project_path("repoops lock owner", owner)
+impl RepoopsLockOwner {
+    fn parse(owner: String) -> Result<Self, String> {
+        validate_repoops_project_path("repoops lock owner", &owner)?;
+        Ok(Self(owner))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Path lock ownership status exposed to mutAI repoops authority.
@@ -2114,11 +2134,17 @@ pub struct RepoopsAuthorityGitContextFact {
 enum RepoopsAuthorityGitContext {
     Unknown,
     KnownPaths {
-        policy_project_path: String,
-        execution_project_path: String,
-        repo_path_prefix: Option<String>,
+        policy_project_path: RepoopsProjectPath,
+        execution_project_path: RepoopsProjectPath,
+        repo_path_prefix: Option<RepoopsRepoPathPrefix>,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsProjectPath(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsRepoPathPrefix(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawRepoopsAuthorityGitContextFact {
@@ -2220,19 +2246,16 @@ impl RepoopsAuthorityGitContext {
         ) {
             (None, None, None) => Ok(Self::Unknown),
             (Some(policy_project_path), Some(execution_project_path), repo_path_prefix) => {
-                validate_repoops_project_path(
+                let policy_project_path = RepoopsProjectPath::parse(
                     "git_context.policy_project_path",
-                    &policy_project_path,
+                    policy_project_path,
                 )?;
-                validate_repoops_project_path(
+                let execution_project_path = RepoopsProjectPath::parse(
                     "git_context.execution_project_path",
-                    &execution_project_path,
+                    execution_project_path,
                 )?;
                 let repo_path_prefix = repo_path_prefix
-                    .map(|prefix| {
-                        validate_repoops_repo_path_prefix(&prefix)?;
-                        Ok::<_, String>(prefix)
-                    })
+                    .map(RepoopsRepoPathPrefix::parse)
                     .transpose()?;
                 Ok(Self::KnownPaths {
                     policy_project_path,
@@ -2253,7 +2276,7 @@ impl RepoopsAuthorityGitContext {
             Self::KnownPaths {
                 policy_project_path,
                 ..
-            } => Some(policy_project_path),
+            } => Some(policy_project_path.as_str()),
         }
     }
 
@@ -2263,7 +2286,7 @@ impl RepoopsAuthorityGitContext {
             Self::KnownPaths {
                 execution_project_path,
                 ..
-            } => Some(execution_project_path),
+            } => Some(execution_project_path.as_str()),
         }
     }
 
@@ -2272,7 +2295,7 @@ impl RepoopsAuthorityGitContext {
             Self::Unknown => None,
             Self::KnownPaths {
                 repo_path_prefix, ..
-            } => repo_path_prefix.as_deref(),
+            } => repo_path_prefix.as_ref().map(RepoopsRepoPathPrefix::as_str),
         }
     }
 }
@@ -2298,6 +2321,28 @@ fn validate_repoops_repo_path_prefix(prefix: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+impl RepoopsProjectPath {
+    fn parse(label: &str, path: String) -> Result<Self, String> {
+        validate_repoops_project_path(label, &path)?;
+        Ok(Self(path))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl RepoopsRepoPathPrefix {
+    fn parse(prefix: String) -> Result<Self, String> {
+        validate_repoops_repo_path_prefix(&prefix)?;
+        Ok(Self(prefix))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Serialize for RepoopsAuthorityGitContextFact {
@@ -2335,28 +2380,37 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityGitContextFact {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthoritySnapshot {
-    schema_version: String,
-    agent_id: String,
+    schema_version: RepoopsAuthoritySnapshotSchemaVersion,
+    agent_id: AgentPrincipalId,
     subject: RepoopsAuthoritySnapshotSubject,
     policy: RepoopsAuthorityPolicyFact,
     scope: RepoopsAuthorityScopeFact,
     locks: Vec<RepoopsAuthorityLockFact>,
     git_context: Option<RepoopsAuthorityGitContextFact>,
-    fact_sources: Vec<String>,
+    fact_sources: RepoopsAuthorityFactSources,
 }
 
 /// Fields shared by all repoops authority snapshot subjects.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthoritySnapshotCommon {
-    schema_version: String,
-    agent_id: String,
+    schema_version: RepoopsAuthoritySnapshotSchemaVersion,
+    agent_id: AgentPrincipalId,
     policy: RepoopsAuthorityPolicyFact,
     scope: RepoopsAuthorityScopeFact,
     locks: Vec<RepoopsAuthorityLockFact>,
     git_context: Option<RepoopsAuthorityGitContextFact>,
-    fact_sources: Vec<String>,
+    fact_sources: RepoopsAuthorityFactSources,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepoopsAuthoritySnapshotSchemaVersion;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsAuthorityFactSource(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoopsAuthorityFactSources(Vec<RepoopsAuthorityFactSource>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RepoopsAuthoritySnapshotSubject {
@@ -2379,11 +2433,87 @@ impl RepoopsAuthorityConstraintReason {
         if value.trim().is_empty() {
             return Err("constrained repoops authority snapshots require constraint_reason".into());
         }
+        if value.trim() != value {
+            return Err(
+                "constrained repoops authority snapshot constraint_reason must be normalized"
+                    .into(),
+            );
+        }
+        if value.chars().any(char::is_control) {
+            return Err(
+                "constrained repoops authority snapshot constraint_reason must not contain control characters"
+                    .into(),
+            );
+        }
         Ok(Self(value))
     }
 
     fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl RepoopsAuthoritySnapshotSchemaVersion {
+    const V1: &'static str = "covey_repoops_authority_snapshot.v1";
+
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("repoops authority snapshots require schema_version".into());
+        }
+        if value.trim() != value {
+            return Err("repoops authority snapshot schema_version must be normalized".into());
+        }
+        if value != Self::V1 {
+            return Err("repoops authority snapshot schema_version is not supported".into());
+        }
+        Ok(Self)
+    }
+
+    const fn as_str(&self) -> &str {
+        Self::V1
+    }
+}
+
+impl RepoopsAuthorityFactSource {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("repoops authority snapshot fact_sources must be non-empty".into());
+        }
+        if value.trim() != value {
+            return Err("repoops authority snapshot fact_sources must be normalized".into());
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl RepoopsAuthorityFactSources {
+    fn parse(values: Vec<String>) -> Result<Self, String> {
+        Ok(Self(
+            values
+                .into_iter()
+                .map(RepoopsAuthorityFactSource::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
+    }
+
+    fn as_refs(&self) -> Vec<&str> {
+        self.0
+            .iter()
+            .map(RepoopsAuthorityFactSource::as_str)
+            .collect()
+    }
+
+    fn as_strings(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|source| source.as_str().to_owned())
+            .collect()
     }
 }
 
@@ -2408,7 +2538,7 @@ impl RepoopsAuthoritySnapshotCommon {
     ///
     /// # Errors
     ///
-    /// Returns an error when identity or provenance fields are blank or padded.
+    /// Returns an error when identity or provenance fields are invalid.
     pub fn new(
         schema_version: String,
         agent_id: String,
@@ -2418,15 +2548,14 @@ impl RepoopsAuthoritySnapshotCommon {
         git_context: Option<RepoopsAuthorityGitContextFact>,
         fact_sources: Vec<String>,
     ) -> Result<Self, String> {
-        validate_repoops_authority_snapshot_common(&schema_version, &agent_id, &fact_sources)?;
         Ok(Self {
-            schema_version,
-            agent_id,
+            schema_version: RepoopsAuthoritySnapshotSchemaVersion::parse(schema_version)?,
+            agent_id: AgentPrincipalId::parse(agent_id).map_err(|err| err.to_string())?,
             policy,
             scope,
             locks,
             git_context,
-            fact_sources,
+            fact_sources: RepoopsAuthorityFactSources::parse(fact_sources)?,
         })
     }
 }
@@ -2440,8 +2569,8 @@ impl RepoopsAuthoritySnapshot {
     ) -> Result<Self, String> {
         let claim_id = claim.claim_id.clone();
         validate_repoops_authority_locks(
-            &common.agent_id,
-            Some((&claim_id, &claim.owner)),
+            common.agent_id.as_str(),
+            Some((&claim_id, claim.owner.as_str())),
             &common.locks,
         )?;
         Ok(Self {
@@ -2466,7 +2595,7 @@ impl RepoopsAuthoritySnapshot {
         constraint_reason: String,
     ) -> Result<Self, String> {
         let constraint_reason = RepoopsAuthorityConstraintReason::parse(constraint_reason)?;
-        validate_repoops_authority_locks(&common.agent_id, None, &common.locks)?;
+        validate_repoops_authority_locks(common.agent_id.as_str(), None, &common.locks)?;
         Ok(Self {
             schema_version: common.schema_version,
             agent_id: common.agent_id,
@@ -2491,13 +2620,13 @@ impl RepoopsAuthoritySnapshot {
     /// Returns the snapshot schema version.
     #[must_use]
     pub fn schema_version(&self) -> &str {
-        &self.schema_version
+        self.schema_version.as_str()
     }
 
     /// Returns the agent selected by Covey for these authority facts.
     #[must_use]
     pub fn agent_id(&self) -> &str {
-        &self.agent_id
+        self.agent_id.as_str()
     }
 
     /// Returns the caller ownership token reference for claim-bound snapshots.
@@ -2563,8 +2692,8 @@ impl RepoopsAuthoritySnapshot {
 
     /// Returns provenance strings for this authority snapshot.
     #[must_use]
-    pub fn fact_sources(&self) -> &[String] {
-        &self.fact_sources
+    pub fn fact_sources(&self) -> Vec<&str> {
+        self.fact_sources.as_refs()
     }
 }
 
@@ -2620,7 +2749,7 @@ impl Serialize for RepoopsAuthoritySnapshot {
             locks: self.locks.clone(),
             git_context: self.git_context().cloned(),
             constraint_reason: self.constraint_reason().map(str::to_owned),
-            fact_sources: self.fact_sources().to_vec(),
+            fact_sources: self.fact_sources.as_strings(),
         }
         .serialize(serializer)
     }
@@ -2651,7 +2780,7 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshot {
         )
         .map_err(serde::de::Error::custom)?;
         validate_repoops_authority_locks(
-            &common.agent_id,
+            common.agent_id.as_str(),
             subject.claim_owner_ref(),
             &common.locks,
         )
@@ -2712,34 +2841,6 @@ fn validate_repoops_authority_locks(
                     );
                 }
             }
-        }
-    }
-    Ok(())
-}
-
-fn validate_repoops_authority_snapshot_common(
-    schema_version: &str,
-    agent_id: &str,
-    fact_sources: &[String],
-) -> Result<(), String> {
-    if schema_version.trim().is_empty() {
-        return Err("repoops authority snapshots require schema_version".into());
-    }
-    if schema_version.trim() != schema_version {
-        return Err("repoops authority snapshot schema_version must be normalized".into());
-    }
-    if agent_id.trim().is_empty() {
-        return Err("repoops authority snapshots require agent_id".into());
-    }
-    if agent_id.trim() != agent_id {
-        return Err("repoops authority snapshot agent_id must be normalized".into());
-    }
-    for source in fact_sources {
-        if source.trim().is_empty() {
-            return Err("repoops authority snapshot fact_sources must be non-empty".into());
-        }
-        if source.trim() != source {
-            return Err("repoops authority snapshot fact_sources must be normalized".into());
         }
     }
     Ok(())

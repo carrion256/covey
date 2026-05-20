@@ -20,10 +20,10 @@ fn openspec_task_parser_accepts_stable_checklist_ids() {
     .expect("valid tasks");
 
     assert_eq!(tasks.len(), 2);
-    assert_eq!(tasks[0].task_id, "1.1");
-    assert_eq!(tasks[0].title, "Add CLI");
-    assert!(tasks[0].task_digest.starts_with("blake3:"));
-    assert_eq!(tasks[0].task_digest.len(), 71);
+    assert_eq!(tasks[0].task_id.as_str(), "1.1");
+    assert_eq!(tasks[0].title.as_str(), "Add CLI");
+    assert!(tasks[0].task_digest.as_str().starts_with("blake3:"));
+    assert_eq!(tasks[0].task_digest.as_str().len(), 71);
 }
 
 #[test]
@@ -144,13 +144,22 @@ fn openspec_mission_packet_loader_accepts_compiled_better_droid_artifacts() {
         load_openspec_source_snapshot(tmp.path().to_str().expect("root path"), "compiled-import")
             .expect("source snapshot");
 
-    assert_eq!(source.change_id, "compiled-import");
-    assert_eq!(source.change_path, "openspec/changes/compiled-import");
+    assert_eq!(source.change_id.as_str(), "compiled-import");
+    assert_eq!(
+        source.change_path.as_str(),
+        "openspec/changes/compiled-import"
+    );
     assert_eq!(source.tasks.len(), 1);
-    assert_eq!(source.tasks[0].task_id, "1.1");
-    assert_eq!(source.tasks[0].task_type.as_deref(), Some("implementation"));
-    assert!(source.tasks[0].task_digest.starts_with("blake3:"));
-    assert_eq!(source.tasks[0].task_digest.len(), 71);
+    assert_eq!(source.tasks[0].task_id.as_str(), "1.1");
+    assert_eq!(
+        source.tasks[0]
+            .task_type
+            .as_ref()
+            .map(|value| value.as_str()),
+        Some("implementation")
+    );
+    assert!(source.tasks[0].task_digest.as_str().starts_with("blake3:"));
+    assert_eq!(source.tasks[0].task_digest.as_str().len(), 71);
     assert_eq!(source.mission_artifacts.len(), 8);
     assert_eq!(source.mission_artifact_digests.len(), 8);
     assert!(

@@ -1,10 +1,11 @@
 //! Covey-owned apply proof replay and sealing.
 
 use crate::model::{
-    ArtifactDigest, ArtifactManifestPath, ChangedPathsDigest, CommandTranscriptDigest, FenceSeq,
-    FindingsDigest, LeaseDeadlineMs, ModelId, ProviderId, ProviderRunId, ProviderRunIdIssuer,
-    QueueId, ReadyQueueState, ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId,
-    RuntimeProcessId, SessionRole, SessionState, SessionToken, SubtaskId, TimestampMs, VerifierId,
+    AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactManifestPath, ChangedPathsDigest,
+    CommandTranscriptDigest, FenceSeq, FindingsDigest, LeaseDeadlineMs, ModelId, ProviderId,
+    ProviderRunId, ProviderRunIdIssuer, QueueId, ReadyQueueState, ReviewId, ReviewState,
+    ReviewVerdict, RuntimeContainerId, RuntimeProcessId, SessionRole, SessionState, SessionToken,
+    SubtaskId, TimestampMs, VerifierId,
 };
 use clap::Parser;
 use rusqlite::{Connection, Row, params};
@@ -12,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command,
     str::FromStr,
 };
@@ -27,83 +28,83 @@ const BATCH_SEAL_SCHEMA: &str = "mutai_covey_apply_proof_batch_seal.v1";
 #[derive(Debug, Parser)]
 pub struct ApplyProofVerifyArgs {
     #[arg(long)]
-    pub input: Option<PathBuf>,
+    input: Option<PathBuf>,
     #[arg(long)]
-    pub repo: Option<PathBuf>,
+    repo: Option<PathBuf>,
     #[arg(long = "covey-db")]
-    pub covey_db: Option<PathBuf>,
+    covey_db: Option<PathBuf>,
     #[arg(long = "evidence-dir")]
-    pub evidence_dir: Option<PathBuf>,
+    evidence_dir: Option<PathBuf>,
     #[arg(long = "subtask-id")]
-    pub subtask_id: Option<String>,
+    subtask_id: Option<SubtaskId>,
     #[arg(long = "artifact-digest")]
-    pub artifact_digest: Option<String>,
+    artifact_digest: Option<ArtifactDigest>,
     #[arg(long = "review-id")]
-    pub review_id: Option<String>,
+    review_id: Option<ReviewId>,
     #[arg(long = "queue-id")]
-    pub queue_id: Option<String>,
+    queue_id: Option<QueueId>,
     #[arg(long = "reviewer-findings-digest")]
-    pub reviewer_findings_digest: Option<String>,
+    reviewer_findings_digest: Option<FindingsDigest>,
     #[arg(long = "apply-gate-session-token")]
-    pub apply_gate_session_token: Option<String>,
+    apply_gate_session_token: Option<SessionToken>,
     #[arg(long, default_value = "mutai-rs")]
-    pub verifier: String,
+    verifier: VerifierId,
     #[arg(long = "verdict-digest")]
-    pub verdict_digest: Option<String>,
+    verdict_digest: Option<ArtifactDigest>,
     #[arg(long = "apply-verification-seal-digest")]
-    pub apply_verification_seal_digest: Option<String>,
+    apply_verification_seal_digest: Option<ArtifactDigest>,
     #[arg(long = "mainline-ref")]
-    pub mainline_ref: Option<String>,
+    mainline_ref: Option<GitRef>,
     #[arg(long = "subject-ref")]
-    pub subject_ref: Option<String>,
+    subject_ref: Option<GitRef>,
     #[arg(long = "artifact-file", default_value = "feature.patch")]
-    pub artifact_file: String,
+    artifact_file: EvidenceFilePath,
     #[arg(long = "verdict-file", default_value = "apply-gate-output.json")]
-    pub verdict_file: String,
+    verdict_file: EvidenceFilePath,
     #[arg(long = "success-file", default_value = "full-suite-output.txt")]
-    pub success_file: String,
+    success_file: EvidenceFilePath,
     #[arg(long = "success-text")]
-    pub success_text: Option<String>,
+    success_text: Option<ProofSuccessText>,
     #[arg(long = "mission-packet-file")]
-    pub mission_packet_file: Option<String>,
+    mission_packet_file: Option<EvidenceFilePath>,
     #[arg(long = "enforce-promoted-mission-identity-contract")]
-    pub enforce_promoted_mission_identity_contract: bool,
+    enforce_promoted_mission_identity_contract: bool,
     #[arg(long = "require-observed-process-ids")]
-    pub require_observed_process_ids: bool,
+    require_observed_process_ids: bool,
     #[arg(long = "require-host-signed-runtime-claims")]
-    pub require_host_signed_runtime_claims: bool,
+    require_host_signed_runtime_claims: bool,
     #[arg(long = "require-provider-run-ids")]
-    pub require_provider_run_ids: bool,
+    require_provider_run_ids: bool,
     #[arg(long = "trusted-provider-run-id-issuer")]
-    pub trusted_provider_run_id_issuer: Vec<String>,
+    trusted_provider_run_id_issuer: Vec<ProviderRunIdIssuer>,
     #[arg(long = "forbidden-provider-run-id-issuer")]
-    pub forbidden_provider_run_id_issuer: Vec<String>,
+    forbidden_provider_run_id_issuer: Vec<ProviderRunIdIssuer>,
     #[arg(long = "target-ref")]
-    pub target_ref: Option<String>,
+    target_ref: Option<GitRef>,
     #[arg(long)]
-    pub output: Option<PathBuf>,
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
 pub struct ApplyProofBatchArgs {
     #[arg(long)]
-    pub manifest: PathBuf,
+    manifest: PathBuf,
     #[arg(long)]
-    pub output: PathBuf,
+    output: PathBuf,
     #[arg(long = "seal-dir")]
-    pub seal_dir: Option<PathBuf>,
+    seal_dir: Option<PathBuf>,
     #[arg(long = "require-observed-process-ids")]
-    pub require_observed_process_ids: bool,
+    require_observed_process_ids: bool,
     #[arg(long = "require-host-signed-runtime-claims")]
-    pub require_host_signed_runtime_claims: bool,
+    require_host_signed_runtime_claims: bool,
     #[arg(long = "require-provider-run-ids")]
-    pub require_provider_run_ids: bool,
+    require_provider_run_ids: bool,
     #[arg(long = "trusted-provider-run-id-issuer")]
-    pub trusted_provider_run_id_issuer: Vec<String>,
+    trusted_provider_run_id_issuer: Vec<ProviderRunIdIssuer>,
     #[arg(long = "forbidden-provider-run-id-issuer")]
-    pub forbidden_provider_run_id_issuer: Vec<String>,
+    forbidden_provider_run_id_issuer: Vec<ProviderRunIdIssuer>,
     #[arg(long = "enforce-promoted-mission-identity-contract")]
-    pub enforce_promoted_mission_identity_contract: bool,
+    enforce_promoted_mission_identity_contract: bool,
 }
 
 #[derive(Debug, Error)]
@@ -139,29 +140,29 @@ struct VerifyRequestFile {
     repo: Option<PathBuf>,
     covey_db: Option<PathBuf>,
     evidence_dir: Option<PathBuf>,
-    subtask_id: Option<String>,
-    artifact_digest: Option<String>,
-    review_id: Option<String>,
-    queue_id: Option<String>,
-    reviewer_findings_digest: Option<String>,
-    apply_gate_session_token: Option<String>,
-    verifier: Option<String>,
-    verdict_digest: Option<String>,
-    apply_verification_seal_digest: Option<String>,
-    mainline_ref: Option<String>,
-    subject_ref: Option<String>,
-    artifact_file: Option<String>,
-    verdict_file: Option<String>,
-    success_file: Option<String>,
-    success_text: Option<String>,
-    mission_packet_file: Option<String>,
+    subtask_id: Option<SubtaskId>,
+    artifact_digest: Option<ArtifactDigest>,
+    review_id: Option<ReviewId>,
+    queue_id: Option<QueueId>,
+    reviewer_findings_digest: Option<FindingsDigest>,
+    apply_gate_session_token: Option<SessionToken>,
+    verifier: Option<VerifierId>,
+    verdict_digest: Option<ArtifactDigest>,
+    apply_verification_seal_digest: Option<ArtifactDigest>,
+    mainline_ref: Option<GitRef>,
+    subject_ref: Option<GitRef>,
+    artifact_file: Option<EvidenceFilePath>,
+    verdict_file: Option<EvidenceFilePath>,
+    success_file: Option<EvidenceFilePath>,
+    success_text: Option<ProofSuccessText>,
+    mission_packet_file: Option<EvidenceFilePath>,
     enforce_promoted_mission_identity_contract: Option<bool>,
     require_observed_process_ids: Option<bool>,
     require_host_signed_runtime_claims: Option<bool>,
     require_provider_run_ids: Option<bool>,
-    trusted_provider_run_id_issuer: Option<Vec<String>>,
-    forbidden_provider_run_id_issuer: Option<Vec<String>>,
-    target_ref: Option<String>,
+    trusted_provider_run_id_issuer: Option<Vec<ProviderRunIdIssuer>>,
+    forbidden_provider_run_id_issuer: Option<Vec<ProviderRunIdIssuer>>,
+    target_ref: Option<GitRef>,
     output: Option<PathBuf>,
 }
 
@@ -179,21 +180,209 @@ struct VerifyRequest {
     verifier: VerifierId,
     verdict_digest: Option<ArtifactDigest>,
     apply_verification_seal_digest: Option<ArtifactDigest>,
-    mainline_ref: String,
-    subject_ref: Option<String>,
-    artifact_file: String,
-    verdict_file: String,
-    success_file: String,
-    success_text: Option<String>,
-    mission_packet_file: Option<String>,
+    mainline_ref: GitRef,
+    subject_ref: Option<GitRef>,
+    artifact_file: EvidenceFilePath,
+    verdict_file: EvidenceFilePath,
+    success_file: EvidenceFilePath,
+    success_text: Option<ProofSuccessText>,
+    mission_packet_file: Option<EvidenceFilePath>,
     enforce_promoted_mission_identity_contract: bool,
     require_observed_process_ids: bool,
     require_host_signed_runtime_claims: bool,
     require_provider_run_ids: bool,
-    trusted_provider_run_id_issuer: Vec<String>,
-    forbidden_provider_run_id_issuer: Vec<String>,
-    target_ref: Option<String>,
+    trusted_provider_run_id_issuer: Vec<ProviderRunIdIssuer>,
+    forbidden_provider_run_id_issuer: Vec<ProviderRunIdIssuer>,
+    target_ref: Option<GitRef>,
     output: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EvidenceFilePath(String);
+
+impl EvidenceFilePath {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("evidence file path must not be empty".into());
+        }
+        if value.trim() != value {
+            return Err(
+                "evidence file path must not include leading or trailing whitespace".into(),
+            );
+        }
+        if value.chars().any(char::is_control) {
+            return Err("evidence file path must not contain control characters".into());
+        }
+        let path = Path::new(&value);
+        if path.is_absolute() {
+            return Err("evidence file path must be relative".into());
+        }
+        if path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err("evidence file path must not escape upward".into());
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EvidenceFilePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EvidenceFilePath {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value.to_owned())
+    }
+}
+
+impl Serialize for EvidenceFilePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EvidenceFilePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GitRef(String);
+
+impl GitRef {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("git ref must not be empty".into());
+        }
+        if value.trim() != value {
+            return Err("git ref must not include leading or trailing whitespace".into());
+        }
+        if value.chars().any(char::is_control) {
+            return Err("git ref must not contain control characters".into());
+        }
+        if value.chars().any(char::is_whitespace) {
+            return Err("git ref must not contain whitespace".into());
+        }
+        if value.starts_with('-') {
+            return Err("git ref must not start with '-'".into());
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GitRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GitRef {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value.to_owned())
+    }
+}
+
+impl Serialize for GitRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GitRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProofSuccessText(String);
+
+impl ProofSuccessText {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("success text must not be empty".into());
+        }
+        if value.chars().any(char::is_control) {
+            return Err("success text must not contain control characters".into());
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProofSuccessText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProofSuccessText {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value.to_owned())
+    }
+}
+
+impl Serialize for ProofSuccessText {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProofSuccessText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -720,8 +909,8 @@ impl ApplyVerificationRow {
 #[derive(Debug, Clone, Serialize)]
 struct SessionRow {
     session_token: SessionToken,
-    agent_principal_id: String,
-    agent_instance_id: String,
+    agent_principal_id: AgentPrincipalId,
+    agent_instance_id: AgentInstanceId,
     role: SessionRole,
     state: SessionState,
 }
@@ -729,8 +918,8 @@ struct SessionRow {
 #[derive(Debug, Clone)]
 struct RuntimeAttestationRow {
     session_token: SessionToken,
-    agent_principal_id: String,
-    agent_instance_id: String,
+    agent_principal_id: AgentPrincipalId,
+    agent_instance_id: AgentInstanceId,
     role: SessionRole,
     provider: ProviderId,
     model: ModelId,
@@ -809,10 +998,15 @@ impl RuntimeAttestationRow {
                 "runtime attestation ended_at must be greater than or equal to started_at".into(),
             ));
         }
+        if recorded_at < ended_at {
+            return Err(ApplyProofError::Verification(
+                "runtime attestation recorded_at must be greater than or equal to ended_at".into(),
+            ));
+        }
         Ok(Self {
             session_token: parse_proof_field(session_token, "session_token")?,
-            agent_principal_id,
-            agent_instance_id,
+            agent_principal_id: parse_proof_field(agent_principal_id, "agent_principal_id")?,
+            agent_instance_id: parse_proof_field(agent_instance_id, "agent_instance_id")?,
             role: parse_proof_enum(role, "role")?,
             provider: parse_proof_field(provider, "provider")?,
             model: parse_proof_field(model, "model")?,
@@ -916,8 +1110,8 @@ impl Serialize for RuntimeAttestationRow {
     {
         RawRuntimeAttestationRow {
             session_token: self.session_token.as_str(),
-            agent_principal_id: &self.agent_principal_id,
-            agent_instance_id: &self.agent_instance_id,
+            agent_principal_id: self.agent_principal_id.as_str(),
+            agent_instance_id: self.agent_instance_id.as_str(),
             role: self.role.to_string(),
             provider: self.provider.as_str(),
             model: self.model.as_str(),
@@ -937,8 +1131,8 @@ impl Serialize for RuntimeAttestationRow {
 #[derive(Debug, Serialize)]
 struct ActorSeal {
     session_token: SessionToken,
-    agent_principal_id: String,
-    agent_instance_id: String,
+    agent_principal_id: AgentPrincipalId,
+    agent_instance_id: AgentInstanceId,
     role: SessionRole,
     state: SessionState,
     runtime_attestation: RuntimeAttestationRow,
@@ -946,8 +1140,91 @@ struct ActorSeal {
 
 #[derive(Debug, Serialize)]
 struct Blocker {
-    code: String,
-    message: String,
+    code: ProofBlockerCode,
+    message: ProofBlockerMessage,
+}
+
+impl Blocker {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Result<Self, String> {
+        Ok(Self {
+            code: ProofBlockerCode::parse(code.into())?,
+            message: ProofBlockerMessage::parse(message.into())?,
+        })
+    }
+
+    fn failed_check(code: &str) -> Self {
+        Self::new(
+            code.to_owned(),
+            format!("required proof check failed: {code}"),
+        )
+        .expect("proof check blocker names are non-empty static check identifiers")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofBlockerCode(String);
+
+impl ProofBlockerCode {
+    fn parse(value: String) -> Result<Self, String> {
+        if value.trim().is_empty() {
+            return Err("proof blocker code must not be empty".into());
+        }
+        if value.trim() != value {
+            return Err(
+                "proof blocker code must not include leading or trailing whitespace".into(),
+            );
+        }
+        if value.chars().any(char::is_control) {
+            return Err("proof blocker code must not contain control characters".into());
+        }
+        if !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(
+                "proof blocker code must contain only ASCII letters, digits, or underscores".into(),
+            );
+        }
+        Ok(Self(value))
+    }
+}
+
+impl Serialize for ProofBlockerCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofBlockerMessage(String);
+
+impl ProofBlockerMessage {
+    fn parse(value: String) -> Result<Self, String> {
+        if value.trim().is_empty() {
+            return Err("proof blocker message must not be empty".into());
+        }
+        if value.trim() != value {
+            return Err(
+                "proof blocker message must not include leading or trailing whitespace".into(),
+            );
+        }
+        if value.chars().any(char::is_control) {
+            return Err("proof blocker message must not contain control characters".into());
+        }
+        Ok(Self(value))
+    }
+}
+
+impl Serialize for ProofBlockerMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1140,9 +1417,9 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
     let reviewer_attestation = load_runtime_attestation(&conn, &reviewer.session_token)?;
     let apply_gate_attestation = load_runtime_attestation(&conn, &apply_gate.session_token)?;
 
-    let artifact_file = req.evidence_dir.join(&req.artifact_file);
-    let verdict_file = req.evidence_dir.join(&req.verdict_file);
-    let success_file = req.evidence_dir.join(&req.success_file);
+    let artifact_file = req.evidence_dir.join(req.artifact_file.as_str());
+    let verdict_file = req.evidence_dir.join(req.verdict_file.as_str());
+    let success_file = req.evidence_dir.join(req.success_file.as_str());
     let trusted_issuers = normalized_set(&req.trusted_provider_run_id_issuer);
     let mut forbidden_issuers = normalized_set(&req.forbidden_provider_run_id_issuer);
 
@@ -1337,14 +1614,14 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         "success_text_found".into(),
         req.success_text.as_ref().is_none_or(|text| {
             fs::read_to_string(&success_file)
-                .map(|contents| contents.contains(text))
+                .map(|contents| contents.contains(text.as_str()))
                 .unwrap_or(false)
         }),
     );
 
     let mut mission_contract = None;
     if req.mission_packet_file.is_some() || req.enforce_promoted_mission_identity_contract {
-        let path = resolve_optional_file(&req.evidence_dir, req.mission_packet_file.as_deref());
+        let path = resolve_optional_file(&req.evidence_dir, req.mission_packet_file.as_ref());
         let (mission_checks, contract, mission_forbidden) =
             mission_packet_identity_contract_checks(
                 &path,
@@ -1549,7 +1826,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             "covey_db",
             Value::String(req.covey_db.display().to_string()),
         ),
-        ("mainline_ref", Value::String(req.mainline_ref.clone())),
+        ("mainline_ref", Value::String(req.mainline_ref.to_string())),
         ("head", Value::String(head.clone())),
         ("mainline_commit", Value::String(mainline.clone())),
         (
@@ -1613,7 +1890,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         insert_object(
             &mut manifest,
             "subject_ref",
-            option_string(req.subject_ref.clone()),
+            option_string(req.subject_ref.clone().map(|value| value.to_string())),
         );
         insert_object(&mut manifest, "subject_commit", Value::String(subject));
     }
@@ -1674,7 +1951,7 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             apply_verification_seal_digest: apply.seal_digest.clone(),
             seal_digest: seal_digest.clone(),
             head_commit: head,
-            target_ref,
+            target_ref: target_ref.to_string(),
         };
         insert_object(
             &mut manifest,
@@ -1886,17 +2163,17 @@ impl VerifyRequest {
                 .or(file.apply_verification_seal_digest);
             args.mainline_ref = args.mainline_ref.or(file.mainline_ref);
             args.subject_ref = args.subject_ref.or(file.subject_ref);
-            if args.artifact_file == "feature.patch"
+            if args.artifact_file.as_str() == "feature.patch"
                 && let Some(value) = file.artifact_file
             {
                 args.artifact_file = value;
             }
-            if args.verdict_file == "apply-gate-output.json"
+            if args.verdict_file.as_str() == "apply-gate-output.json"
                 && let Some(value) = file.verdict_file
             {
                 args.verdict_file = value;
             }
-            if args.success_file == "full-suite-output.txt"
+            if args.success_file.as_str() == "full-suite-output.txt"
                 && let Some(value) = file.success_file
             {
                 args.success_file = value;
@@ -1939,48 +2216,16 @@ impl VerifyRequest {
                 "evidence-dir",
                 error_output.clone(),
             )?)?,
-            subtask_id: parse_optional_request_field(
-                args.subtask_id,
-                "subtask-id",
-                error_output.clone(),
-            )?,
-            artifact_digest: parse_optional_request_field(
-                args.artifact_digest,
-                "artifact-digest",
-                error_output.clone(),
-            )?,
-            review_id: parse_optional_request_field(
-                args.review_id,
-                "review-id",
-                error_output.clone(),
-            )?,
-            queue_id: parse_optional_request_field(
-                args.queue_id,
-                "queue-id",
-                error_output.clone(),
-            )?,
-            reviewer_findings_digest: parse_optional_request_field(
-                args.reviewer_findings_digest,
-                "reviewer-findings-digest",
-                error_output.clone(),
-            )?,
-            apply_gate_session_token: parse_optional_request_field(
-                args.apply_gate_session_token,
-                "apply-gate-session-token",
-                error_output.clone(),
-            )?,
-            verifier: parse_request_field(args.verifier, "verifier", error_output.clone())?,
-            verdict_digest: parse_optional_request_field(
-                args.verdict_digest,
-                "verdict-digest",
-                error_output.clone(),
-            )?,
-            apply_verification_seal_digest: parse_optional_request_field(
-                args.apply_verification_seal_digest,
-                "apply-verification-seal-digest",
-                error_output.clone(),
-            )?,
-            mainline_ref: require_string_with_output(
+            subtask_id: args.subtask_id,
+            artifact_digest: args.artifact_digest,
+            review_id: args.review_id,
+            queue_id: args.queue_id,
+            reviewer_findings_digest: args.reviewer_findings_digest,
+            apply_gate_session_token: args.apply_gate_session_token,
+            verifier: args.verifier,
+            verdict_digest: args.verdict_digest,
+            apply_verification_seal_digest: args.apply_verification_seal_digest,
+            mainline_ref: require_git_ref_with_output(
                 args.mainline_ref,
                 "mainline-ref",
                 error_output,
@@ -2020,45 +2265,12 @@ fn require_path_with_output(
     path.ok_or_else(|| request_error(format!("--{name} is required"), output))
 }
 
-fn require_string_with_output(
-    value: Option<String>,
+fn require_git_ref_with_output(
+    value: Option<GitRef>,
     name: &str,
     output: Option<PathBuf>,
-) -> Result<String, ApplyProofError> {
-    value
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| request_error(format!("--{name} is required"), output))
-}
-
-fn parse_request_field<T>(
-    value: String,
-    name: &str,
-    output: Option<PathBuf>,
-) -> Result<T, ApplyProofError>
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Display,
-{
-    T::try_from(value).map_err(|error| {
-        request_error(
-            format!("--{name} must be a valid typed Covey scalar: {error}"),
-            output,
-        )
-    })
-}
-
-fn parse_optional_request_field<T>(
-    value: Option<String>,
-    name: &str,
-    output: Option<PathBuf>,
-) -> Result<Option<T>, ApplyProofError>
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Display,
-{
-    value
-        .map(|value| parse_request_field(value, name, output))
-        .transpose()
+) -> Result<GitRef, ApplyProofError> {
+    value.ok_or_else(|| request_error(format!("--{name} is required"), output))
 }
 
 fn parse_proof_field<T>(value: String, field: &str) -> Result<T, ApplyProofError>
@@ -2301,8 +2513,8 @@ fn session_from_row_parts(
 ) -> Result<SessionRow, ApplyProofError> {
     Ok(SessionRow {
         session_token: parse_proof_field(session_token, "session_token")?,
-        agent_principal_id,
-        agent_instance_id,
+        agent_principal_id: parse_proof_field(agent_principal_id, "agent_principal_id")?,
+        agent_instance_id: parse_proof_field(agent_instance_id, "agent_instance_id")?,
         role: parse_proof_enum(role, "role")?,
         state: parse_proof_enum(state, "state")?,
     })
@@ -2481,11 +2693,11 @@ fn runtime_claim_payload(actor_role: &str, attestation: &RuntimeAttestationRow) 
         ),
         (
             "agent_principal_id",
-            Value::String(attestation.agent_principal_id.clone()),
+            Value::String(attestation.agent_principal_id.to_string()),
         ),
         (
             "agent_instance_id",
-            Value::String(attestation.agent_instance_id.clone()),
+            Value::String(attestation.agent_instance_id.to_string()),
         ),
         ("role", Value::String(attestation.role.to_string())),
         ("provider", Value::String(attestation.provider.to_string())),
@@ -2736,25 +2948,53 @@ fn batch_child_args(proof: &Value, output: &Path) -> Result<ApplyProofVerifyArgs
         repo: Some(PathBuf::from(required_string(proof, "repo")?)),
         covey_db: Some(PathBuf::from(required_string(proof, "covey_db")?)),
         evidence_dir: Some(PathBuf::from(required_string(proof, "evidence_dir")?)),
-        subtask_id: Some(required_string(proof, "subtask_id")?),
-        artifact_digest: Some(required_string(proof, "artifact_digest")?),
-        review_id: Some(required_string(proof, "review_id")?),
-        queue_id: Some(required_string(proof, "queue_id")?),
-        reviewer_findings_digest: Some(required_string(proof, "reviewer_findings_digest")?),
-        apply_gate_session_token: Some(required_string(proof, "apply_gate_session_token")?),
-        verifier: proof_string(proof, "verifier").unwrap_or_else(|| "mutai-rs".into()),
-        verdict_digest: proof_string(proof, "verdict_digest"),
-        apply_verification_seal_digest: proof_string(proof, "apply_verification_seal_digest"),
-        mainline_ref: Some(required_string(proof, "mainline_ref")?),
-        subject_ref: proof_string(proof, "subject_ref"),
-        artifact_file: proof_string(proof, "artifact_file")
-            .unwrap_or_else(|| "feature.patch".into()),
-        verdict_file: proof_string(proof, "verdict_file")
-            .unwrap_or_else(|| "apply-gate-output.json".into()),
-        success_file: proof_string(proof, "success_file")
-            .unwrap_or_else(|| "full-suite-output.txt".into()),
-        success_text: proof_string(proof, "success_text"),
-        mission_packet_file: proof_string(proof, "mission_packet_file"),
+        subtask_id: Some(parse_proof_field(
+            required_string(proof, "subtask_id")?,
+            "subtask_id",
+        )?),
+        artifact_digest: Some(parse_proof_field(
+            required_string(proof, "artifact_digest")?,
+            "artifact_digest",
+        )?),
+        review_id: Some(parse_proof_field(
+            required_string(proof, "review_id")?,
+            "review_id",
+        )?),
+        queue_id: Some(parse_proof_field(
+            required_string(proof, "queue_id")?,
+            "queue_id",
+        )?),
+        reviewer_findings_digest: Some(parse_proof_field(
+            required_string(proof, "reviewer_findings_digest")?,
+            "reviewer_findings_digest",
+        )?),
+        apply_gate_session_token: Some(parse_proof_field(
+            required_string(proof, "apply_gate_session_token")?,
+            "apply_gate_session_token",
+        )?),
+        verifier: parse_proof_field(
+            proof_string(proof, "verifier").unwrap_or_else(|| "mutai-rs".into()),
+            "verifier",
+        )?,
+        verdict_digest: proof_string(proof, "verdict_digest")
+            .map(|value| parse_proof_field(value, "verdict_digest"))
+            .transpose()?,
+        apply_verification_seal_digest: proof_string(proof, "apply_verification_seal_digest")
+            .map(|value| parse_proof_field(value, "apply_verification_seal_digest"))
+            .transpose()?,
+        mainline_ref: Some(proof_git_ref_required(proof, "mainline_ref")?),
+        subject_ref: proof_git_ref(proof, "subject_ref")?,
+        artifact_file: proof_file_path(proof, "artifact_file", "feature.patch")?,
+        verdict_file: proof_file_path(proof, "verdict_file", "apply-gate-output.json")?,
+        success_file: proof_file_path(proof, "success_file", "full-suite-output.txt")?,
+        success_text: proof_string(proof, "success_text")
+            .map(ProofSuccessText::parse)
+            .transpose()
+            .map_err(ApplyProofError::Verification)?,
+        mission_packet_file: proof_string(proof, "mission_packet_file")
+            .map(EvidenceFilePath::parse)
+            .transpose()
+            .map_err(ApplyProofError::Verification)?,
         enforce_promoted_mission_identity_contract: proof_bool(
             proof,
             "enforce_promoted_mission_identity_contract",
@@ -2762,17 +3002,28 @@ fn batch_child_args(proof: &Value, output: &Path) -> Result<ApplyProofVerifyArgs
         require_observed_process_ids: proof_bool(proof, "require_observed_process_ids"),
         require_host_signed_runtime_claims: proof_bool(proof, "require_host_signed_runtime_claims"),
         require_provider_run_ids: proof_bool(proof, "require_provider_run_ids"),
-        trusted_provider_run_id_issuer: proof_string_list(
+        trusted_provider_run_id_issuer: proof_issuer_list(
             proof,
             "trusted_provider_run_id_issuers",
         )?,
-        forbidden_provider_run_id_issuer: proof_string_list(
+        forbidden_provider_run_id_issuer: proof_issuer_list(
             proof,
             "forbidden_provider_run_id_issuers",
         )?,
-        target_ref: proof_string(proof, "target_ref"),
+        target_ref: proof_git_ref(proof, "target_ref")?,
         output: Some(output.to_path_buf()),
     })
+}
+
+fn proof_git_ref_required(proof: &Value, field: &str) -> Result<GitRef, ApplyProofError> {
+    GitRef::parse(required_string(proof, field)?).map_err(ApplyProofError::Verification)
+}
+
+fn proof_git_ref(proof: &Value, field: &str) -> Result<Option<GitRef>, ApplyProofError> {
+    proof_string(proof, field)
+        .map(GitRef::parse)
+        .transpose()
+        .map_err(ApplyProofError::Verification)
 }
 
 fn proof_string(proof: &Value, field: &str) -> Option<String> {
@@ -2780,6 +3031,15 @@ fn proof_string(proof: &Value, field: &str) -> Option<String> {
         .get(field)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn proof_file_path(
+    proof: &Value,
+    field: &str,
+    default: &str,
+) -> Result<EvidenceFilePath, ApplyProofError> {
+    EvidenceFilePath::parse(proof_string(proof, field).unwrap_or_else(|| default.to_owned()))
+        .map_err(ApplyProofError::Verification)
 }
 
 fn proof_bool(proof: &Value, field: &str) -> bool {
@@ -2802,6 +3062,16 @@ fn proof_string_list(proof: &Value, field: &str) -> Result<Vec<String>, ApplyPro
             "{field} must be a string or list of strings"
         ))),
     }
+}
+
+fn proof_issuer_list(
+    proof: &Value,
+    field: &str,
+) -> Result<Vec<ProviderRunIdIssuer>, ApplyProofError> {
+    proof_string_list(proof, field)?
+        .into_iter()
+        .map(|issuer| parse_proof_field(issuer, field))
+        .collect()
 }
 
 fn claim_accepted(claim: Option<&Value>) -> bool {
@@ -2851,16 +3121,13 @@ fn check_blockers(checks: &BTreeMap<String, bool>) -> Vec<Blocker> {
     checks
         .iter()
         .filter(|(_, passed)| !**passed)
-        .map(|(code, _)| Blocker {
-            code: code.clone(),
-            message: format!("required proof check failed: {code}"),
-        })
+        .map(|(code, _)| Blocker::failed_check(code))
         .collect()
 }
 
-fn resolve_optional_file(evidence_dir: &Path, value: Option<&str>) -> PathBuf {
+fn resolve_optional_file(evidence_dir: &Path, value: Option<&EvidenceFilePath>) -> PathBuf {
     let path = value
-        .map(PathBuf::from)
+        .map(|value| PathBuf::from(value.as_str()))
         .unwrap_or_else(|| evidence_dir.join("mission-packet.json"));
     if path.is_absolute() {
         path
@@ -2944,12 +3211,10 @@ fn string_set(value: Option<&Value>) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-fn normalized_set(values: &[String]) -> BTreeSet<String> {
+fn normalized_set(values: &[ProviderRunIdIssuer]) -> BTreeSet<String> {
     values
         .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+        .map(|value| value.as_str().to_owned())
         .collect()
 }
 
@@ -3113,14 +3378,16 @@ mod tests {
             queue_id: None,
             reviewer_findings_digest: None,
             apply_gate_session_token: None,
-            verifier: "mutai-rs".into(),
+            verifier: VerifierId::parse("mutai-rs").expect("valid verifier"),
             verdict_digest: None,
             apply_verification_seal_digest: None,
-            mainline_ref: Some("main".into()),
+            mainline_ref: Some(GitRef::parse("main").expect("valid mainline ref")),
             subject_ref: None,
-            artifact_file: "feature.patch".into(),
-            verdict_file: "apply-gate-output.json".into(),
-            success_file: "full-suite-output.txt".into(),
+            artifact_file: EvidenceFilePath::parse("feature.patch").expect("valid artifact file"),
+            verdict_file: EvidenceFilePath::parse("apply-gate-output.json")
+                .expect("valid verdict file"),
+            success_file: EvidenceFilePath::parse("full-suite-output.txt")
+                .expect("valid success file"),
             success_text: None,
             mission_packet_file: None,
             enforce_promoted_mission_identity_contract: false,
@@ -3226,17 +3493,37 @@ mod tests {
     #[test]
     fn verify_request_parses_optional_refs_into_typed_scalars() {
         let mut args = verify_args();
-        args.subtask_id = Some("subtask-1".into());
-        args.artifact_digest = Some("blake3:artifact".into());
-        args.review_id = Some("review-1".into());
-        args.queue_id = Some("queue-1".into());
-        args.reviewer_findings_digest = Some("blake3:findings".into());
-        args.apply_gate_session_token = Some("session-apply".into());
-        args.verdict_digest = Some("blake3:verdict".into());
-        args.apply_verification_seal_digest = Some("blake3:seal".into());
+        args.subtask_id = Some(SubtaskId::parse("subtask-1").expect("valid subtask id"));
+        args.artifact_digest =
+            Some(ArtifactDigest::parse("blake3:artifact").expect("valid artifact digest"));
+        args.review_id = Some(ReviewId::parse("review-1").expect("valid review id"));
+        args.queue_id = Some(QueueId::parse("queue-1").expect("valid queue id"));
+        args.reviewer_findings_digest =
+            Some(FindingsDigest::parse("blake3:findings").expect("valid findings digest"));
+        args.apply_gate_session_token =
+            Some(SessionToken::parse("session-apply").expect("valid session token"));
+        args.verdict_digest =
+            Some(ArtifactDigest::parse("blake3:verdict").expect("valid verdict digest"));
+        args.apply_verification_seal_digest =
+            Some(ArtifactDigest::parse("blake3:seal").expect("valid seal digest"));
+        args.trusted_provider_run_id_issuer
+            .push(ProviderRunIdIssuer::parse("provider-authority").expect("valid trusted issuer"));
+        args.forbidden_provider_run_id_issuer
+            .push(ProviderRunIdIssuer::parse("local-runner").expect("valid forbidden issuer"));
+        args.subject_ref = Some(GitRef::parse("feature/apply-proof").expect("valid subject ref"));
+        args.target_ref = Some(GitRef::parse("main").expect("valid target ref"));
 
         let request = VerifyRequest::from_args(args).expect("typed request refs should parse");
 
+        assert_eq!(request.mainline_ref.as_str(), "main");
+        assert_eq!(
+            request.subject_ref.as_ref().map(GitRef::as_str),
+            Some("feature/apply-proof")
+        );
+        assert_eq!(
+            request.target_ref.as_ref().map(GitRef::as_str),
+            Some("main")
+        );
         assert_eq!(
             request.subtask_id.as_ref().map(SubtaskId::as_str),
             Some("subtask-1")
@@ -3279,45 +3566,215 @@ mod tests {
             Some("blake3:seal")
         );
         assert_eq!(request.verifier.as_str(), "mutai-rs");
+        assert_eq!(
+            request
+                .trusted_provider_run_id_issuer
+                .iter()
+                .map(ProviderRunIdIssuer::as_str)
+                .collect::<Vec<_>>(),
+            vec!["provider-authority"]
+        );
+        assert_eq!(
+            request
+                .forbidden_provider_run_id_issuer
+                .iter()
+                .map(ProviderRunIdIssuer::as_str)
+                .collect::<Vec<_>>(),
+            vec!["local-runner"]
+        );
+        assert_eq!(request.artifact_file.as_str(), "feature.patch");
+        assert_eq!(request.verdict_file.as_str(), "apply-gate-output.json");
+        assert_eq!(request.success_file.as_str(), "full-suite-output.txt");
+    }
+
+    #[test]
+    fn proof_blocker_rejects_invalid_code_and_message() {
+        let blank_code = Blocker::new("", "required proof check failed: worktree_clean")
+            .expect_err("proof blockers should reject blank codes");
+        assert!(
+            blank_code.contains("proof blocker code must not be empty"),
+            "unexpected error: {blank_code}"
+        );
+
+        let control_code = Blocker::new("worktree\nclean", "required proof check failed")
+            .expect_err("proof blockers should reject control characters in codes");
+        assert!(
+            control_code.contains("proof blocker code must not contain control characters"),
+            "unexpected error: {control_code}"
+        );
+
+        let blank_message =
+            Blocker::new("worktree_clean", " ").expect_err("proof blockers reject blank messages");
+        assert!(
+            blank_message.contains("proof blocker message must not be empty"),
+            "unexpected error: {blank_message}"
+        );
+
+        let blocker = Blocker::failed_check("worktree_clean");
+        let json = serde_json::to_value(blocker).expect("blocker serializes");
+        assert_eq!(json["code"], "worktree_clean");
+        assert_eq!(
+            json["message"],
+            "required proof check failed: worktree_clean"
+        );
     }
 
     #[test]
     fn verify_request_rejects_invalid_typed_refs_before_verification() {
-        let mut invalid_digest = verify_args();
-        invalid_digest.artifact_digest = Some("artifact".into());
-        let err = VerifyRequest::from_args(invalid_digest)
-            .expect_err("invalid artifact digest should reject the request");
+        let err = ApplyProofVerifyArgs::try_parse_from(["proof", "--artifact-digest", "artifact"])
+            .expect_err("invalid artifact digest should reject the CLI request");
         assert!(
-            err.to_string().contains("--artifact-digest"),
+            err.to_string().contains("artifact_digest"),
             "unexpected error: {err}"
         );
 
-        let mut invalid_session = verify_args();
-        invalid_session.apply_gate_session_token = Some("session apply".into());
-        let err = VerifyRequest::from_args(invalid_session)
-            .expect_err("invalid apply-gate session token should reject the request");
+        let err = ApplyProofVerifyArgs::try_parse_from([
+            "proof",
+            "--apply-gate-session-token",
+            "session apply",
+        ])
+        .expect_err("invalid apply-gate session token should reject the CLI request");
         assert!(
-            err.to_string().contains("--apply-gate-session-token"),
+            err.to_string().contains("session_token"),
             "unexpected error: {err}"
         );
 
-        let mut invalid_verdict_digest = verify_args();
-        invalid_verdict_digest.verdict_digest = Some("verdict".into());
-        let err = VerifyRequest::from_args(invalid_verdict_digest)
-            .expect_err("invalid verdict digest should reject the request");
+        let err = ApplyProofVerifyArgs::try_parse_from(["proof", "--verdict-digest", "verdict"])
+            .expect_err("invalid verdict digest should reject the CLI request");
         assert!(
-            err.to_string().contains("--verdict-digest"),
+            err.to_string().contains("artifact_digest"),
             "unexpected error: {err}"
         );
 
-        let mut invalid_seal_digest = verify_args();
-        invalid_seal_digest.apply_verification_seal_digest = Some("seal".into());
-        let err = VerifyRequest::from_args(invalid_seal_digest)
-            .expect_err("invalid apply verification seal digest should reject the request");
+        let err = ApplyProofVerifyArgs::try_parse_from([
+            "proof",
+            "--apply-verification-seal-digest",
+            "seal",
+        ])
+        .expect_err("invalid apply verification seal digest should reject the CLI request");
         assert!(
-            err.to_string().contains("--apply-verification-seal-digest"),
+            err.to_string().contains("artifact_digest"),
             "unexpected error: {err}"
         );
+
+        let invalid_file = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "artifact_digest": "artifact"
+        });
+        serde_json::from_value::<VerifyRequestFile>(invalid_file)
+            .expect_err("input files should reject invalid typed proof refs during decoding");
+
+        let err = ApplyProofVerifyArgs::try_parse_from(["proof", "--mainline-ref", " main"])
+            .expect_err("padded mainline refs should reject the CLI request");
+        assert!(
+            err.to_string().contains("git ref"),
+            "unexpected error: {err}"
+        );
+
+        let invalid_git_ref_file = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "mainline_ref": "main branch"
+        });
+        serde_json::from_value::<VerifyRequestFile>(invalid_git_ref_file)
+            .expect_err("input files should reject invalid git refs");
+
+        let err = ApplyProofVerifyArgs::try_parse_from([
+            "proof",
+            "--trusted-provider-run-id-issuer",
+            " provider-authority",
+        ])
+        .expect_err("invalid trusted provider run issuer should reject the CLI request");
+        assert!(
+            err.to_string().contains("provider_run_id_issuer"),
+            "unexpected error: {err}"
+        );
+
+        let invalid_issuer_file = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "trusted_provider_run_id_issuer": ["provider-authority", " local-runner"]
+        });
+        serde_json::from_value::<VerifyRequestFile>(invalid_issuer_file)
+            .expect_err("input files should reject invalid provider run issuers");
+
+        let err =
+            ApplyProofVerifyArgs::try_parse_from(["proof", "--artifact-file", "../feature.patch"])
+                .expect_err("escaping artifact file paths should reject the CLI request");
+        assert!(
+            err.to_string().contains("evidence file path"),
+            "unexpected error: {err}"
+        );
+
+        let invalid_file_path = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "mission_packet_file": "/tmp/mission-packet.json"
+        });
+        serde_json::from_value::<VerifyRequestFile>(invalid_file_path)
+            .expect_err("input files should reject absolute evidence file paths");
+
+        let err = ApplyProofVerifyArgs::try_parse_from(["proof", "--success-text", ""])
+            .expect_err("empty success text should reject the CLI request");
+        assert!(
+            err.to_string().contains("success text"),
+            "unexpected error: {err}"
+        );
+
+        let invalid_success_text = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "success_text": " "
+        });
+        serde_json::from_value::<VerifyRequestFile>(invalid_success_text)
+            .expect_err("input files should reject blank success text");
+    }
+
+    #[test]
+    fn batch_child_args_rejects_invalid_provider_run_issuers() {
+        let mut proof = object([
+            ("repo", Value::String(".".into())),
+            ("covey_db", Value::String("covey.db".into())),
+            ("evidence_dir", Value::String("evidence".into())),
+            ("subtask_id", Value::String("subtask-1".into())),
+            ("artifact_digest", Value::String("blake3:artifact".into())),
+            ("review_id", Value::String("review-1".into())),
+            ("queue_id", Value::String("queue-1".into())),
+            (
+                "reviewer_findings_digest",
+                Value::String("blake3:findings".into()),
+            ),
+            (
+                "apply_gate_session_token",
+                Value::String("session-apply".into()),
+            ),
+            ("mainline_ref", Value::String("main".into())),
+            (
+                "trusted_provider_run_id_issuers",
+                Value::Array(vec![Value::String("provider-authority".into())]),
+            ),
+        ]);
+        let args =
+            batch_child_args(&proof, Path::new("proof.json")).expect("valid batch proof args");
+        assert_eq!(args.artifact_file.as_str(), "feature.patch");
+        assert_eq!(
+            args.trusted_provider_run_id_issuer
+                .iter()
+                .map(ProviderRunIdIssuer::as_str)
+                .collect::<Vec<_>>(),
+            vec!["provider-authority"]
+        );
+
+        proof["forbidden_provider_run_id_issuers"] =
+            Value::Array(vec![Value::String(" local-runner".into())]);
+        batch_child_args(&proof, Path::new("proof.json"))
+            .expect_err("batch child args should reject invalid provider run issuers");
+
+        proof["forbidden_provider_run_id_issuers"] = Value::Array(Vec::new());
+        proof["success_file"] = Value::String("../full-suite-output.txt".into());
+        batch_child_args(&proof, Path::new("proof.json"))
+            .expect_err("batch child args should reject escaping evidence file paths");
+
+        proof["success_file"] = Value::String("full-suite-output.txt".into());
+        proof["mainline_ref"] = Value::String("main branch".into());
+        batch_child_args(&proof, Path::new("proof.json"))
+            .expect_err("batch child args should reject invalid git refs");
     }
 
     #[test]
@@ -3624,6 +4081,30 @@ mod tests {
 
     #[test]
     fn runtime_attestation_proof_row_rejects_invalid_typed_fields() {
+        let invalid_agent_principal = RuntimeAttestationRow::from_db_parts(
+            "session-1".into(),
+            "agent 1".into(),
+            "instance-1".into(),
+            "executor".into(),
+            "provider-1".into(),
+            "model-1".into(),
+            Some("1234".into()),
+            None,
+            "blake3:transcript".into(),
+            10,
+            11,
+            12,
+            None,
+            None,
+        )
+        .expect_err("runtime proof rows should require typed agent principal ids");
+        assert!(
+            invalid_agent_principal
+                .to_string()
+                .contains("invalid typed Covey scalar field agent_principal_id"),
+            "unexpected error: {invalid_agent_principal}"
+        );
+
         let invalid_provider = RuntimeAttestationRow::from_db_parts(
             "session-1".into(),
             "agent-1".into(),
@@ -3707,6 +4188,49 @@ mod tests {
         assert!(
             invalid_role.to_string().contains("invalid role"),
             "unexpected error: {invalid_role}"
+        );
+
+        let invalid_agent_instance = session_from_row_parts(
+            "session-1".into(),
+            "agent-1".into(),
+            "instance 1".into(),
+            "executor".into(),
+            "active".into(),
+        )
+        .expect_err("session proof rows should require typed agent instance ids");
+        assert!(
+            invalid_agent_instance
+                .to_string()
+                .contains("invalid typed Covey scalar field agent_instance_id"),
+            "unexpected error: {invalid_agent_instance}"
+        );
+    }
+
+    #[test]
+    fn runtime_attestation_proof_row_rejects_recorded_before_ended() {
+        let err = RuntimeAttestationRow::from_db_parts(
+            "session-1".into(),
+            "agent-1".into(),
+            "instance-1".into(),
+            "executor".into(),
+            "provider-1".into(),
+            "model-1".into(),
+            Some("1234".into()),
+            None,
+            "blake3:transcript".into(),
+            10,
+            12,
+            11,
+            None,
+            None,
+        )
+        .expect_err("runtime proof rows should record after the attested runtime span");
+
+        assert!(
+            err.to_string().contains(
+                "runtime attestation recorded_at must be greater than or equal to ended_at"
+            ),
+            "unexpected error: {err}"
         );
     }
 

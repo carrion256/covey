@@ -47,14 +47,14 @@ pub(super) fn parse_openspec_tasks(
             ));
         }
 
-        tasks.push(OpenSpecSourceTask {
-            task_id: task_id.to_owned(),
-            title: title.to_owned(),
-            source_path: source_path.to_owned(),
-            task_digest: blake3_digest(format!("{task_id}\n{title}").as_bytes()),
-            task_type: None,
-            dependencies: Vec::new(),
-        });
+        tasks.push(OpenSpecSourceTask::try_from_raw_parts(
+            task_id.to_owned(),
+            title.to_owned(),
+            source_path.to_owned(),
+            blake3_digest(format!("{task_id}\n{title}").as_bytes()),
+            None,
+            Vec::new(),
+        )?);
     }
 
     if tasks.is_empty() {

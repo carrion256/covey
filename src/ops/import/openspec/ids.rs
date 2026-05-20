@@ -43,6 +43,7 @@ pub(super) fn openspec_subtask_id(change_id: &str, task_id: &str) -> String {
 pub(super) fn openspec_meta_prompt(source: &super::OpenSpecSourceSnapshot) -> String {
     format!(
         "OpenSpec change {}\n\nImported from {}",
-        source.change_id, source.change_path
+        source.change_id.as_str(),
+        source.change_path.as_str()
     )
 }

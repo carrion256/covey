@@ -12,14 +12,15 @@ use super::{
     OverlapQueryReq, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem,
     ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
     RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, Reservation,
-    ReservationId, ReservationOverlapConflictPayload, ReservationState, ResolveConflictReq, Review,
-    ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole,
-    SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
+    RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthoritySnapshotReq,
+    RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
+    ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
+    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
+    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
     StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
-    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskView,
-    SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask,
-    bd_import_v1_subtask_id, make_id, parse_generated_members,
+    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
+    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq,
+    WorkSubtask, bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
@@ -1069,6 +1070,25 @@ fn session_lifecycle_requests_reject_invalid_session_tokens() {
         err.to_string().contains("invalid session_token"),
         "unexpected error: {err}"
     );
+
+    let err = SubmitMetaTaskReq::try_from_raw_parts("session-1", " ", "idem-submit")
+        .expect_err("blank prompt text should be rejected");
+    assert!(
+        err.to_string().contains("invalid prompt_text"),
+        "unexpected error: {err}"
+    );
+
+    let invalid_prompt = json!({
+        "session_token": "session-1",
+        "prompt_text": "",
+        "idempotency_key": "idem-submit"
+    });
+    let err = serde_json::from_value::<SubmitMetaTaskReq>(invalid_prompt)
+        .expect_err("submit-meta-task prompt text must be non-empty");
+    assert!(
+        err.to_string().contains("invalid prompt_text"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -1423,6 +1443,30 @@ fn try_work_subtask_row(
 }
 
 #[test]
+fn subtask_rows_reject_blank_titles() {
+    let err = SubtaskRow::try_from_parts(
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+        " ".to_owned(),
+        SubtaskKind::Work,
+        None,
+        None,
+        SubtaskState::Available,
+        None,
+        None,
+        SubtaskPriority::parse(10).expect("valid subtask priority"),
+        TimestampMs::parse(100).expect("valid timestamp"),
+        TimestampMs::parse(200).expect("valid timestamp"),
+    )
+    .expect_err("blank subtask titles should be rejected");
+
+    assert!(
+        err.to_string().contains("invalid title"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn review_domain_rejects_decided_state_without_decision_evidence() {
     let raw = serde_json::json!({
         "review_id": "review-1",
@@ -1681,6 +1725,20 @@ fn meta_task_mutation_request_payloads_reject_invalid_typed_ids() {
     serde_json::from_value::<CreateSubtaskRequest>(invalid_create_meta_task)
         .expect_err("create-subtask request should reject invalid meta-task ids");
 
+    let invalid_title = CreateSubtaskRequest::try_from_raw_parts(
+        "session-1",
+        "meta-1",
+        None,
+        " ",
+        42,
+        "idem-title",
+    )
+    .expect_err("blank create-subtask title should be rejected");
+    assert!(
+        invalid_title.to_string().contains("invalid title"),
+        "unexpected error: {invalid_title}"
+    );
+
     let create = CreateSubtaskRequest::try_from_raw_parts(
         "session-1",
         "meta-1",
@@ -1691,9 +1749,11 @@ fn meta_task_mutation_request_payloads_reject_invalid_typed_ids() {
     )
     .expect("valid create-subtask request");
     assert_eq!(create.session_token, "session-1");
+    assert_eq!(create.title, "work");
     assert_eq!(create.priority, 42);
     let value = serde_json::to_value(&create).expect("create request serializes");
     assert_eq!(value["session_token"], "session-1");
+    assert_eq!(value["title"], "work");
     assert_eq!(value["priority"], 42);
     let decoded: CreateSubtaskRequest =
         serde_json::from_value(value).expect("create request deserializes");
@@ -1724,6 +1784,21 @@ fn meta_task_mutation_request_payloads_reject_invalid_typed_ids() {
     });
     serde_json::from_value::<CreateSubtaskRequest>(invalid_create_subtask)
         .expect_err("create-subtask request should reject invalid subtask ids");
+
+    let invalid_create_title = serde_json::json!({
+        "session_token": "session-1",
+        "meta_task_id": "meta-1",
+        "subtask_id": "subtask-1",
+        "title": " work",
+        "priority": 1,
+        "idempotency_key": "idem-create"
+    });
+    let err = serde_json::from_value::<CreateSubtaskRequest>(invalid_create_title)
+        .expect_err("create-subtask request should reject invalid titles");
+    assert!(
+        err.to_string().contains("invalid title"),
+        "unexpected error: {err}"
+    );
 
     let invalid_create_priority = serde_json::json!({
         "session_token": "session-1",
@@ -2183,6 +2258,112 @@ fn repoops_authority_snapshot_request_rejects_invalid_typed_fields() {
     });
     serde_json::from_value::<RepoopsAuthoritySnapshotReq>(invalid_escape_path)
         .expect_err("repoops snapshot request should reject escaping paths");
+}
+
+#[test]
+fn repoops_authority_lock_facts_reject_invalid_typed_fields() {
+    let claim_id = RepoopsClaimRef::parse("claim-1").expect("valid repoops claim ref");
+    let fact = RepoopsAuthorityLockFact::owned("src/lib.rs", "session-1", claim_id.clone())
+        .expect("valid owned lock fact");
+    assert_eq!(fact.path(), "src/lib.rs");
+    assert_eq!(fact.owner(), "session-1");
+    assert_eq!(fact.claim_id(), &claim_id);
+
+    let value = serde_json::to_value(&fact).expect("repoops lock fact serializes");
+    assert_eq!(value["path"], "src/lib.rs");
+    assert_eq!(value["owner"], "session-1");
+    assert_eq!(value["claim_id"], "claim-1");
+    assert_eq!(value["status"], "owned");
+    let decoded: RepoopsAuthorityLockFact =
+        serde_json::from_value(value).expect("repoops lock fact deserializes");
+    assert_eq!(decoded, fact);
+
+    let blank_path = json!({
+        "path": "",
+        "owner": "session-1",
+        "claim_id": "claim-1",
+        "status": "owned"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(blank_path)
+        .expect_err("repoops lock fact should reject blank paths");
+
+    let absolute_path = json!({
+        "path": "/src/lib.rs",
+        "owner": "session-1",
+        "claim_id": "claim-1",
+        "status": "owned"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(absolute_path)
+        .expect_err("repoops lock fact should reject absolute paths");
+
+    let padded_owner = json!({
+        "path": "src/lib.rs",
+        "owner": " session-1",
+        "claim_id": "claim-1",
+        "status": "foreign_owner"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(padded_owner)
+        .expect_err("repoops lock fact should reject padded owners");
+}
+
+#[test]
+fn repoops_authority_git_context_rejects_invalid_typed_fields() {
+    let fact = RepoopsAuthorityGitContextFact::known_paths(
+        "/data/projects/mutai",
+        "/data/projects/mutai-worktree",
+        Some("authority/src".to_owned()),
+        true,
+    )
+    .expect("valid known git context fact");
+    assert_eq!(fact.policy_project_path(), Some("/data/projects/mutai"));
+    assert_eq!(
+        fact.execution_project_path(),
+        Some("/data/projects/mutai-worktree")
+    );
+    assert_eq!(fact.repo_path_prefix(), Some("authority/src"));
+    assert!(fact.ownership_token_required());
+
+    let value = serde_json::to_value(&fact).expect("git context fact serializes");
+    assert_eq!(value["policy_project_path"], "/data/projects/mutai");
+    assert_eq!(
+        value["execution_project_path"],
+        "/data/projects/mutai-worktree"
+    );
+    assert_eq!(value["repo_path_prefix"], "authority/src");
+    let decoded: RepoopsAuthorityGitContextFact =
+        serde_json::from_value(value).expect("git context fact deserializes");
+    assert_eq!(decoded, fact);
+
+    let unknown = RepoopsAuthorityGitContextFact::unknown(false);
+    assert_eq!(unknown.policy_project_path(), None);
+    assert!(!unknown.ownership_token_required());
+
+    let partial_paths = json!({
+        "policy_project_path": "/data/projects/mutai",
+        "execution_project_path": null,
+        "repo_path_prefix": null,
+        "ownership_token_required": true
+    });
+    serde_json::from_value::<RepoopsAuthorityGitContextFact>(partial_paths)
+        .expect_err("git context fact should require both project paths");
+
+    let padded_project_path = json!({
+        "policy_project_path": " /data/projects/mutai",
+        "execution_project_path": "/data/projects/mutai-worktree",
+        "repo_path_prefix": null,
+        "ownership_token_required": true
+    });
+    serde_json::from_value::<RepoopsAuthorityGitContextFact>(padded_project_path)
+        .expect_err("git context fact should reject padded project paths");
+
+    let escaping_prefix = json!({
+        "policy_project_path": "/data/projects/mutai",
+        "execution_project_path": "/data/projects/mutai-worktree",
+        "repo_path_prefix": "../outside",
+        "ownership_token_required": true
+    });
+    serde_json::from_value::<RepoopsAuthorityGitContextFact>(escaping_prefix)
+        .expect_err("git context fact should reject escaping prefixes");
 }
 
 #[test]
@@ -2745,6 +2926,16 @@ fn import_bd_v1_request_requires_exactly_one_destination_selector() {
     serde_json::from_value::<ImportBdV1Req>(invalid_idempotency_key)
         .expect_err("bd import request should reject invalid idempotency keys");
 
+    let invalid_beads_db_path = json!({
+        "session_token": "session-1",
+        "beads_db_path": " beads.db",
+        "meta_task_id": "meta-1",
+        "prompt_text": null,
+        "idempotency_key": "idem-invalid-path"
+    });
+    serde_json::from_value::<ImportBdV1Req>(invalid_beads_db_path)
+        .expect_err("bd import request should reject invalid source database paths");
+
     let created = ImportBdV1Req::new_meta_task("session-1", "beads.db", "new work", "idem-new");
     assert_eq!(created.meta_task_id(), None);
     assert_eq!(created.prompt_text(), Some("new work"));
@@ -2960,6 +3151,15 @@ fn import_openspec_request_requires_session_for_write_mode() {
     });
     serde_json::from_value::<ImportOpenSpecReq>(invalid_change_id)
         .expect_err("OpenSpec import should reject non-kebab-case change ids");
+
+    let invalid_project_root = json!({
+        "session_token": null,
+        "change_id": "change-1",
+        "project_root": " /repo",
+        "dry_run": true
+    });
+    serde_json::from_value::<ImportOpenSpecReq>(invalid_project_root)
+        .expect_err("OpenSpec import should reject invalid project root paths");
 
     let missing_session = json!({
         "session_token": null,
@@ -3571,6 +3771,25 @@ fn conflict_domain_rejects_unknown_kind_and_mismatched_payload_shape() {
 
 #[test]
 fn resolve_conflict_request_rejects_invalid_typed_fields() {
+    let valid = json!({
+        "session_token": "session-1",
+        "conflict_id": "conflict-1",
+        "resolution_state": "acknowledged",
+        "idempotency_key": "idem-resolve"
+    });
+    let decoded = serde_json::from_value::<ResolveConflictReq>(valid.clone())
+        .expect("valid resolve conflict request should decode");
+    assert_eq!(decoded.session_token().as_str(), "session-1");
+    assert_eq!(decoded.conflict_id().as_str(), "conflict-1");
+    assert_eq!(
+        decoded.resolution_state(),
+        ConflictResolutionState::Acknowledged
+    );
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("request serializes"),
+        valid
+    );
+
     let invalid_session_token = json!({
         "session_token": "",
         "conflict_id": "conflict-1",
@@ -3588,6 +3807,32 @@ fn resolve_conflict_request_rejects_invalid_typed_fields() {
     });
     serde_json::from_value::<ResolveConflictReq>(invalid_conflict_id)
         .expect_err("resolve conflict request should reject invalid conflict ids");
+
+    let open_resolution = json!({
+        "session_token": "session-1",
+        "conflict_id": "conflict-1",
+        "resolution_state": "open",
+        "idempotency_key": "idem-resolve"
+    });
+    let err = serde_json::from_value::<ResolveConflictReq>(open_resolution)
+        .expect_err("resolve conflict request should reject open resolution state");
+    assert!(
+        err.to_string()
+            .contains("resolve conflict requests must acknowledge or resolve conflicts"),
+        "unexpected error: {err}"
+    );
+
+    let err = ResolveConflictReq::try_from_raw_parts(
+        "session-1",
+        "conflict-1",
+        ConflictResolutionState::Open,
+        "idem-resolve",
+    )
+    .expect_err("constructor should reject open resolution state");
+    assert_eq!(
+        err.reason(),
+        "resolve conflict requests must acknowledge or resolve conflicts"
+    );
 }
 
 #[test]
@@ -3646,6 +3891,25 @@ fn reservation_overlap_conflict_payload_rejects_invalid_typed_parts() {
         error
             .to_string()
             .contains("exact_path reservation overlap scopes require scope_key"),
+        "unexpected error: {error}"
+    );
+
+    let padded_scope_key = json!({
+        "reservation_id": "reservation-1",
+        "overlapping_reservation_id": "reservation-2",
+        "owner_subtask_id": "subtask-1",
+        "overlapping_owner_subtask_id": "subtask-2",
+        "scope_class": "subtree",
+        "scope_key": " src ",
+        "overlapping_scope_class": "generated_set",
+        "overlapping_scope_key": "artifact-manifest"
+    });
+    let error = serde_json::from_value::<ReservationOverlapConflictPayload>(padded_scope_key)
+        .expect_err("overlap scope keys should already be normalized");
+    assert!(
+        error
+            .to_string()
+            .contains("subtree reservation overlap scope_key must be normalized"),
         "unexpected error: {error}"
     );
 }
@@ -3709,6 +3973,44 @@ fn reservation_scope_rejects_invalid_scope_shapes() {
         "unexpected error: {err}"
     );
 
+    let generated_set_with_padded_member = serde_json::json!({
+        "reservation_id": "reservation-1",
+        "owner_subtask_id": "subtask-1",
+        "scope_class": "generated_set",
+        "scope_key": "artifact-manifest",
+        "generated_members": [" src/generated.rs"],
+        "lease_deadline": 200,
+        "state": "active",
+        "created_at": 10,
+        "updated_at": 11
+    });
+    let err = serde_json::from_value::<Reservation>(generated_set_with_padded_member)
+        .expect_err("generated-set reservation with padded member must be rejected");
+    assert!(
+        err.to_string()
+            .contains("generated-set reservations require normalized generated_members"),
+        "unexpected error: {err}"
+    );
+
+    let generated_set_with_duplicate_members = serde_json::json!({
+        "reservation_id": "reservation-1",
+        "owner_subtask_id": "subtask-1",
+        "scope_class": "generated_set",
+        "scope_key": "artifact-manifest",
+        "generated_members": ["src/generated.rs", "src/generated.rs"],
+        "lease_deadline": 200,
+        "state": "active",
+        "created_at": 10,
+        "updated_at": 11
+    });
+    let err = serde_json::from_value::<Reservation>(generated_set_with_duplicate_members)
+        .expect_err("generated-set reservation with duplicate members must be rejected");
+    assert!(
+        err.to_string()
+            .contains("generated-set reservations require unique generated_members"),
+        "unexpected error: {err}"
+    );
+
     let valid_generated_set: Reservation = serde_json::from_value(serde_json::json!({
         "reservation_id": "reservation-1",
         "owner_subtask_id": "subtask-1",
@@ -3726,6 +4028,36 @@ fn reservation_scope_rejects_invalid_scope_shapes() {
     assert_eq!(
         valid_generated_set.generated_members(),
         ["src/generated.rs"]
+    );
+}
+
+#[test]
+fn reservation_scope_public_shape_rejects_invalid_variant_payloads() {
+    let empty_generated_set = serde_json::json!({
+        "GeneratedSet": {
+            "scope_key": "artifact-manifest",
+            "generated_members": []
+        }
+    });
+    let err = serde_json::from_value::<ReservationScope>(empty_generated_set)
+        .expect_err("generated-set scope variant should reject empty member sets");
+    assert!(
+        err.to_string()
+            .contains("generated-set reservations require generated_members"),
+        "unexpected error: {err}"
+    );
+
+    let blank_exact_scope_key = serde_json::json!({
+        "ExactPath": {
+            "scope_key": " "
+        }
+    });
+    let err = serde_json::from_value::<ReservationScope>(blank_exact_scope_key)
+        .expect_err("exact-path scope variant should reject blank keys");
+    assert!(
+        err.to_string()
+            .contains("reservation scope_key must not be empty"),
+        "unexpected error: {err}"
     );
 }
 
@@ -4011,6 +4343,51 @@ fn event_typed_rejects_object_type_that_disagrees_with_payload() {
     assert!(
         err.to_string().contains("object_type session"),
         "error should explain the payload-implied object type: {err}"
+    );
+}
+
+#[test]
+fn raw_event_json_preserves_flat_shape_and_rejects_payload_metadata_mismatch() {
+    let payload =
+        HeartbeatReq::try_from_raw_parts("session-1", "idem-1").expect("valid heartbeat request");
+    let payload_json =
+        serde_json::to_string(&payload).expect("heartbeat serialization must succeed");
+    let mut event_json = json!({
+        "seq": 42,
+        "event_type": EventType::SessionHeartbeat,
+        "object_type": ObjectType::Session,
+        "object_id": "session-1",
+        "actor_kind": "session",
+        "session_token": "session-1",
+        "payload_json": payload_json,
+        "created_at": 1_234
+    });
+
+    let event: Event =
+        serde_json::from_value(event_json.clone()).expect("coherent raw event should decode");
+    assert_eq!(event.payload_json(), payload_json);
+    assert_eq!(
+        serde_json::to_value(&event).expect("event should serialize"),
+        event_json
+    );
+
+    event_json["event_type"] = json!(EventType::SessionRegistered);
+    let err = serde_json::from_value::<Event>(event_json.clone())
+        .expect_err("event_type must match payload_json shape");
+    assert!(
+        err.to_string()
+            .contains("event payload does not match session_registered"),
+        "unexpected error: {err}"
+    );
+
+    event_json["event_type"] = json!(EventType::SessionHeartbeat);
+    event_json["object_type"] = json!(ObjectType::Claim);
+    let err = serde_json::from_value::<Event>(event_json)
+        .expect_err("object_type must match payload_json shape");
+    assert!(
+        err.to_string()
+            .contains("event payload implies object_type session"),
+        "unexpected error: {err}"
     );
 }
 
@@ -4784,7 +5161,7 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         session_token: SessionToken::parse("session-1").expect("valid session token"),
         meta_task_id: MetaTaskId::parse("meta-1").expect("valid meta-task id"),
         subtask_id: Some(SubtaskId::parse("subtask-1").expect("valid subtask id")),
-        title: "implement".to_owned(),
+        title: SubtaskTitle::parse("implement").expect("valid subtask title"),
         priority: SubtaskPriority::parse(10).expect("valid subtask priority"),
         idempotency_key: IdempotencyKey::parse("idem-create").expect("valid idempotency key"),
     };

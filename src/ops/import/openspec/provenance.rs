@@ -18,18 +18,18 @@ pub(super) fn meta_provenance(
 ) -> OpenSpecImportProvenance {
     OpenSpecImportProvenance::meta_task(
         OpenSpecImportProvenanceCommon::new(
-            source.change_id.clone(),
-            source.change_path.clone(),
-            source.tasks_digest.clone(),
+            source.change_id.to_string(),
+            source.change_path.to_string(),
+            source.tasks_digest.to_string(),
             source.source_digests.clone(),
             source.mission_artifact_digests.clone(),
-            source.mission_artifacts.clone(),
+            mission_artifact_strings(source),
             timestamp_ms(now),
         )
         .expect("validated OpenSpec source change id must be valid provenance"),
         object_id.to_owned(),
-        source.proposal_digest.clone(),
-        source.design_digest.clone(),
+        source.proposal_digest.to_string(),
+        source.design_digest.to_string(),
         source.spec_digests.clone(),
     )
     .expect("deterministic OpenSpec meta-task id must be a valid Covey id")
@@ -43,18 +43,18 @@ pub(super) fn task_provenance(
 ) -> OpenSpecImportProvenance {
     OpenSpecImportProvenance::subtask(
         OpenSpecImportProvenanceCommon::new(
-            source.change_id.clone(),
-            source.change_path.clone(),
-            source.tasks_digest.clone(),
+            source.change_id.to_string(),
+            source.change_path.to_string(),
+            source.tasks_digest.to_string(),
             source.source_digests.clone(),
             source.mission_artifact_digests.clone(),
-            source.mission_artifacts.clone(),
+            mission_artifact_strings(source),
             timestamp_ms(now),
         )
         .expect("validated OpenSpec source change id must be valid provenance"),
         object_id.to_owned(),
-        task.task_id.clone(),
-        task.task_digest.clone(),
+        task.task_id.to_string(),
+        task.task_digest.to_string(),
     )
     .expect("deterministic OpenSpec subtask id must be a valid Covey id")
 }
@@ -80,6 +80,14 @@ pub(super) fn provenance_equivalent(
         && existing.mission_artifact_digests() == expected.mission_artifact_digests()
         && existing.mission_artifacts() == expected.mission_artifacts()
         && existing.task_digest() == expected.task_digest()
+}
+
+fn mission_artifact_strings(source: &OpenSpecSourceSnapshot) -> Vec<String> {
+    source
+        .mission_artifacts
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 pub(super) fn upsert_openspec_provenance_tx(
     tx: &Transaction<'_>,
@@ -142,8 +150,8 @@ pub(super) fn append_openspec_import_event_tx(
     append_session_event(
         tx,
         EventType::OpenSpecImported,
-        record.object_type,
-        &record.object_id,
+        record.object_type(),
+        record.object_id(),
         session_token,
         &payload,
         now,

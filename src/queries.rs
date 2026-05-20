@@ -8,9 +8,9 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ActorKind, Artifact, Claim, ClaimState, Event, MetaTask, MutationIdempotencyRecord,
-        ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, RawOpenSpecImportProvenance,
-        ReadyQueueItem, Reservation, ReservationState, Review, RuntimeAttestation, Session,
-        SessionState, SessionToken, SubtaskRow, TimestampMs, parse_generated_members,
+        ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
+        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
+        SubtaskRow, TimestampMs, parse_generated_members,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -371,23 +371,23 @@ fn map_import_provenance(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenSpecIm
     let mission_artifacts =
         serde_json::from_str::<Vec<String>>(&mission_artifacts_json).map_err(to_sql_err)?;
 
-    OpenSpecImportProvenance::from_raw(RawOpenSpecImportProvenance {
+    OpenSpecImportProvenance::from_storage_parts(
         object_type,
-        object_id: row.get(1)?,
-        planning_format: row.get(2)?,
-        openspec_change_id: row.get(3)?,
-        openspec_change_path: row.get(4)?,
-        openspec_task_id: row.get(5)?,
-        proposal_digest: row.get(6)?,
-        design_digest: row.get(7)?,
-        tasks_digest: row.get(8)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
         spec_digests,
         source_digests,
         mission_artifact_digests,
         mission_artifacts,
-        task_digest: row.get(13)?,
-        updated_at: row.get(14)?,
-    })
+        row.get(13)?,
+        row.get(14)?,
+    )
     .map_err(to_sql_err)
 }
 
