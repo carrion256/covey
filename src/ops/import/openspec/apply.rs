@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{Transaction, params};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use crate::{
     error::{CoveyError, Result},
@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    OpenSpecImportRecord,
     provenance::{append_openspec_import_event_tx, upsert_openspec_provenance_tx},
+    OpenSpecImportRecord,
 };
 
 pub(super) fn apply_openspec_import_diff_tx(
@@ -108,6 +108,9 @@ pub(super) fn apply_openspec_import_diff_tx(
                     ],
                 )?;
                 if updated != 1 {
+                    if settled_subtask_with_same_title_tx(tx, &record.object_id, title)? {
+                        continue;
+                    }
                     return Err(CoveyError::ImportDuplicate {
                         source_issue_id: record.openspec_task_id.clone().unwrap_or_default(),
                         subtask_id: SubtaskId::parse(record.object_id.clone())?,
@@ -127,6 +130,31 @@ pub(super) fn apply_openspec_import_diff_tx(
     }
     upsert_subtask_dependencies_tx(tx, records, now)?;
     Ok(())
+}
+
+fn settled_subtask_with_same_title_tx(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+    title: &str,
+) -> Result<bool> {
+    let existing = tx
+        .query_row(
+            r#"
+            SELECT title
+            FROM subtasks
+            WHERE subtask_id = ?1
+              AND current_claim_id IS NULL
+              AND state NOT IN (?2, ?3)
+            "#,
+            params![
+                subtask_id,
+                SubtaskState::Available.to_string(),
+                SubtaskState::ChangesRequested.to_string()
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(existing.as_deref() == Some(title))
 }
 
 fn upsert_subtask_dependencies_tx(
@@ -188,9 +216,31 @@ fn resolved_dependency_ids<'a>(
                     raw.split(|ch: char| {
                         !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
                     })
-                    .any(|token| token == *task_id)
+                    .any(|token| dependency_token_matches(token, task_id))
                     .then_some(*subtask_id)
                 })
         })
         .collect()
+}
+
+fn dependency_token_matches(token: &str, task_id: &str) -> bool {
+    token == task_id
+        || token
+            .strip_suffix(task_id)
+            .is_some_and(|prefix| prefix.ends_with('-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dependency_token_matches;
+
+    #[test]
+    fn dependency_tokens_match_numeric_and_better_droid_task_ids() {
+        assert!(dependency_token_matches("3.1", "3.1"));
+        assert!(dependency_token_matches("TASK-MAG0-3.1", "3.1"));
+        assert!(dependency_token_matches("TASK-MAG1-2.4", "2.4"));
+        assert!(!dependency_token_matches("13.1", "3.1"));
+        assert!(!dependency_token_matches("TASK-MAG0-13.1", "3.1"));
+        assert!(!dependency_token_matches("TASK-MAG0-3.10", "3.1"));
+    }
 }
