@@ -3,16 +3,15 @@ use rusqlite::Transaction;
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ImportOpenSpecAction, ImportOpenSpecConflict, ImportOpenSpecItemResult,
-        ImportOpenSpecResult, ObjectType,
+        ImportOpenSpecAction, ImportOpenSpecConflict, ImportOpenSpecConflictReason,
+        ImportOpenSpecItemResult, ImportOpenSpecResult, ObjectType,
     },
     queries::{load_import_provenance_tx, load_meta_task_tx, load_subtask_tx},
     validators::{MAX_PROMPT_LEN, MAX_TITLE_LEN, ensure_length},
 };
 
 use super::{
-    OPENSPEC_ACTIVE_CLAIM_CONFLICT, OpenSpecImportDiff, OpenSpecImportRecord,
-    OpenSpecSourceSnapshot,
+    OpenSpecImportDiff, OpenSpecImportRecord, OpenSpecSourceSnapshot,
     ids::{
         openspec_meta_prompt, openspec_meta_task_id, openspec_subtask_id,
         validate_deterministic_covey_id,
@@ -59,6 +58,7 @@ pub(super) fn build_openspec_import_diff_tx(
         object_id: meta_task_id.clone(),
         openspec_task_id: None,
         title: Some(meta_prompt.clone()),
+        dependencies: Vec::new(),
         action: meta_action,
         provenance: meta_provenance,
     });
@@ -79,27 +79,33 @@ pub(super) fn build_openspec_import_diff_tx(
             Ok(existing) => {
                 if existing.meta_task_id != meta_task_id {
                     action = ImportOpenSpecAction::Conflict;
-                    conflict = Some(ImportOpenSpecConflict::subtask(
-                        subtask_id.clone(),
-                        task.task_id.clone(),
-                        "existing_subtask_different_meta_task",
-                        task.source_path.clone(),
-                        task.task_digest.clone(),
-                    ));
+                    conflict = Some(
+                        ImportOpenSpecConflict::subtask(
+                            subtask_id.clone(),
+                            task.task_id.clone(),
+                            ImportOpenSpecConflictReason::ExistingSubtaskDifferentMetaTask,
+                            task.source_path.clone(),
+                            task.task_digest.clone(),
+                        )
+                        .map_err(|reason| CoveyError::InvalidImportDestination { reason })?,
+                    );
                 } else {
                     let existing_provenance =
                         load_import_provenance_tx(tx, ObjectType::Subtask, &subtask_id)?;
                     let changed = existing.title != task.title
                         || !provenance_equivalent(existing_provenance.as_ref(), &provenance);
-                    if changed && existing.current_claim_id.is_some() {
+                    if changed && existing.current_claim_id().is_some() {
                         action = ImportOpenSpecAction::Conflict;
-                        conflict = Some(ImportOpenSpecConflict::subtask(
-                            subtask_id.clone(),
-                            task.task_id.clone(),
-                            OPENSPEC_ACTIVE_CLAIM_CONFLICT,
-                            task.source_path.clone(),
-                            task.task_digest.clone(),
-                        ));
+                        conflict = Some(
+                            ImportOpenSpecConflict::subtask(
+                                subtask_id.clone(),
+                                task.task_id.clone(),
+                                ImportOpenSpecConflictReason::ActiveClaimChangedSource,
+                                task.source_path.clone(),
+                                task.task_digest.clone(),
+                            )
+                            .map_err(|reason| CoveyError::InvalidImportDestination { reason })?,
+                        );
                     } else if changed {
                         action = ImportOpenSpecAction::Updated;
                     } else {
@@ -121,18 +127,22 @@ pub(super) fn build_openspec_import_diff_tx(
             object_id: subtask_id.clone(),
             openspec_task_id: Some(task.task_id.clone()),
             title: Some(task.title.clone()),
+            dependencies: task.dependencies.clone(),
             action,
             provenance,
         });
-        items.push(ImportOpenSpecItemResult::subtask(
-            subtask_id,
-            task.task_id.clone(),
-            task.title.clone(),
-            task.task_type.clone(),
-            task.task_digest.clone(),
-            task.source_path.clone(),
-            action,
-        ));
+        items.push(
+            ImportOpenSpecItemResult::subtask(
+                subtask_id,
+                task.task_id.clone(),
+                task.title.clone(),
+                task.task_type.clone(),
+                task.task_digest.clone(),
+                task.source_path.clone(),
+                action,
+            )
+            .map_err(|reason| CoveyError::InvalidImportDestination { reason })?,
+        );
     }
 
     let result = ImportOpenSpecResult::new(

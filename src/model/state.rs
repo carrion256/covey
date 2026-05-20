@@ -109,6 +109,7 @@ pub enum SubtaskKind {
 #[strum(serialize_all = "snake_case")]
 pub enum SubtaskState {
     Available,
+    Blocked,
     Claimed,
     InProgress,
     ArtifactPublished,

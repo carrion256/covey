@@ -23,13 +23,13 @@ impl Covey {
         let result = self.with_read_tx(|tx| {
             let subtask = load_subtask_tx(tx, subtask_id)?;
             let claim = subtask
-                .current_claim_id
-                .as_deref()
+                .current_claim_id()
+                .map(AsRef::as_ref)
                 .map(|claim_id| load_claim_tx(tx, claim_id))
                 .transpose()?;
             let artifact = subtask
-                .artifact_digest
-                .as_deref()
+                .artifact_digest()
+                .map(AsRef::as_ref)
                 .map(|artifact_digest| load_artifact_tx(tx, artifact_digest))
                 .transpose()?;
             let reviews = load_reviews_for_subtask_tx(tx, subtask_id)?;
@@ -86,15 +86,15 @@ impl Covey {
                 .into_iter()
                 .map(|subtask| {
                     let claim = subtask
-                        .current_claim_id
-                        .as_deref()
+                        .current_claim_id()
+                        .map(AsRef::as_ref)
                         .map(|claim_id| load_claim_conn(conn, claim_id))
                         .transpose()?;
                     let session = claim
                         .as_ref()
                         .map(|held| load_session_conn(conn, &held.owner_session_token))
                         .transpose()?;
-                    let idle_for_ms = (now - subtask.updated_at.get()).max(0);
+                    let idle_for_ms = (now - subtask.updated_at().get()).max(0);
                     StuckSubtask::new(
                         SubtaskView::try_from(subtask)?,
                         claim,

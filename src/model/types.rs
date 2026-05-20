@@ -20,13 +20,17 @@ pub struct CoveyTypeValidationError {
 }
 
 impl CoveyTypeValidationError {
-    const fn new(field: &'static str, reason: &'static str) -> Self {
+    pub(crate) const fn new(field: &'static str, reason: &'static str) -> Self {
         Self { field, reason }
+    }
+
+    pub(crate) const fn reason(&self) -> &'static str {
+        self.reason
     }
 }
 
 fn validate_tokenish(field: &'static str, value: &str) -> Result<(), CoveyTypeValidationError> {
-    if value.is_empty() {
+    if value.trim().is_empty() {
         return Err(CoveyTypeValidationError::new(field, "must not be empty"));
     }
     if value.len() > 256 {
@@ -74,6 +78,106 @@ fn validate_digest(field: &'static str, value: &str) -> Result<(), CoveyTypeVali
         return Err(CoveyTypeValidationError::new(
             field,
             "digest contains invalid characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_blake3_digest(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    validate_digest(field, value)?;
+    let Some((algorithm, _)) = value.split_once(':') else {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must include an algorithm prefix",
+        ));
+    };
+    if algorithm != "blake3" {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must use blake3: prefix",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_path(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    const MAX_MANIFEST_PATH_LEN: usize = 4 * 1024;
+
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > MAX_MANIFEST_PATH_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 4096 bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_normalized_text(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > 1024 {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 1024 bytes"));
+    }
+    if value.trim() != value {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not include leading or trailing whitespace",
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_idempotency_key(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
+
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > MAX_IDEMPOTENCY_KEY_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 256 bytes"));
+    }
+    Ok(())
+}
+
+fn validate_openspec_change_id(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must be kebab-case ASCII",
         ));
     }
     Ok(())
@@ -301,7 +405,133 @@ fn validate_non_negative_i64(
     Ok(())
 }
 
+fn validate_subtask_priority(
+    field: &'static str,
+    value: i64,
+) -> Result<(), CoveyTypeValidationError> {
+    if !(0..=1000).contains(&value) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must be between 0 and 1000",
+        ));
+    }
+    Ok(())
+}
+
+/// Normalized repo-relative path used by repoops snapshot requests.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RepoopsPath(String);
+
+impl RepoopsPath {
+    /// Parses and normalizes a raw path into a repo-relative path.
+    pub fn parse(value: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        Self::try_from(value.into())
+    }
+
+    /// Returns the normalized repo-relative path.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RepoopsPath {
+    type Error = CoveyTypeValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.chars().any(char::is_control) {
+            return Err(CoveyTypeValidationError::new(
+                "path",
+                "must not contain control characters",
+            ));
+        }
+        let mut normalized = value.trim().replace('\\', "/");
+        while let Some(rest) = normalized.strip_prefix("./") {
+            normalized = rest.to_owned();
+        }
+        while let Some(rest) = normalized.strip_prefix('/') {
+            normalized = rest.to_owned();
+        }
+        let mut parts = Vec::new();
+        for part in normalized.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    return Err(CoveyTypeValidationError::new(
+                        "path",
+                        "must not traverse outside the repository",
+                    ));
+                }
+                _ => parts.push(part),
+            }
+        }
+        if parts.is_empty() {
+            return Err(CoveyTypeValidationError::new("path", "must not be empty"));
+        }
+        Ok(Self(parts.join("/")))
+    }
+}
+
+impl From<RepoopsPath> for String {
+    fn from(value: RepoopsPath) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for RepoopsPath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for RepoopsPath {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for RepoopsPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for RepoopsPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<String> for RepoopsPath {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<RepoopsPath> for String {
+    fn eq(&self, other: &RepoopsPath) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<&str> for RepoopsPath {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<RepoopsPath> for &str {
+    fn eq(&self, other: &RepoopsPath) -> bool {
+        *self == other.as_str()
+    }
+}
+
 string_newtype!(SessionToken, "session_token", validate_tokenish);
+string_newtype!(AgentPrincipalId, "agent_principal_id", validate_tokenish);
+string_newtype!(AgentInstanceId, "agent_instance_id", validate_tokenish);
 string_newtype!(MetaTaskId, "meta_task_id", validate_tokenish);
 string_newtype!(SubtaskId, "subtask_id", validate_tokenish);
 string_newtype!(ClaimId, "claim_id", validate_tokenish);
@@ -309,12 +539,36 @@ string_newtype!(RepoopsClaimRef, "repoops_claim_ref", validate_tokenish);
 string_newtype!(QueueId, "queue_id", validate_tokenish);
 string_newtype!(ReviewId, "review_id", validate_tokenish);
 string_newtype!(ReservationId, "reservation_id", validate_tokenish);
+string_newtype!(ConflictId, "conflict_id", validate_tokenish);
+string_newtype!(EventObjectId, "event_object_id", validate_tokenish);
 string_newtype!(ArtifactDigest, "artifact_digest", validate_digest);
+string_newtype!(
+    ArtifactManifestPath,
+    "manifest_path",
+    validate_manifest_path
+);
 string_newtype!(ChangedPathsDigest, "changed_paths_digest", validate_digest);
 string_newtype!(FindingsDigest, "findings_digest", validate_digest);
+string_newtype!(OpenSpecDigest, "openspec_digest", validate_blake3_digest);
 string_newtype!(BaseRev, "base_rev", validate_tokenish);
 string_newtype!(ProviderId, "provider", validate_tokenish);
 string_newtype!(ModelId, "model", validate_tokenish);
+string_newtype!(ProviderRunId, "provider_run_id", validate_normalized_text);
+string_newtype!(
+    ProviderRunIdIssuer,
+    "provider_run_id_issuer",
+    validate_normalized_text
+);
+string_newtype!(RuntimeProcessId, "process_id", validate_normalized_text);
+string_newtype!(RuntimeContainerId, "container_id", validate_normalized_text);
+string_newtype!(VerifierId, "verifier", validate_tokenish);
+string_newtype!(IdempotencyKey, "idempotency_key", validate_idempotency_key);
+string_newtype!(
+    OpenSpecChangeId,
+    "openspec_change_id",
+    validate_openspec_change_id
+);
+string_newtype!(SourceIssueId, "source_issue_id", validate_tokenish);
 string_newtype!(
     CommandTranscriptDigest,
     "command_transcript_digest",
@@ -322,13 +576,23 @@ string_newtype!(
 );
 
 i64_newtype!(FenceSeq, "fence_seq", validate_positive_i64);
+i64_newtype!(EventSeq, "event_seq", validate_positive_i64);
+i64_newtype!(
+    SessionHeartbeatTick,
+    "last_heartbeat_tick",
+    validate_non_negative_i64
+);
 i64_newtype!(LeaseDurationMs, "lease_duration_ms", validate_positive_i64);
 i64_newtype!(LeaseDeadlineMs, "lease_deadline", validate_non_negative_i64);
+i64_newtype!(SubtaskPriority, "priority", validate_subtask_priority);
 i64_newtype!(TimestampMs, "timestamp_ms", validate_non_negative_i64);
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactDigest, ClaimId, FenceSeq, TimestampMs};
+    use super::{
+        ArtifactDigest, ArtifactManifestPath, ClaimId, FenceSeq, IdempotencyKey, OpenSpecChangeId,
+        OpenSpecDigest, TimestampMs,
+    };
 
     #[test]
     fn claim_id_rejects_empty_values() {
@@ -342,6 +606,13 @@ mod tests {
     }
 
     #[test]
+    fn artifact_manifest_path_rejects_empty_and_control_characters() {
+        assert!(ArtifactManifestPath::try_from(String::new()).is_err());
+        assert!(ArtifactManifestPath::try_from("manifest\n.json".to_owned()).is_err());
+        assert!(ArtifactManifestPath::try_from("artifact bundle/manifest.json".to_owned()).is_ok());
+    }
+
+    #[test]
     fn fence_seq_is_positive() {
         assert!(FenceSeq::try_from(0).is_err());
         assert!(FenceSeq::try_from(1).is_ok());
@@ -351,5 +622,27 @@ mod tests {
     fn timestamps_are_non_negative() {
         assert!(TimestampMs::try_from(-1).is_err());
         assert!(TimestampMs::try_from(0).is_ok());
+    }
+
+    #[test]
+    fn idempotency_keys_reject_blank_and_oversized_values() {
+        assert!(IdempotencyKey::try_from("idem-1".to_owned()).is_ok());
+        assert!(IdempotencyKey::try_from(" ".to_owned()).is_err());
+        assert!(IdempotencyKey::try_from("x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn openspec_change_ids_require_kebab_case_ascii() {
+        assert!(OpenSpecChangeId::try_from("change-1".to_owned()).is_ok());
+        assert!(OpenSpecChangeId::try_from("Change-1".to_owned()).is_err());
+        assert!(OpenSpecChangeId::try_from("-change".to_owned()).is_err());
+        assert!(OpenSpecChangeId::try_from("change_1".to_owned()).is_err());
+    }
+
+    #[test]
+    fn openspec_digests_require_blake3_prefix() {
+        assert!(OpenSpecDigest::try_from("blake3:abc123".to_owned()).is_ok());
+        assert!(OpenSpecDigest::try_from("sha256:abc123".to_owned()).is_err());
+        assert!(OpenSpecDigest::try_from("blake3:".to_owned()).is_err());
     }
 }

@@ -26,17 +26,17 @@ impl Covey {
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
-                &req.session_token,
+                req.session_token.as_str(),
                 "submit_meta_task",
                 &req.idempotency_key,
                 &req,
                 crate::model::TimestampMs::parse(now)?,
-                || submit_meta_task_tx(tx, &req.session_token, &req.prompt_text, &req, now),
+                || submit_meta_task_tx(tx, req.session_token.as_str(), &req.prompt_text, &req, now),
             )
         });
         self.log_operation(
             "submit_meta_task",
-            &req.session_token,
+            req.session_token.as_str(),
             started_at,
             &result,
             |meta_task_id| vec![format!("meta_task:{meta_task_id}")],
@@ -58,20 +58,20 @@ impl Covey {
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("meta_task_id", &req.meta_task_id, MAX_OBJECT_ID_LEN)?;
-                    let meta = load_meta_task_tx(tx, &req.meta_task_id)?;
+                    let meta = load_meta_task_tx(tx, req.meta_task_id.as_str())?;
                     ensure_transition(
-                        meta.state,
+                        meta.state(),
                         MetaTaskState::Cancelled,
                         ObjectType::MetaTask,
                         !matches!(
-                            meta.state,
+                            meta.state(),
                             MetaTaskState::Completed | MetaTaskState::Cancelled
                         ),
                     )?;
                     let updated = tx.execute(
                         "UPDATE meta_tasks SET state = ?2, updated_at = ?3 WHERE meta_task_id = ?1 AND state NOT IN (?4, ?5)",
                         params![
-                            req.meta_task_id,
+                            req.meta_task_id.as_str(),
                             MetaTaskState::Cancelled.to_string(),
                             now,
                             MetaTaskState::Completed.to_string(),
@@ -80,12 +80,12 @@ impl Covey {
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: meta.state.into(),
+                            from: meta.state().into(),
                             to: MetaTaskState::Cancelled.into(),
                             object: ObjectType::MetaTask,
                         });
                     }
-                    let held_claims = load_claims_for_meta_task(tx, &req.meta_task_id)?;
+                    let held_claims = load_claims_for_meta_task(tx, req.meta_task_id.as_str())?;
                     for claim in &held_claims {
                         tx.execute(
                             "UPDATE claims SET state = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4",
@@ -114,7 +114,7 @@ impl Covey {
                           AND state IN (?4, ?5)
                         "#,
                         params![
-                            req.meta_task_id,
+                            req.meta_task_id.as_str(),
                             ReadyQueueState::Cancelled.to_string(),
                             now,
                             ReadyQueueState::Queued.to_string(),
@@ -133,7 +133,7 @@ impl Covey {
                         WHERE meta_task_id = ?1
                         "#,
                         params![
-                            req.meta_task_id,
+                            req.meta_task_id.as_str(),
                             SubtaskState::Applied.to_string(),
                             SubtaskState::Abandoned.to_string(),
                             SubtaskState::Abandoned.to_string(),

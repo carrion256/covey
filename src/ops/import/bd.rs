@@ -139,9 +139,9 @@ impl Covey {
         let started_at = Instant::now();
 
         let destination = parse_import_bd_v1_destination(req.meta_task_id(), req.prompt_text())?;
-        ensure_length("beads_db_path", &req.beads_db_path, MAX_PATH_LEN)?;
+        ensure_length("beads_db_path", req.beads_db_path.as_str(), MAX_PATH_LEN)?;
 
-        let source_snapshot = load_source_snapshot(&req.beads_db_path)?;
+        let source_snapshot = load_source_snapshot(req.beads_db_path.as_str())?;
 
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
@@ -208,14 +208,14 @@ fn import_bd_v1_work_subtask_tx(
         return Ok(subtask_id);
     }
 
-    let create_req = CreateSubtaskRequest {
-        session_token: req.session_token.to_string(),
-        meta_task_id: destination_meta_task_id.clone(),
-        subtask_id: Some(subtask_id.clone()),
-        title: req.title.clone(),
-        priority: req.priority,
-        idempotency_key: req.idempotency_key.clone(),
-    };
+    let create_req = CreateSubtaskRequest::try_from_raw_parts(
+        req.session_token.to_string(),
+        destination_meta_task_id.clone(),
+        Some(subtask_id.clone()),
+        req.title.clone(),
+        req.priority,
+        req.idempotency_key.clone(),
+    )?;
 
     create_subtask_tx(tx, &create_req, now)
 }

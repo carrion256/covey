@@ -109,6 +109,15 @@ pub enum CoveyError {
         artifact_digest: ArtifactDigest,
     },
     #[error(
+        "review {review_id} targets stale artifact {artifact_digest}; subtask {subtask_id} has current artifact {current_artifact_digest}"
+    )]
+    StaleReviewArtifact {
+        review_id: String,
+        subtask_id: SubtaskId,
+        artifact_digest: ArtifactDigest,
+        current_artifact_digest: ArtifactDigest,
+    },
+    #[error(
         "review separation of duties violated: reviewer principal {reviewer_principal_id} matches producer principal {producer_principal_id}"
     )]
     SeparationOfDutiesViolation {
@@ -193,8 +202,8 @@ impl PartialEq for CoveyError {
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, SubtaskAlreadyClaimed, SubtaskNotFound,
-            TypeValidationError, UnknownArtifactDigest, WrongRole,
+            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
+            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match (self, other) {
@@ -394,6 +403,25 @@ impl PartialEq for CoveyError {
                 },
             ) => {
                 left_subtask_id == right_subtask_id && left_artifact_digest == right_artifact_digest
+            }
+            (
+                StaleReviewArtifact {
+                    review_id: left_review_id,
+                    subtask_id: left_subtask_id,
+                    artifact_digest: left_artifact_digest,
+                    current_artifact_digest: left_current_artifact_digest,
+                },
+                StaleReviewArtifact {
+                    review_id: right_review_id,
+                    subtask_id: right_subtask_id,
+                    artifact_digest: right_artifact_digest,
+                    current_artifact_digest: right_current_artifact_digest,
+                },
+            ) => {
+                left_review_id == right_review_id
+                    && left_subtask_id == right_subtask_id
+                    && left_artifact_digest == right_artifact_digest
+                    && left_current_artifact_digest == right_current_artifact_digest
             }
             (
                 SeparationOfDutiesViolation {

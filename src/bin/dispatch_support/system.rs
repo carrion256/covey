@@ -27,14 +27,13 @@ pub(super) fn dispatch_conflict(
             Ok(Rendered::pretty(&conflicts))
         }
         ConflictCommand::Resolve(args) => {
-            store.resolve_conflict(ResolveConflictReq {
-                session_token: args.session_token,
-                conflict_id: args.conflict_id.clone(),
-                resolution_state: args.resolution_state.into(),
-                idempotency_key: args
-                    .idempotency_key
+            store.resolve_conflict(ResolveConflictReq::try_from_raw_parts(
+                args.session_token,
+                args.conflict_id.clone(),
+                args.resolution_state.into(),
+                args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("resolve-conflict")),
-            })?;
+            )?)?;
             Ok(Rendered::summary(
                 ConflictResolutionAck {
                     operation: "resolve",

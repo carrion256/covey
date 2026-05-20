@@ -1,5 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
+use std::collections::BTreeMap;
+
 use rusqlite::{Transaction, params};
 
 use crate::{
@@ -67,14 +69,14 @@ pub(super) fn apply_openspec_import_diff_tx(
                     })?;
                 create_subtask_tx(
                     tx,
-                    &CreateSubtaskRequest {
-                        session_token: session_token.to_owned(),
-                        meta_task_id: meta_task_id.clone(),
-                        subtask_id: Some(record.object_id.clone()),
+                    &CreateSubtaskRequest::try_from_raw_parts(
+                        session_token.to_owned(),
+                        meta_task_id.clone(),
+                        Some(record.object_id.clone()),
                         title,
-                        priority: 100,
-                        idempotency_key: format!("import-openspec:{}", record.object_id),
-                    },
+                        100,
+                        format!("import-openspec:{}", record.object_id),
+                    )?,
                     now,
                 )?;
                 upsert_openspec_provenance_tx(tx, &record.provenance, now)?;
@@ -123,5 +125,72 @@ pub(super) fn apply_openspec_import_diff_tx(
             }
         }
     }
+    upsert_subtask_dependencies_tx(tx, records, now)?;
     Ok(())
+}
+
+fn upsert_subtask_dependencies_tx(
+    tx: &Transaction<'_>,
+    records: &[OpenSpecImportRecord],
+    now: i64,
+) -> Result<()> {
+    let task_to_subtask: BTreeMap<&str, &str> = records
+        .iter()
+        .filter(|record| record.object_type == ObjectType::Subtask)
+        .filter_map(|record| {
+            Some((
+                record.openspec_task_id.as_deref()?,
+                record.object_id.as_str(),
+            ))
+        })
+        .collect();
+
+    for record in records
+        .iter()
+        .filter(|record| record.object_type == ObjectType::Subtask)
+        .filter(|record| record.action != ImportOpenSpecAction::Conflict)
+    {
+        tx.execute(
+            "DELETE FROM subtask_dependencies WHERE subtask_id = ?1",
+            params![record.object_id],
+        )?;
+        for dependency in resolved_dependency_ids(record, &task_to_subtask) {
+            if dependency == record.object_id {
+                continue;
+            }
+            tx.execute(
+                r#"
+                INSERT INTO subtask_dependencies (
+                    subtask_id, depends_on_subtask_id, source_ref, created_at
+                ) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(subtask_id, depends_on_subtask_id) DO UPDATE SET
+                    source_ref = excluded.source_ref
+                "#,
+                params![record.object_id, dependency, dependency, now],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn resolved_dependency_ids<'a>(
+    record: &'a OpenSpecImportRecord,
+    task_to_subtask: &'a BTreeMap<&str, &str>,
+) -> Vec<&'a str> {
+    record
+        .dependencies
+        .iter()
+        .filter(|raw| raw.trim() != "none")
+        .flat_map(|raw| {
+            task_to_subtask
+                .iter()
+                .filter_map(move |(task_id, subtask_id)| {
+                    raw.split(|ch: char| {
+                        !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+                    })
+                    .any(|token| token == *task_id)
+                    .then_some(*subtask_id)
+                })
+        })
+        .collect()
 }

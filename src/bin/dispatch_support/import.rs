@@ -12,7 +12,9 @@ pub(super) fn dispatch_import(store: &Covey, command: ImportCommand) -> covey::R
                     args.idempotency_key
                         .unwrap_or_else(|| new_idempotency_key("import-bd")),
                 )
-                .map_err(|path| covey::CoveyError::InvalidPath { path })?,
+                .map_err(|error| covey::CoveyError::InvalidImportDestination {
+                    reason: error.to_string(),
+                })?,
             )?;
             let human = result.human_summary();
             let (meta_task_id, imported_count, skipped_count, items) = result.into_flat_parts();
@@ -35,7 +37,9 @@ pub(super) fn dispatch_import(store: &Covey, command: ImportCommand) -> covey::R
                     args.project_root.to_string_lossy().to_string(),
                     args.dry_run,
                 )
-                .map_err(|reason| covey::CoveyError::InvalidImportDestination { reason })?,
+                .map_err(|error| covey::CoveyError::InvalidImportDestination {
+                    reason: error.to_string(),
+                })?,
             )?;
             let human = result.human_summary();
             let (change_id, meta_task_id, dry_run, created, updated, unchanged, conflicts, items) =

@@ -17,7 +17,8 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         Claim, ClaimState, EventType, LeaseDeadlineMs, LeaseDurationMs, MetaTaskState, ObjectType,
-        ReadyQueueClaim, ReadyQueueState, SessionState, SubtaskKind, SubtaskState, TimestampMs,
+        ReadyQueueClaim, ReadyQueueState, ReviewState, SessionState, SubtaskKind, SubtaskState,
+        TimestampMs,
     },
     queries::{
         collect_rows, deserialize_row, load_meta_task_tx, load_mutation_idempotency_record_tx,
@@ -171,14 +172,14 @@ where
     if let Some(existing) =
         load_mutation_idempotency_record_tx(tx, actor_key, operation, idempotency_key)?
     {
-        if existing.request_hash != request_hash {
+        if existing.request_hash() != request_hash {
             return Err(CoveyError::IdempotencyConflict {
                 actor_key: actor_key.to_owned(),
                 operation: operation.to_owned(),
                 idempotency_key: idempotency_key.to_owned(),
             });
         }
-        return serde_json::from_str(&existing.response_json).map_err(Into::into);
+        return serde_json::from_str(existing.response_json()).map_err(Into::into);
     }
 
     let value = f()?;
@@ -264,6 +265,7 @@ pub(crate) fn ordered_claim_candidates(
     tx: &Transaction<'_>,
     kind: SubtaskKind,
     candidate_states: &[SubtaskState],
+    meta_task_id: Option<&str>,
     now: i64,
 ) -> Result<Vec<String>> {
     match kind {
@@ -276,6 +278,14 @@ pub(crate) fn ordered_claim_candidates(
                 WHERE s.kind = ?1
                   AND s.state IN (?2, ?3)
                   AND m.state NOT IN (?4, ?5)
+                  AND (?7 IS NULL OR s.meta_task_id = ?7)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM subtask_dependencies d
+                      JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+                      WHERE d.subtask_id = s.subtask_id
+                        AND dep.state NOT IN (?8, ?9, ?10, ?11)
+                  )
                 ORDER BY
                     MAX(
                         s.priority - MIN(MAX(?6 - s.created_at, 0) / 30000, s.priority),
@@ -292,7 +302,12 @@ pub(crate) fn ordered_claim_candidates(
                     candidate_states[1].to_string(),
                     MetaTaskState::Completed.to_string(),
                     MetaTaskState::Cancelled.to_string(),
-                    now
+                    now,
+                    meta_task_id,
+                    SubtaskState::Approved.to_string(),
+                    SubtaskState::ReadyForApply.to_string(),
+                    SubtaskState::Applied.to_string(),
+                    SubtaskState::Decided.to_string()
                 ],
                 |row| row.get::<_, String>(0),
             )?;
@@ -307,6 +322,7 @@ pub(crate) fn ordered_claim_candidates(
                 WHERE s.kind = ?1
                   AND s.state = ?2
                   AND m.state NOT IN (?3, ?4)
+                  AND (?5 IS NULL OR s.meta_task_id = ?5)
                 ORDER BY s.priority ASC, s.created_at ASC
                 "#,
             )?;
@@ -315,13 +331,38 @@ pub(crate) fn ordered_claim_candidates(
                     kind.to_string(),
                     candidate_states[0].to_string(),
                     MetaTaskState::Completed.to_string(),
-                    MetaTaskState::Cancelled.to_string()
+                    MetaTaskState::Cancelled.to_string(),
+                    meta_task_id
                 ],
                 |row| row.get::<_, String>(0),
             )?;
             collect_rows(rows)
         }
     }
+}
+
+pub(crate) fn subtask_dependencies_satisfied(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+) -> Result<bool> {
+    let unsatisfied = tx.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM subtask_dependencies d
+        JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+        WHERE d.subtask_id = ?1
+          AND dep.state NOT IN (?2, ?3, ?4, ?5)
+        "#,
+        params![
+            subtask_id,
+            SubtaskState::Approved.to_string(),
+            SubtaskState::ReadyForApply.to_string(),
+            SubtaskState::Applied.to_string(),
+            SubtaskState::Decided.to_string()
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(unsatisfied == 0)
 }
 
 pub(crate) fn ordered_ready_queue_candidates(tx: &Transaction<'_>) -> Result<Vec<String>> {
@@ -345,7 +386,7 @@ pub(crate) fn refresh_meta_task_state(
     now: i64,
 ) -> Result<()> {
     let meta_task = load_meta_task_tx(tx, meta_task_id)?;
-    if meta_task.state == MetaTaskState::Cancelled {
+    if meta_task.state() == MetaTaskState::Cancelled {
         return Ok(());
     }
 
@@ -379,7 +420,7 @@ pub(crate) fn refresh_meta_task_state(
         }
     };
 
-    if meta_task.state != desired_state {
+    if meta_task.state() != desired_state {
         tx.execute(
             "UPDATE meta_tasks SET state = ?2, updated_at = ?3 WHERE meta_task_id = ?1 AND state != ?4",
             params![
@@ -462,8 +503,8 @@ pub(crate) fn claim_ready_queue_item(
         Err(err) => return Err(err),
     }
 
-    if subtask.state != SubtaskState::ReadyForApply
-        || subtask.artifact_digest.as_deref() != Some(item.artifact_digest())
+    if subtask.state() != SubtaskState::ReadyForApply
+        || subtask.artifact_digest().map(AsRef::as_ref) != Some(item.artifact_digest())
     {
         tx.execute(
             "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4",
@@ -555,16 +596,23 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
             "#,
             params![subtask_id, ClaimState::Held.to_string()],
             |row| {
-                let claim = Claim {
-                    claim_id: row.get(0)?,
-                    subtask_id: row.get(1)?,
-                    owner_session_token: row.get(2)?,
-                    fence_seq: row.get(3)?,
-                    lease_deadline: row.get(4)?,
-                    state: ClaimState::Held,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                };
+                let claim = Claim::try_from_parts(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    ClaimState::Held,
+                    row.get(6)?,
+                    row.get(7)?,
+                )
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                    )
+                })?;
                 let session_state = row.get::<_, String>(8)?;
                 Ok((claim, session_state))
             },
@@ -580,6 +628,7 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
     }
 
     close_claim_and_detach(tx, &claim, ClaimState::Expired, now)?;
+    reset_in_progress_review_for_expired_claim(tx, &claim.subtask_id, now)?;
     tx.execute(
         "UPDATE subtasks SET current_claim_id = NULL, state = CASE WHEN state IN (?3, ?4) THEN ?5 ELSE state END, updated_at = ?6 WHERE subtask_id = ?1 AND current_claim_id = ?2",
         params![
@@ -594,6 +643,23 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
     tx.execute(
         "UPDATE sessions SET active_subtask_id = NULL, updated_at = ?3 WHERE session_token = ?1 AND active_subtask_id = ?2",
         params![claim.owner_session_token, claim.subtask_id, now],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn reset_in_progress_review_for_expired_claim(
+    tx: &Transaction<'_>,
+    review_subtask_id: &str,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE reviews SET state = ?2, updated_at = ?3 WHERE review_subtask_id = ?1 AND state = ?4",
+        params![
+            review_subtask_id,
+            ReviewState::Requested.to_string(),
+            now,
+            ReviewState::InProgress.to_string()
+        ],
     )?;
     Ok(())
 }

@@ -50,13 +50,15 @@ impl Covey {
                     let subtask = load_subtask_tx(tx, &req.subtask_id)?;
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
                     ensure_subtask_transition(
-                        subtask.kind,
-                        subtask.state,
+                        subtask.kind(),
+                        subtask.state(),
                         SubtaskState::ReadyForApply,
                     )?;
-                    if subtask.artifact_digest.as_deref() != Some(req.artifact_digest.as_str()) {
+                    if subtask.artifact_digest().map(AsRef::as_ref)
+                        != Some(req.artifact_digest.as_str())
+                    {
                         return Err(CoveyError::IllegalTransition {
-                            from: subtask.state.into(),
+                            from: subtask.state().into(),
                             to: SubtaskState::ReadyForApply.into(),
                             object: ObjectType::Subtask,
                         });
@@ -104,13 +106,13 @@ impl Covey {
                             req.subtask_id,
                             SubtaskState::ReadyForApply.to_string(),
                             now,
-                            subtask.state.to_string(),
+                            subtask.state().to_string(),
                             req.artifact_digest
                         ],
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: subtask.state.into(),
+                            from: subtask.state().into(),
                             to: SubtaskState::ReadyForApply.into(),
                             object: ObjectType::Subtask,
                         });
@@ -447,10 +449,15 @@ impl Covey {
                         });
                     }
                     let subtask = load_subtask_tx(tx, item.subtask_id())?;
-                    ensure_subtask_transition(subtask.kind, subtask.state, SubtaskState::Applied)?;
-                    if subtask.artifact_digest.as_deref() != Some(item.artifact_digest()) {
+                    ensure_subtask_transition(
+                        subtask.kind(),
+                        subtask.state(),
+                        SubtaskState::Applied,
+                    )?;
+                    if subtask.artifact_digest().map(AsRef::as_ref) != Some(item.artifact_digest())
+                    {
                         return Err(CoveyError::IllegalTransition {
-                            from: subtask.state.into(),
+                            from: subtask.state().into(),
                             to: SubtaskState::Applied.into(),
                             object: ObjectType::Subtask,
                         });
@@ -496,7 +503,7 @@ impl Covey {
                     )?;
                     if subtask_updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: subtask.state.into(),
+                            from: subtask.state().into(),
                             to: SubtaskState::Applied.into(),
                             object: ObjectType::Subtask,
                         });
@@ -817,14 +824,14 @@ fn require_live_apply_gate_evidence(
     }
     if apply_gate_session.agent_principal_id == evidence.producer_principal_id {
         return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
-            apply_gate_principal_id: apply_gate_session.agent_principal_id.clone(),
+            apply_gate_principal_id: apply_gate_session.agent_principal_id().to_owned(),
             conflicting_role: "producer".to_owned(),
             conflicting_principal_id: evidence.producer_principal_id,
         });
     }
     if apply_gate_session.agent_principal_id == evidence.reviewer_principal_id {
         return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
-            apply_gate_principal_id: apply_gate_session.agent_principal_id.clone(),
+            apply_gate_principal_id: apply_gate_session.agent_principal_id().to_owned(),
             conflicting_role: "reviewer".to_owned(),
             conflicting_principal_id: evidence.reviewer_principal_id,
         });

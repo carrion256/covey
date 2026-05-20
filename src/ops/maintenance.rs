@@ -12,7 +12,7 @@ use crate::{
     overlap::resolve_reservation_overlap_conflicts,
     queries::{load_expirable_claims, load_expired_reservation_ids},
     schema::advance_lease_clock,
-    store::append_system_event,
+    store::{append_system_event, reset_in_progress_review_for_expired_claim},
     validators::close_claim_and_detach,
 };
 
@@ -35,6 +35,7 @@ impl Covey {
             let stale_claims = load_expirable_claims(tx, lease_now)?;
             for claim in &stale_claims {
                 close_claim_and_detach(tx, claim, ClaimState::Expired, now)?;
+                reset_in_progress_review_for_expired_claim(tx, &claim.subtask_id, now)?;
                 tx.execute(
                     "UPDATE subtasks SET current_claim_id = NULL, state = CASE WHEN state IN (?3, ?4) THEN ?5 ELSE state END, updated_at = ?6 WHERE subtask_id = ?1 AND current_claim_id = ?2",
                     params![
@@ -77,6 +78,7 @@ impl Covey {
             let stale_claims = load_expirable_claims(tx, lease_now)?;
             for claim in &stale_claims {
                 close_claim_and_detach(tx, claim, ClaimState::Expired, now)?;
+                reset_in_progress_review_for_expired_claim(tx, &claim.subtask_id, now)?;
                 tx.execute(
                     "UPDATE subtasks SET current_claim_id = NULL, state = CASE WHEN state IN (?3, ?4) THEN ?5 ELSE state END, updated_at = ?6 WHERE subtask_id = ?1 AND current_claim_id = ?2",
                     params![

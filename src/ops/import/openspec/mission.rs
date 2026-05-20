@@ -36,6 +36,7 @@ pub(super) fn load_mission_packet(
                 source_path: mission_source_path.clone(),
                 task_digest: task.task_digest,
                 task_type: Some(task.task_type),
+                dependencies: task.dependencies,
             })
             .collect(),
         source_digests: digest_map(compiled.source_digests)?,

@@ -7,8 +7,8 @@ use strum::Display;
 use super::{
     Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask, MetaTaskId,
     QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget, Session,
-    SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskRow, SubtaskState,
-    TimestampMs,
+    SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow,
+    SubtaskState, TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -21,15 +21,20 @@ pub struct SubtaskView {
     pub title: String,
     kind: SubtaskViewKind,
     lifecycle: SubtaskLifecycle,
-    pub priority: i64,
-    pub created_at: TimestampMs,
-    pub updated_at: TimestampMs,
+    pub priority: SubtaskPriority,
+    timestamps: SubtaskViewTimestamps,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SubtaskViewKind {
     Work,
     Review { review_target: ReviewTarget },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubtaskViewTimestamps {
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +47,7 @@ struct RawSubtaskView {
     state: SubtaskState,
     active_claim_id: Option<ClaimId>,
     artifact_digest: Option<ArtifactDigest>,
-    priority: i64,
+    priority: SubtaskPriority,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -55,20 +60,20 @@ impl SubtaskView {
         title: String,
         kind: SubtaskViewKind,
         lifecycle: SubtaskLifecycle,
-        priority: i64,
+        priority: SubtaskPriority,
         created_at: TimestampMs,
         updated_at: TimestampMs,
-    ) -> Self {
-        Self {
+    ) -> rusqlite::Result<Self> {
+        let timestamps = SubtaskViewTimestamps::new(created_at, updated_at)?;
+        Ok(Self {
             subtask_id,
             meta_task_id,
             title,
             kind,
             lifecycle,
             priority,
-            created_at,
-            updated_at,
-        }
+            timestamps,
+        })
     }
 
     /// Returns whether this view describes work or review work.
@@ -99,6 +104,18 @@ impl SubtaskView {
     #[must_use]
     pub fn artifact_digest(&self) -> Option<&ArtifactDigest> {
         self.lifecycle.artifact_digest()
+    }
+
+    /// Returns when this subtask view was created.
+    #[must_use]
+    pub const fn created_at(&self) -> TimestampMs {
+        self.timestamps.created_at()
+    }
+
+    /// Returns when this subtask view was last updated.
+    #[must_use]
+    pub const fn updated_at(&self) -> TimestampMs {
+        self.timestamps.updated_at()
     }
 }
 
@@ -148,17 +165,19 @@ impl TryFrom<SubtaskRow> for SubtaskView {
     fn try_from(row: SubtaskRow) -> Result<Self, Self::Error> {
         let domain = Subtask::try_from(row.clone())?;
         let lifecycle = domain.lifecycle();
+        let created_at = row.created_at();
+        let updated_at = row.updated_at();
 
-        Ok(Self::new(
+        Self::new(
             row.subtask_id,
             row.meta_task_id,
             row.title,
             SubtaskViewKind::from_parts(domain.kind(), domain.review_target().cloned())?,
             lifecycle.clone(),
             row.priority,
-            row.created_at,
-            row.updated_at,
-        ))
+            created_at,
+            updated_at,
+        )
     }
 }
 
@@ -174,8 +193,8 @@ impl From<&SubtaskView> for RawSubtaskView {
             active_claim_id: view.active_claim_id().cloned(),
             artifact_digest: view.artifact_digest().cloned(),
             priority: view.priority,
-            created_at: view.created_at,
-            updated_at: view.updated_at,
+            created_at: view.created_at(),
+            updated_at: view.updated_at(),
         }
     }
 }
@@ -191,7 +210,7 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
             raw.active_claim_id,
             raw.artifact_digest,
         )?;
-        Ok(Self::new(
+        Self::new(
             raw.subtask_id,
             raw.meta_task_id,
             raw.title,
@@ -200,7 +219,7 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
             raw.priority,
             raw.created_at,
             raw.updated_at,
-        ))
+        )
     }
 }
 
@@ -233,6 +252,28 @@ fn invalid_subtask_view(reason: &str) -> rusqlite::Error {
             reason.to_owned(),
         )),
     )
+}
+
+impl SubtaskViewTimestamps {
+    fn new(created_at: TimestampMs, updated_at: TimestampMs) -> rusqlite::Result<Self> {
+        if updated_at < created_at {
+            return Err(invalid_subtask_view(
+                "subtask view updated_at must be greater than or equal to created_at",
+            ));
+        }
+        Ok(Self {
+            created_at,
+            updated_at,
+        })
+    }
+
+    const fn created_at(self) -> TimestampMs {
+        self.created_at
+    }
+
+    const fn updated_at(self) -> TimestampMs {
+        self.updated_at
+    }
 }
 
 /// Snapshot view of a session and its currently active subtask, if any.
@@ -331,10 +372,17 @@ impl TryFrom<RawSessionStatus> for SessionStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtaskStatus {
     subtask: SubtaskView,
-    claim: Option<Claim>,
-    artifact: Option<Artifact>,
+    attachments: SubtaskStatusAttachments,
     reviews: Vec<Review>,
     ready_queue: Vec<ReadyQueueItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubtaskStatusAttachments {
+    Detached,
+    Claimed { claim: Claim },
+    Artifact { artifact: Artifact },
+    ClaimedArtifact { claim: Claim, artifact: Artifact },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,7 +408,7 @@ impl SubtaskStatus {
         reviews: Vec<Review>,
         ready_queue: Vec<ReadyQueueItem>,
     ) -> Result<Self, String> {
-        validate_subtask_status_attachments(&subtask, claim.as_ref(), artifact.as_ref())?;
+        let attachments = SubtaskStatusAttachments::from_parts(&subtask, claim, artifact)?;
         for review in &reviews {
             if review.subtask_id() != subtask.subtask_id.as_str() {
                 return Err("subtask status reviews must belong to the subtask".to_owned());
@@ -375,8 +423,7 @@ impl SubtaskStatus {
         }
         Ok(Self {
             subtask,
-            claim,
-            artifact,
+            attachments,
             reviews,
             ready_queue,
         })
@@ -391,13 +438,13 @@ impl SubtaskStatus {
     /// Returns the active claim when the subtask lifecycle carries one.
     #[must_use]
     pub const fn claim(&self) -> Option<&Claim> {
-        self.claim.as_ref()
+        self.attachments.claim()
     }
 
     /// Returns the artifact when the subtask lifecycle carries one.
     #[must_use]
     pub const fn artifact(&self) -> Option<&Artifact> {
-        self.artifact.as_ref()
+        self.attachments.artifact()
     }
 
     /// Returns reviews associated with the subtask.
@@ -413,13 +460,47 @@ impl SubtaskStatus {
     }
 }
 
+impl SubtaskStatusAttachments {
+    fn from_parts(
+        subtask: &SubtaskView,
+        claim: Option<Claim>,
+        artifact: Option<Artifact>,
+    ) -> Result<Self, String> {
+        validate_subtask_status_attachments(subtask, claim.as_ref(), artifact.as_ref())?;
+        match (claim, artifact) {
+            (Some(claim), Some(artifact)) => Ok(Self::ClaimedArtifact { claim, artifact }),
+            (Some(claim), None) => Ok(Self::Claimed { claim }),
+            (None, Some(artifact)) => Ok(Self::Artifact { artifact }),
+            (None, None) => Ok(Self::Detached),
+        }
+    }
+
+    const fn claim(&self) -> Option<&Claim> {
+        match self {
+            Self::Claimed { claim } | Self::ClaimedArtifact { claim, .. } => Some(claim),
+            Self::Artifact { .. } | Self::Detached => None,
+        }
+    }
+
+    const fn artifact(&self) -> Option<&Artifact> {
+        match self {
+            Self::Artifact { artifact } | Self::ClaimedArtifact { artifact, .. } => Some(artifact),
+            Self::Claimed { .. } | Self::Detached => None,
+        }
+    }
+}
+
 fn validate_subtask_status_attachments(
     subtask: &SubtaskView,
     claim: Option<&Claim>,
     artifact: Option<&Artifact>,
 ) -> Result<(), String> {
     match (subtask.active_claim_id(), claim) {
-        (Some(expected), Some(claim)) if &claim.claim_id == expected => {}
+        (Some(expected), Some(claim)) if &claim.claim_id == expected => {
+            if claim.subtask_id != subtask.subtask_id {
+                return Err("subtask status claim must belong to the subtask".to_owned());
+            }
+        }
         (Some(_), Some(_)) => {
             return Err("subtask status claim_id must match active claim".to_owned());
         }
@@ -431,7 +512,11 @@ fn validate_subtask_status_attachments(
     }
 
     match (subtask.artifact_digest(), artifact) {
-        (Some(expected), Some(artifact)) if &artifact.artifact_digest == expected => {}
+        (Some(expected), Some(artifact)) if &artifact.artifact_digest == expected => {
+            if artifact.produced_by_subtask_id != subtask.subtask_id {
+                return Err("subtask status artifact must belong to the subtask".to_owned());
+            }
+        }
         (Some(_), Some(_)) => {
             return Err("subtask status artifact_digest must match lifecycle artifact".to_owned());
         }
@@ -471,8 +556,8 @@ impl From<&SubtaskStatus> for RawSubtaskStatus {
     fn from(status: &SubtaskStatus) -> Self {
         Self {
             subtask: status.subtask.clone(),
-            claim: status.claim.clone(),
-            artifact: status.artifact.clone(),
+            claim: status.claim().cloned(),
+            artifact: status.artifact().cloned(),
             reviews: status.reviews.clone(),
             ready_queue: status.ready_queue.clone(),
         }
@@ -580,9 +665,14 @@ impl TryFrom<RawMetaTaskStatus> for MetaTaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StuckSubtask {
     subtask: SubtaskView,
-    claim: Option<Claim>,
-    session: Option<Session>,
+    attachment: StuckSubtaskAttachment,
     idle_for_ms: StuckIdleDurationMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StuckSubtaskAttachment {
+    Unclaimed,
+    Claimed { claim: Claim, session: Session },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,11 +754,10 @@ impl StuckSubtask {
         idle_for_ms: i64,
     ) -> Result<Self, String> {
         let idle_for_ms = StuckIdleDurationMs::parse(idle_for_ms)?;
-        validate_stuck_subtask_attachments(&subtask, claim.as_ref(), session.as_ref())?;
+        let attachment = StuckSubtaskAttachment::from_parts(&subtask, claim, session)?;
         Ok(Self {
             subtask,
-            claim,
-            session,
+            attachment,
             idle_for_ms,
         })
     }
@@ -682,19 +771,50 @@ impl StuckSubtask {
     /// Returns the active claim attached to the subtask, when present.
     #[must_use]
     pub const fn claim(&self) -> Option<&Claim> {
-        self.claim.as_ref()
+        self.attachment.claim()
     }
 
     /// Returns the claim owner session, when a claim is attached.
     #[must_use]
     pub const fn session(&self) -> Option<&Session> {
-        self.session.as_ref()
+        self.attachment.session()
     }
 
     /// Returns how long the subtask has been idle.
     #[must_use]
     pub const fn idle_for_ms(&self) -> i64 {
         self.idle_for_ms.get()
+    }
+}
+
+impl StuckSubtaskAttachment {
+    fn from_parts(
+        subtask: &SubtaskView,
+        claim: Option<Claim>,
+        session: Option<Session>,
+    ) -> Result<Self, String> {
+        validate_stuck_subtask_attachments(subtask, claim.as_ref(), session.as_ref())?;
+        match (claim, session) {
+            (Some(claim), Some(session)) => Ok(Self::Claimed { claim, session }),
+            (None, None) => Ok(Self::Unclaimed),
+            (Some(_), None) | (None, Some(_)) => {
+                Err("stuck subtask attachment validation accepted an inconsistent shape".to_owned())
+            }
+        }
+    }
+
+    const fn claim(&self) -> Option<&Claim> {
+        match self {
+            Self::Claimed { claim, .. } => Some(claim),
+            Self::Unclaimed => None,
+        }
+    }
+
+    const fn session(&self) -> Option<&Session> {
+        match self {
+            Self::Claimed { session, .. } => Some(session),
+            Self::Unclaimed => None,
+        }
     }
 }
 
@@ -744,8 +864,8 @@ impl From<&StuckSubtask> for RawStuckSubtask {
     fn from(row: &StuckSubtask) -> Self {
         Self {
             subtask: row.subtask.clone(),
-            claim: row.claim.clone(),
-            session: row.session.clone(),
+            claim: row.claim().cloned(),
+            session: row.session().cloned(),
             idle_for_ms: row.idle_for_ms(),
         }
     }
@@ -1103,7 +1223,7 @@ struct LandingAuthorizationAccepted {
     review_id: ReviewId,
     findings_digest: FindingsDigest,
     claim_fence_seq: FenceSeq,
-    verifier: String,
+    verifier: VerifierId,
     verdict_digest: ArtifactDigest,
     seal_digest: ArtifactDigest,
     recorded_by_session: SessionToken,
@@ -1117,7 +1237,7 @@ struct RawLandingAuthorizationStatus {
     review_id: ReviewId,
     findings_digest: FindingsDigest,
     claim_fence_seq: FenceSeq,
-    verifier: String,
+    verifier: VerifierId,
     verdict_digest: ArtifactDigest,
     seal_digest: ArtifactDigest,
     recorded_by_session: SessionToken,
@@ -1132,7 +1252,7 @@ impl LandingAuthorizationStatus {
         review_id: ReviewId,
         findings_digest: FindingsDigest,
         claim_fence_seq: FenceSeq,
-        verifier: String,
+        verifier: VerifierId,
         verdict_digest: ArtifactDigest,
         seal_digest: ArtifactDigest,
         recorded_by_session: SessionToken,
@@ -1191,7 +1311,7 @@ impl LandingAuthorizationStatus {
     /// Returns the verifier identity.
     #[must_use]
     pub fn verifier(&self) -> &str {
-        &self.accepted_fields().verifier
+        self.accepted_fields().verifier.as_str()
     }
 
     /// Returns the verdict digest bound to the authorization.
@@ -1404,8 +1524,8 @@ pub enum RepoopsAuthorityPolicyMode {
 pub struct RepoopsAuthorityClaimFact {
     pub claim_id: ClaimId,
     owner: String,
-    scope_in: Vec<String>,
-    scope_out: Vec<String>,
+    scope_in: Vec<RepoopsScopePattern>,
+    scope_out: Vec<RepoopsScopePattern>,
     has_required_contract_fields: bool,
     lifecycle: RepoopsAuthorityClaimLifecycle,
 }
@@ -1502,14 +1622,14 @@ impl RepoopsAuthorityClaimFact {
 
     /// Returns inclusion scope patterns for this claim fact.
     #[must_use]
-    pub fn scope_in(&self) -> &[String] {
-        &self.scope_in
+    pub fn scope_in(&self) -> Vec<String> {
+        self.scope_in.iter().map(ToString::to_string).collect()
     }
 
     /// Returns exclusion scope patterns for this claim fact.
     #[must_use]
-    pub fn scope_out(&self) -> &[String] {
-        &self.scope_out
+    pub fn scope_out(&self) -> Vec<String> {
+        self.scope_out.iter().map(ToString::to_string).collect()
     }
 
     /// Returns whether this fact carries the required repoops contract fields.
@@ -1538,8 +1658,8 @@ impl RepoopsAuthorityClaimFact {
         if owner.trim() != owner {
             return Err("repoops claim fact owner must be normalized".into());
         }
-        validate_repoops_scope_patterns("claim.scope_in", &scope_in)?;
-        validate_repoops_scope_patterns("claim.scope_out", &scope_out)?;
+        let scope_in = parse_repoops_scope_patterns("claim.scope_in", scope_in)?;
+        let scope_out = parse_repoops_scope_patterns("claim.scope_out", scope_out)?;
         if has_required_contract_fields && scope_in.is_empty() {
             return Err("repoops claim facts with required contract fields need scope_in".into());
         }
@@ -1602,8 +1722,8 @@ impl Serialize for RepoopsAuthorityClaimFact {
             claim_id: self.claim_id.clone(),
             status: self.status(),
             owner: self.owner.clone(),
-            scope_in: self.scope_in.clone(),
-            scope_out: self.scope_out.clone(),
+            scope_in: self.scope_in.iter().map(ToString::to_string).collect(),
+            scope_out: self.scope_out.iter().map(ToString::to_string).collect(),
             has_required_contract_fields: self.has_required_contract_fields,
             active_ownership_token: self.active_ownership_token().map(str::to_owned),
         }
@@ -1636,8 +1756,8 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityClaimFact {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthorityScopeFact {
-    scope_in: Vec<String>,
-    scope_out: Vec<String>,
+    scope_in: Vec<RepoopsScopePattern>,
+    scope_out: Vec<RepoopsScopePattern>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1656,8 +1776,8 @@ impl RepoopsAuthorityScopeFact {
     /// Returns an error when a scope pattern is blank, padded, or duplicated
     /// within its inclusion or exclusion list.
     pub fn new(scope_in: Vec<String>, scope_out: Vec<String>) -> Result<Self, String> {
-        validate_repoops_scope_patterns("scope.in", &scope_in)?;
-        validate_repoops_scope_patterns("scope.out", &scope_out)?;
+        let scope_in = parse_repoops_scope_patterns("scope.in", scope_in)?;
+        let scope_out = parse_repoops_scope_patterns("scope.out", scope_out)?;
         Ok(Self {
             scope_in,
             scope_out,
@@ -1666,14 +1786,14 @@ impl RepoopsAuthorityScopeFact {
 
     /// Returns inclusion scope patterns.
     #[must_use]
-    pub fn scope_in(&self) -> &[String] {
-        &self.scope_in
+    pub fn scope_in(&self) -> Vec<String> {
+        self.scope_in.iter().map(ToString::to_string).collect()
     }
 
     /// Returns exclusion scope patterns.
     #[must_use]
-    pub fn scope_out(&self) -> &[String] {
-        &self.scope_out
+    pub fn scope_out(&self) -> Vec<String> {
+        self.scope_out.iter().map(ToString::to_string).collect()
     }
 }
 
@@ -1683,8 +1803,8 @@ impl Serialize for RepoopsAuthorityScopeFact {
         S: Serializer,
     {
         RawRepoopsAuthorityScopeFact {
-            scope_in: self.scope_in.clone(),
-            scope_out: self.scope_out.clone(),
+            scope_in: self.scope_in.iter().map(ToString::to_string).collect(),
+            scope_out: self.scope_out.iter().map(ToString::to_string).collect(),
         }
         .serialize(serializer)
     }
@@ -1700,20 +1820,69 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityScopeFact {
     }
 }
 
-fn validate_repoops_scope_patterns(label: &str, patterns: &[String]) -> Result<(), String> {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RepoopsScopePattern(String);
+
+impl RepoopsScopePattern {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        Self::try_from(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RepoopsScopePattern {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() {
+            return Err("patterns must not be empty".to_owned());
+        }
+        if value.trim() != value {
+            return Err("patterns must be normalized".to_owned());
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<RepoopsScopePattern> for String {
+    fn from(value: RepoopsScopePattern) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for RepoopsScopePattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn parse_repoops_scope_patterns(
+    label: &str,
+    patterns: Vec<String>,
+) -> Result<Vec<RepoopsScopePattern>, String> {
     let mut seen = HashSet::with_capacity(patterns.len());
+    let mut parsed = Vec::with_capacity(patterns.len());
     for pattern in patterns {
-        if pattern.trim().is_empty() {
-            return Err(format!("{label} patterns must not be empty"));
-        }
-        if pattern.trim() != pattern {
-            return Err(format!("{label} patterns must be normalized"));
-        }
-        if !seen.insert(pattern.as_str()) {
+        let pattern = RepoopsScopePattern::parse(pattern).map_err(|reason| {
+            if reason == "patterns must not be empty" {
+                format!("{label} patterns must not be empty")
+            } else if reason == "patterns must be normalized" {
+                format!("{label} patterns must be normalized")
+            } else {
+                format!("{label} {reason}")
+            }
+        })?;
+        if !seen.insert(pattern.to_string()) {
             return Err(format!("{label} patterns must not contain duplicates"));
         }
+        parsed.push(pattern);
     }
-    Ok(())
+    Ok(parsed)
 }
 
 /// Path ownership fact passed through to mutAI repoops preflight.
@@ -1747,33 +1916,45 @@ struct RawRepoopsAuthorityLockFact {
 
 impl RepoopsAuthorityLockFact {
     /// Builds a lock fact owned by the current claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock path or owner reference is blank,
+    /// padded, or otherwise not in normalized repoops form.
     pub fn owned(
         path: impl Into<String>,
         owner: impl Into<String>,
         claim_id: RepoopsClaimRef,
-    ) -> Self {
-        Self {
-            fact: RepoopsAuthorityLock::Owned {
-                path: path.into(),
-                owner: owner.into(),
+    ) -> Result<Self, String> {
+        Ok(Self {
+            fact: RepoopsAuthorityLock::from_parts(
+                path.into(),
+                owner.into(),
                 claim_id,
-            },
-        }
+                RepoopsAuthorityLockStatus::Owned,
+            )?,
+        })
     }
 
     /// Builds a lock fact owned by another claim or reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock path or owner reference is blank,
+    /// padded, or otherwise not in normalized repoops form.
     pub fn foreign_owner(
         path: impl Into<String>,
         owner: impl Into<String>,
         claim_id: RepoopsClaimRef,
-    ) -> Self {
-        Self {
-            fact: RepoopsAuthorityLock::ForeignOwner {
-                path: path.into(),
-                owner: owner.into(),
+    ) -> Result<Self, String> {
+        Ok(Self {
+            fact: RepoopsAuthorityLock::from_parts(
+                path.into(),
+                owner.into(),
                 claim_id,
-            },
-        }
+                RepoopsAuthorityLockStatus::ForeignOwner,
+            )?,
+        })
     }
 
     /// Returns the path covered by the lock fact.
@@ -1807,8 +1988,10 @@ impl RepoopsAuthorityLock {
         owner: String,
         claim_id: RepoopsClaimRef,
         status: RepoopsAuthorityLockStatus,
-    ) -> Self {
-        match status {
+    ) -> Result<Self, String> {
+        validate_repoops_lock_path(&path)?;
+        validate_repoops_lock_owner(&owner)?;
+        Ok(match status {
             RepoopsAuthorityLockStatus::Owned => Self::Owned {
                 path,
                 owner,
@@ -1819,7 +2002,7 @@ impl RepoopsAuthorityLock {
                 owner,
                 claim_id,
             },
-        }
+        })
     }
 
     fn path(&self) -> &str {
@@ -1862,7 +2045,9 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityLockFact {
     where
         D: Deserializer<'de>,
     {
-        Ok(RawRepoopsAuthorityLockFact::deserialize(deserializer)?.into())
+        RawRepoopsAuthorityLockFact::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1877,12 +2062,34 @@ impl From<&RepoopsAuthorityLockFact> for RawRepoopsAuthorityLockFact {
     }
 }
 
-impl From<RawRepoopsAuthorityLockFact> for RepoopsAuthorityLockFact {
-    fn from(raw: RawRepoopsAuthorityLockFact) -> Self {
-        Self {
-            fact: RepoopsAuthorityLock::from_parts(raw.path, raw.owner, raw.claim_id, raw.status),
+impl TryFrom<RawRepoopsAuthorityLockFact> for RepoopsAuthorityLockFact {
+    type Error = String;
+
+    fn try_from(raw: RawRepoopsAuthorityLockFact) -> Result<Self, Self::Error> {
+        Ok(Self {
+            fact: RepoopsAuthorityLock::from_parts(raw.path, raw.owner, raw.claim_id, raw.status)?,
+        })
+    }
+}
+
+fn validate_repoops_lock_path(path: &str) -> Result<(), String> {
+    validate_repoops_project_path("repoops lock path", path)?;
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err("repoops lock path must be repo-relative".to_owned());
+    }
+    if path.contains('\\') {
+        return Err("repoops lock path must be normalized".to_owned());
+    }
+    for part in path.split('/') {
+        if matches!(part, "" | "." | "..") {
+            return Err("repoops lock path must be normalized".to_owned());
         }
     }
+    Ok(())
+}
+
+fn validate_repoops_lock_owner(owner: &str) -> Result<(), String> {
+    validate_repoops_project_path("repoops lock owner", owner)
 }
 
 /// Path lock ownership status exposed to mutAI repoops authority.
@@ -1897,39 +2104,258 @@ pub enum RepoopsAuthorityLockStatus {
 
 /// Git context facts known to Covey for repoops preflight.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthorityGitContextFact {
-    pub policy_project_path: Option<String>,
-    pub execution_project_path: Option<String>,
-    pub repo_path_prefix: Option<String>,
-    pub ownership_token_required: bool,
+    context: RepoopsAuthorityGitContext,
+    ownership_token_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RepoopsAuthorityGitContext {
+    Unknown,
+    KnownPaths {
+        policy_project_path: String,
+        execution_project_path: String,
+        repo_path_prefix: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawRepoopsAuthorityGitContextFact {
+    policy_project_path: Option<String>,
+    execution_project_path: Option<String>,
+    repo_path_prefix: Option<String>,
+    ownership_token_required: bool,
+}
+
+impl RepoopsAuthorityGitContextFact {
+    /// Builds git context facts from the flat storage/API shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when only one project path is present, when a prefix is
+    /// present without project paths, or when any path field is blank, padded,
+    /// absolute where repo-relative is required, or traversing.
+    pub fn new(
+        policy_project_path: Option<String>,
+        execution_project_path: Option<String>,
+        repo_path_prefix: Option<String>,
+        ownership_token_required: bool,
+    ) -> Result<Self, String> {
+        let context = RepoopsAuthorityGitContext::from_parts(
+            policy_project_path,
+            execution_project_path,
+            repo_path_prefix,
+        )?;
+        Ok(Self {
+            context,
+            ownership_token_required,
+        })
+    }
+
+    /// Builds git context facts when Covey has no concrete project paths.
+    #[must_use]
+    pub const fn unknown(ownership_token_required: bool) -> Self {
+        Self {
+            context: RepoopsAuthorityGitContext::Unknown,
+            ownership_token_required,
+        }
+    }
+
+    /// Builds git context facts with concrete project paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any path field is blank, padded, absolute where
+    /// repo-relative is required, or traversing.
+    pub fn known_paths(
+        policy_project_path: impl Into<String>,
+        execution_project_path: impl Into<String>,
+        repo_path_prefix: Option<String>,
+        ownership_token_required: bool,
+    ) -> Result<Self, String> {
+        Self::new(
+            Some(policy_project_path.into()),
+            Some(execution_project_path.into()),
+            repo_path_prefix,
+            ownership_token_required,
+        )
+    }
+
+    /// Returns the policy project path when Covey knows it.
+    #[must_use]
+    pub fn policy_project_path(&self) -> Option<&str> {
+        self.context.policy_project_path()
+    }
+
+    /// Returns the execution project path when Covey knows it.
+    #[must_use]
+    pub fn execution_project_path(&self) -> Option<&str> {
+        self.context.execution_project_path()
+    }
+
+    /// Returns the repo-relative execution prefix when Covey knows one.
+    #[must_use]
+    pub fn repo_path_prefix(&self) -> Option<&str> {
+        self.context.repo_path_prefix()
+    }
+
+    /// Returns whether an ownership token is required for git mutations.
+    #[must_use]
+    pub const fn ownership_token_required(&self) -> bool {
+        self.ownership_token_required
+    }
+}
+
+impl RepoopsAuthorityGitContext {
+    fn from_parts(
+        policy_project_path: Option<String>,
+        execution_project_path: Option<String>,
+        repo_path_prefix: Option<String>,
+    ) -> Result<Self, String> {
+        match (
+            policy_project_path,
+            execution_project_path,
+            repo_path_prefix,
+        ) {
+            (None, None, None) => Ok(Self::Unknown),
+            (Some(policy_project_path), Some(execution_project_path), repo_path_prefix) => {
+                validate_repoops_project_path(
+                    "git_context.policy_project_path",
+                    &policy_project_path,
+                )?;
+                validate_repoops_project_path(
+                    "git_context.execution_project_path",
+                    &execution_project_path,
+                )?;
+                let repo_path_prefix = repo_path_prefix
+                    .map(|prefix| {
+                        validate_repoops_repo_path_prefix(&prefix)?;
+                        Ok::<_, String>(prefix)
+                    })
+                    .transpose()?;
+                Ok(Self::KnownPaths {
+                    policy_project_path,
+                    execution_project_path,
+                    repo_path_prefix,
+                })
+            }
+            (None, None, Some(_)) => {
+                Err("repoops git context prefix requires project paths".to_owned())
+            }
+            _ => Err("repoops git context requires both project paths or neither".to_owned()),
+        }
+    }
+
+    fn policy_project_path(&self) -> Option<&str> {
+        match self {
+            Self::Unknown => None,
+            Self::KnownPaths {
+                policy_project_path,
+                ..
+            } => Some(policy_project_path),
+        }
+    }
+
+    fn execution_project_path(&self) -> Option<&str> {
+        match self {
+            Self::Unknown => None,
+            Self::KnownPaths {
+                execution_project_path,
+                ..
+            } => Some(execution_project_path),
+        }
+    }
+
+    fn repo_path_prefix(&self) -> Option<&str> {
+        match self {
+            Self::Unknown => None,
+            Self::KnownPaths {
+                repo_path_prefix, ..
+            } => repo_path_prefix.as_deref(),
+        }
+    }
+}
+
+fn validate_repoops_project_path(label: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if value.trim() != value {
+        return Err(format!("{label} must be normalized"));
+    }
+    Ok(())
+}
+
+fn validate_repoops_repo_path_prefix(prefix: &str) -> Result<(), String> {
+    validate_repoops_project_path("git_context.repo_path_prefix", prefix)?;
+    if prefix.starts_with('/') || prefix.starts_with('\\') {
+        return Err("git_context.repo_path_prefix must be repo-relative".to_owned());
+    }
+    for part in prefix.replace('\\', "/").split('/') {
+        if matches!(part, "" | "." | "..") {
+            return Err("git_context.repo_path_prefix must be normalized".to_owned());
+        }
+    }
+    Ok(())
+}
+
+impl Serialize for RepoopsAuthorityGitContextFact {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawRepoopsAuthorityGitContextFact {
+            policy_project_path: self.policy_project_path().map(str::to_owned),
+            execution_project_path: self.execution_project_path().map(str::to_owned),
+            repo_path_prefix: self.repo_path_prefix().map(str::to_owned),
+            ownership_token_required: self.ownership_token_required(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RepoopsAuthorityGitContextFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawRepoopsAuthorityGitContextFact::deserialize(deserializer)?;
+        Self::new(
+            raw.policy_project_path,
+            raw.execution_project_path,
+            raw.repo_path_prefix,
+            raw.ownership_token_required,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Covey lifecycle fact snapshot for mutAI repoops preflight.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthoritySnapshot {
-    pub schema_version: String,
-    pub agent_id: String,
+    schema_version: String,
+    agent_id: String,
     subject: RepoopsAuthoritySnapshotSubject,
-    pub policy: RepoopsAuthorityPolicyFact,
-    pub scope: RepoopsAuthorityScopeFact,
+    policy: RepoopsAuthorityPolicyFact,
+    scope: RepoopsAuthorityScopeFact,
     locks: Vec<RepoopsAuthorityLockFact>,
-    pub git_context: Option<RepoopsAuthorityGitContextFact>,
-    pub fact_sources: Vec<String>,
+    git_context: Option<RepoopsAuthorityGitContextFact>,
+    fact_sources: Vec<String>,
 }
 
 /// Fields shared by all repoops authority snapshot subjects.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthoritySnapshotCommon {
-    pub schema_version: String,
-    pub agent_id: String,
-    pub policy: RepoopsAuthorityPolicyFact,
-    pub scope: RepoopsAuthorityScopeFact,
-    pub locks: Vec<RepoopsAuthorityLockFact>,
-    pub git_context: Option<RepoopsAuthorityGitContextFact>,
-    pub fact_sources: Vec<String>,
+    schema_version: String,
+    agent_id: String,
+    policy: RepoopsAuthorityPolicyFact,
+    scope: RepoopsAuthorityScopeFact,
+    locks: Vec<RepoopsAuthorityLockFact>,
+    git_context: Option<RepoopsAuthorityGitContextFact>,
+    fact_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1975,6 +2401,34 @@ struct RawRepoopsAuthoritySnapshot {
     git_context: Option<RepoopsAuthorityGitContextFact>,
     constraint_reason: Option<String>,
     fact_sources: Vec<String>,
+}
+
+impl RepoopsAuthoritySnapshotCommon {
+    /// Builds validated common repoops authority snapshot facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identity or provenance fields are blank or padded.
+    pub fn new(
+        schema_version: String,
+        agent_id: String,
+        policy: RepoopsAuthorityPolicyFact,
+        scope: RepoopsAuthorityScopeFact,
+        locks: Vec<RepoopsAuthorityLockFact>,
+        git_context: Option<RepoopsAuthorityGitContextFact>,
+        fact_sources: Vec<String>,
+    ) -> Result<Self, String> {
+        validate_repoops_authority_snapshot_common(&schema_version, &agent_id, &fact_sources)?;
+        Ok(Self {
+            schema_version,
+            agent_id,
+            policy,
+            scope,
+            locks,
+            git_context,
+            fact_sources,
+        })
+    }
 }
 
 impl RepoopsAuthoritySnapshot {
@@ -2034,6 +2488,18 @@ impl RepoopsAuthoritySnapshot {
         }
     }
 
+    /// Returns the snapshot schema version.
+    #[must_use]
+    pub fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
+
+    /// Returns the agent selected by Covey for these authority facts.
+    #[must_use]
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
     /// Returns the caller ownership token reference for claim-bound snapshots.
     #[must_use]
     pub fn ownership_token(&self) -> Option<&str> {
@@ -2060,6 +2526,18 @@ impl RepoopsAuthoritySnapshot {
         }
     }
 
+    /// Returns policy facts bound into this authority snapshot.
+    #[must_use]
+    pub const fn policy(&self) -> &RepoopsAuthorityPolicyFact {
+        &self.policy
+    }
+
+    /// Returns requested-scope facts bound into this authority snapshot.
+    #[must_use]
+    pub const fn scope(&self) -> &RepoopsAuthorityScopeFact {
+        &self.scope
+    }
+
     /// Returns the constraint reason when this snapshot has no claim authority.
     #[must_use]
     pub fn constraint_reason(&self) -> Option<&str> {
@@ -2075,6 +2553,18 @@ impl RepoopsAuthoritySnapshot {
     #[must_use]
     pub fn locks(&self) -> &[RepoopsAuthorityLockFact] {
         &self.locks
+    }
+
+    /// Returns optional git-context facts bound into this authority snapshot.
+    #[must_use]
+    pub const fn git_context(&self) -> Option<&RepoopsAuthorityGitContextFact> {
+        self.git_context.as_ref()
+    }
+
+    /// Returns provenance strings for this authority snapshot.
+    #[must_use]
+    pub fn fact_sources(&self) -> &[String] {
+        &self.fact_sources
     }
 }
 
@@ -2119,18 +2609,18 @@ impl Serialize for RepoopsAuthoritySnapshot {
         S: Serializer,
     {
         RawRepoopsAuthoritySnapshot {
-            schema_version: self.schema_version.clone(),
-            agent_id: self.agent_id.clone(),
+            schema_version: self.schema_version().to_owned(),
+            agent_id: self.agent_id().to_owned(),
             claim_id: self.claim_id().cloned(),
             ownership_token: self.ownership_token().map(str::to_owned),
             override_token: self.override_token().map(str::to_owned),
-            policy: self.policy.clone(),
+            policy: self.policy().clone(),
             claim: self.claim().cloned(),
-            scope: self.scope.clone(),
+            scope: self.scope().clone(),
             locks: self.locks.clone(),
-            git_context: self.git_context.clone(),
+            git_context: self.git_context().cloned(),
             constraint_reason: self.constraint_reason().map(str::to_owned),
-            fact_sources: self.fact_sources.clone(),
+            fact_sources: self.fact_sources().to_vec(),
         }
         .serialize(serializer)
     }
@@ -2142,6 +2632,16 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshot {
         D: Deserializer<'de>,
     {
         let raw = RawRepoopsAuthoritySnapshot::deserialize(deserializer)?;
+        let common = RepoopsAuthoritySnapshotCommon::new(
+            raw.schema_version,
+            raw.agent_id,
+            raw.policy,
+            raw.scope,
+            raw.locks,
+            raw.git_context,
+            raw.fact_sources,
+        )
+        .map_err(serde::de::Error::custom)?;
         let subject = RepoopsAuthoritySnapshotSubject::try_from_parts(
             raw.claim_id,
             raw.ownership_token,
@@ -2150,17 +2650,21 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshot {
             raw.constraint_reason,
         )
         .map_err(serde::de::Error::custom)?;
-        validate_repoops_authority_locks(&raw.agent_id, subject.claim_owner_ref(), &raw.locks)
-            .map_err(serde::de::Error::custom)?;
+        validate_repoops_authority_locks(
+            &common.agent_id,
+            subject.claim_owner_ref(),
+            &common.locks,
+        )
+        .map_err(serde::de::Error::custom)?;
         Ok(Self {
-            schema_version: raw.schema_version,
-            agent_id: raw.agent_id,
+            schema_version: common.schema_version,
+            agent_id: common.agent_id,
             subject,
-            policy: raw.policy,
-            scope: raw.scope,
-            locks: raw.locks,
-            git_context: raw.git_context,
-            fact_sources: raw.fact_sources,
+            policy: common.policy,
+            scope: common.scope,
+            locks: common.locks,
+            git_context: common.git_context,
+            fact_sources: common.fact_sources,
         })
     }
 }
@@ -2208,6 +2712,34 @@ fn validate_repoops_authority_locks(
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_repoops_authority_snapshot_common(
+    schema_version: &str,
+    agent_id: &str,
+    fact_sources: &[String],
+) -> Result<(), String> {
+    if schema_version.trim().is_empty() {
+        return Err("repoops authority snapshots require schema_version".into());
+    }
+    if schema_version.trim() != schema_version {
+        return Err("repoops authority snapshot schema_version must be normalized".into());
+    }
+    if agent_id.trim().is_empty() {
+        return Err("repoops authority snapshots require agent_id".into());
+    }
+    if agent_id.trim() != agent_id {
+        return Err("repoops authority snapshot agent_id must be normalized".into());
+    }
+    for source in fact_sources {
+        if source.trim().is_empty() {
+            return Err("repoops authority snapshot fact_sources must be non-empty".into());
+        }
+        if source.trim() != source {
+            return Err("repoops authority snapshot fact_sources must be normalized".into());
         }
     }
     Ok(())

@@ -32,12 +32,15 @@ fn better_droid_compiled_change_imports_through_covey() {
 
     let covey = Covey::open(tmp.path().join("covey.db")).expect("open covey");
     let orchestrator = covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: "orch-bd-lint-compile".to_owned(),
-            agent_instance_id: "orch-bd-lint-compile-1".to_owned(),
-            role: SessionRole::Orchestrator,
-            idempotency_key: "register-orch-bd-lint-compile".to_owned(),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "orch-bd-lint-compile",
+                "orch-bd-lint-compile-1",
+                SessionRole::Orchestrator,
+                "register-orch-bd-lint-compile",
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register orchestrator");
     let imported = covey
         .import_openspec(ImportOpenSpecReq::write(

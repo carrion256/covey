@@ -18,7 +18,6 @@ pub(super) fn meta_provenance(
 ) -> OpenSpecImportProvenance {
     OpenSpecImportProvenance::meta_task(
         OpenSpecImportProvenanceCommon::new(
-            object_id.to_owned(),
             source.change_id.clone(),
             source.change_path.clone(),
             source.tasks_digest.clone(),
@@ -26,11 +25,14 @@ pub(super) fn meta_provenance(
             source.mission_artifact_digests.clone(),
             source.mission_artifacts.clone(),
             timestamp_ms(now),
-        ),
+        )
+        .expect("validated OpenSpec source change id must be valid provenance"),
+        object_id.to_owned(),
         source.proposal_digest.clone(),
         source.design_digest.clone(),
         source.spec_digests.clone(),
     )
+    .expect("deterministic OpenSpec meta-task id must be a valid Covey id")
 }
 
 pub(super) fn task_provenance(
@@ -41,7 +43,6 @@ pub(super) fn task_provenance(
 ) -> OpenSpecImportProvenance {
     OpenSpecImportProvenance::subtask(
         OpenSpecImportProvenanceCommon::new(
-            object_id.to_owned(),
             source.change_id.clone(),
             source.change_path.clone(),
             source.tasks_digest.clone(),
@@ -49,10 +50,13 @@ pub(super) fn task_provenance(
             source.mission_artifact_digests.clone(),
             source.mission_artifacts.clone(),
             timestamp_ms(now),
-        ),
+        )
+        .expect("validated OpenSpec source change id must be valid provenance"),
+        object_id.to_owned(),
         task.task_id.clone(),
         task.task_digest.clone(),
     )
+    .expect("deterministic OpenSpec subtask id must be a valid Covey id")
 }
 
 pub(super) fn provenance_equivalent(

@@ -16,14 +16,14 @@ use covey::{
     AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimNextReq,
     ClaimReadyQueueReq, ClaimResult, ClaimSubtaskReq, Covey, CoveyError, CreateSubtaskRequest,
     DecideReviewReq, EnqueueForApplyReq, EventPayload, EventType, ExitSessionReq, FenceSeq,
-    HeartbeatReq, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason,
-    LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
-    OverlapQueryReq, PublishArtifactReq, ReadyQueueState, RecordApplyVerificationReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
-    ReservationOverlapConflictPayload, ResolveConflictReq, ScopeClass, SessionRole, SessionState,
-    SessionToken, SettlementTarget, StartSubtaskReq, StateValue, SubmitMetaTaskReq, SubtaskId,
-    SubtaskKind, SubtaskState,
+    HeartbeatReq, IdempotencyKey, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
+    ImportBdV1SkipReason, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq,
+    MetaTaskState, ObjectType, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
+    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
+    RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq, ScopeClass,
+    SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq, StateValue,
+    SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState,
 };
 use rusqlite::ffi::{SQLITE_TESTCTRL_FAULT_INSTALL, sqlite3_test_control};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -45,6 +45,10 @@ fn session_token(value: &str) -> SessionToken {
 }
 
 fn subtask_id(value: &str) -> SubtaskId {
+    SubtaskId::parse(value).expect("test subtask id must be valid")
+}
+
+fn parse_subtask_id(value: &str) -> SubtaskId {
     SubtaskId::parse(value).expect("test subtask id must be valid")
 }
 
@@ -78,14 +82,18 @@ impl Rig {
 fn register(covey: &Covey, token: &str, principal: &str, role: SessionRole) -> String {
     let _ = token;
     covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: principal.into(),
-            agent_instance_id: format!("{principal}-instance"),
-            role,
-            idempotency_key: id_key("register-session"),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                principal,
+                format!("{principal}-instance"),
+                role,
+                id_key("register-session"),
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register session")
         .session_token
+        .to_string()
 }
 
 fn attest(covey: &Covey, session_token: &str) {
@@ -113,20 +121,24 @@ fn seed_work_subtask(rig: &Rig) -> (String, String) {
     let covey = rig.covey();
     let orch = register(&covey, "orch", "orch", SessionRole::Orchestrator);
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "operator quest".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "operator quest",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta task");
     rig.tick(1);
     let subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch,
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("work_1".into()),
+            session_token: covey::SessionToken::parse(orch).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("work_1")),
             title: "implement covey".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create subtask");
@@ -196,20 +208,26 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
     );
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim work subtask")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start work subtask");
     covey
         .publish_artifact(
@@ -241,12 +259,15 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
         )
         .expect("request review");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker,
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker,
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release work claim");
 
     let review_subtask_id = covey
@@ -258,21 +279,27 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
         .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask id");
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim review subtask")
         .expect("review claim result");
     assert_eq!(review_claim.subtask_id, review_subtask_id);
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review subtask");
     covey
         .decide_review(
@@ -401,11 +428,12 @@ fn seed_invalid_bd_import_source(db_path: &Path) {
     }
 }
 
-fn id_key(label: &str) -> String {
-    format!(
+fn id_key(label: &str) -> IdempotencyKey {
+    IdempotencyKey::parse(format!(
         "{label}-{}",
         NEXT_IDEMPOTENCY_KEY.fetch_add(1, Ordering::Relaxed)
-    )
+    ))
+    .expect("valid idempotency key")
 }
 
 fn claim_ready_queue_req(
@@ -443,17 +471,17 @@ fn mark_applied_req(
 }
 
 fn send_heartbeat(covey: &Covey, session_token: &str) -> covey::Result<()> {
-    covey.heartbeat(HeartbeatReq {
-        session_token: session_token.to_owned(),
-        idempotency_key: id_key("heartbeat"),
-    })
+    covey.heartbeat(
+        HeartbeatReq::try_from_raw_parts(session_token, id_key("heartbeat"))
+            .expect("valid heartbeat request"),
+    )
 }
 
 fn close_session(covey: &Covey, session_token: &str) -> covey::Result<()> {
-    covey.exit_session(ExitSessionReq {
-        session_token: session_token.to_owned(),
-        idempotency_key: id_key("exit-session"),
-    })
+    covey.exit_session(
+        ExitSessionReq::try_from_raw_parts(session_token, id_key("exit-session"))
+            .expect("valid exit-session request"),
+    )
 }
 
 fn pragma_integrity_check(db_path: &Path) -> String {
@@ -498,12 +526,15 @@ fn session_lifecycle_and_stale_reap_follow_spec() {
     let covey = rig.covey();
 
     let sess_a = register(&covey, "sess_a", "principal_a", SessionRole::Executor);
-    let duplicate = covey.register_session(RegisterSessionReq {
-        agent_principal_id: "principal_a".into(),
-        agent_instance_id: "principal_a-next".into(),
-        role: SessionRole::Executor,
-        idempotency_key: id_key("register-session"),
-    });
+    let duplicate = covey.register_session(
+        RegisterSessionReq::try_from_raw_parts(
+            "principal_a",
+            "principal_a-next",
+            SessionRole::Executor,
+            id_key("register-session"),
+        )
+        .expect("valid session registration request"),
+    );
     assert!(matches!(
         duplicate,
         Err(CoveyError::SessionAlreadyActive { agent_principal_id }) if agent_principal_id == "principal_a"
@@ -525,12 +556,15 @@ fn session_lifecycle_and_stale_reap_follow_spec() {
             if from == SessionState::Exited.into() && object == ObjectType::Session
     ));
     assert!(matches!(
-        covey.register_session(RegisterSessionReq {
-            agent_principal_id: "principal_b".into(),
-            agent_instance_id: "principal_b-instance".into(),
-            role: SessionRole::Reviewer,
-            idempotency_key: id_key("register-session"),
-        }),
+        covey.register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "principal_b",
+                "principal_b-instance",
+                SessionRole::Reviewer,
+                id_key("register-session"),
+            )
+            .expect("valid session registration request"),
+        ),
         Ok(handle) if handle.session_token != sess_a
     ));
     rig.tick(1);
@@ -542,12 +576,13 @@ fn idempotent_mutations_replay_and_reject_payload_drift() {
     let rig = Rig::new();
     let covey = rig.covey();
 
-    let request = RegisterSessionReq {
-        agent_principal_id: "principal".into(),
-        agent_instance_id: "instance".into(),
-        role: SessionRole::Executor,
-        idempotency_key: "register-stable-key".into(),
-    };
+    let request = RegisterSessionReq::try_from_raw_parts(
+        "principal",
+        "instance",
+        SessionRole::Executor,
+        "register-stable-key",
+    )
+    .expect("valid session registration request");
     let first = covey
         .register_session(request.clone())
         .expect("first register");
@@ -555,12 +590,15 @@ fn idempotent_mutations_replay_and_reject_payload_drift() {
     assert_eq!(first, replay);
 
     assert!(matches!(
-        covey.register_session(RegisterSessionReq {
-            agent_principal_id: "principal".into(),
-            agent_instance_id: "different-instance".into(),
-            role: SessionRole::Executor,
-            idempotency_key: "register-stable-key".into(),
-        }),
+        covey.register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "principal",
+                "different-instance",
+                SessionRole::Executor,
+                "register-stable-key",
+            )
+            .expect("valid session registration request"),
+        ),
         Err(CoveyError::IdempotencyConflict { actor_key, operation, idempotency_key })
             if actor_key == "principal"
                 && operation == "register_session"
@@ -576,21 +614,27 @@ fn failed_mutations_do_not_append_event_rows_and_artifact_digests_are_unique() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim next")
         .expect("claim exists");
     rig.tick(1);
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start work");
     rig.tick(1);
     covey
@@ -650,38 +694,50 @@ fn stale_fence_tokens_are_rejected_after_reclaim() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let first = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("first claim")
         .expect("claim result");
     rig.tick(1);
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker.clone(),
-            claim_id: first.claim_id.clone(),
-            fence_seq: first.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                first.claim_id.clone(),
+                first.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release first");
 
     rig.tick(1);
     let second = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("second claim")
         .expect("claim result");
-    let stale = covey.release_claim(ReleaseClaimReq {
-        session_token: worker.clone(),
-        claim_id: first.claim_id,
-        fence_seq: first.fence_seq,
-        idempotency_key: id_key("release-claim"),
-    });
+    let stale = covey.release_claim(
+        ReleaseClaimReq::try_from_raw_parts(
+            worker.clone(),
+            first.claim_id,
+            first.fence_seq,
+            id_key("release-claim"),
+        )
+        .expect("valid release-claim request"),
+    );
     assert!(matches!(
         stale,
         Err(CoveyError::ClaimNotFound)
@@ -700,23 +756,29 @@ fn claim_renewal_extends_the_active_lease() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     rig.tick(5_000);
 
     let renewed = covey
-        .renew_claim(RenewClaimReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            extend_by_ms: LeaseDurationMs::parse(20_000).expect("valid lease duration"),
-            idempotency_key: id_key("renew-claim"),
-        })
+        .renew_claim(
+            RenewClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                LeaseDurationMs::parse(20_000).expect("valid lease duration"),
+                id_key("renew-claim"),
+            )
+            .expect("valid renew-claim request"),
+        )
         .expect("renew claim");
     assert_eq!(renewed.claim_id, claim.claim_id);
     assert_eq!(renewed.fence_seq, claim.fence_seq);
@@ -724,12 +786,15 @@ fn claim_renewal_extends_the_active_lease() {
 
     rig.tick(10_001);
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker,
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker,
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start after renewal");
 }
 
@@ -876,7 +941,7 @@ fn import_bd_reimport_allowed_non_task_types_is_deterministic() {
     let meta_status = covey
         .meta_task_status(&destination_meta_task_id)
         .expect("meta-task status");
-    assert_eq!(meta_status.meta_task().state, MetaTaskState::Active);
+    assert_eq!(meta_status.meta_task().state(), MetaTaskState::Active);
     assert_eq!(meta_status.subtasks().len(), 1);
     let imported = &meta_status.subtasks()[0];
     assert!(imported.subtask_id.starts_with("bdwork_bd_feature_1_"));
@@ -1151,7 +1216,7 @@ fn import_bd_creates_available_work_subtasks() {
     let meta_status = covey
         .meta_task_status(&result.meta_task_id)
         .expect("meta-task status");
-    assert_eq!(meta_status.meta_task().state, MetaTaskState::Active);
+    assert_eq!(meta_status.meta_task().state(), MetaTaskState::Active);
     assert_eq!(meta_status.subtasks().len(), 4);
     for subtask in meta_status.subtasks() {
         assert_eq!(subtask.kind(), SubtaskKind::Work);
@@ -1191,19 +1256,23 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
     );
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "existing destination".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "existing destination",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta task");
     let manual_subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("manual_existing_work".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("manual_existing_work")),
             title: "manual existing work".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create manual subtask");
@@ -1228,7 +1297,7 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
     let meta_status = covey
         .meta_task_status(&result.meta_task_id)
         .expect("meta-task status");
-    assert_eq!(meta_status.meta_task().state, MetaTaskState::Active);
+    assert_eq!(meta_status.meta_task().state(), MetaTaskState::Active);
     assert_eq!(meta_status.subtasks().len(), 5);
     assert!(
         meta_status
@@ -1293,7 +1362,7 @@ fn import_bd_empty_source_creates_destination_without_subtasks_or_side_effects()
     let meta_status = covey
         .meta_task_status(&result.meta_task_id)
         .expect("meta-task status");
-    assert_eq!(meta_status.meta_task().state, MetaTaskState::Planning);
+    assert_eq!(meta_status.meta_task().state(), MetaTaskState::Planning);
     assert!(meta_status.subtasks().is_empty());
 
     let session_status = covey.session_status(&orch).expect("session status");
@@ -1510,7 +1579,7 @@ fn import_bd_allowed_type_labels_and_casefolding_behave_correctly() {
     let meta_status = covey
         .meta_task_status(&result.meta_task_id)
         .expect("meta-task status");
-    assert_eq!(meta_status.meta_task().state, MetaTaskState::Active);
+    assert_eq!(meta_status.meta_task().state(), MetaTaskState::Active);
     assert_eq!(meta_status.subtasks().len(), 2);
     for subtask in meta_status.subtasks() {
         assert_eq!(subtask.kind(), SubtaskKind::Work);
@@ -1747,12 +1816,13 @@ fn claim_subtask_error_precedence_contract() {
 
 #[test]
 fn claim_subtask_type_surface_smoke() {
-    let req = ClaimSubtaskReq {
-        session_token: "session_abc123".to_owned(),
-        subtask_id: covey::SubtaskId::parse("subtask_xyz789".to_owned()).expect("valid subtask id"),
-        lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-        idempotency_key: "idem_key_001".to_owned(),
-    };
+    let req = ClaimSubtaskReq::try_from_raw_parts(
+        "session_abc123".to_owned(),
+        covey::SubtaskId::parse("subtask_xyz789".to_owned()).expect("valid subtask id"),
+        covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+        "idem_key_001".to_owned(),
+    )
+    .expect("valid claim-subtask request");
 
     let json = serde_json::to_string(&req).expect("serializes to JSON");
     let decoded: ClaimSubtaskReq = serde_json::from_str(&json).expect("deserializes from JSON");
@@ -1889,12 +1959,15 @@ fn claim_subtask_claims_known_available_work_subtask() {
     );
 
     let claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("claim known subtask");
 
     assert_eq!(claim.subtask_id, subtask_id);
@@ -1948,12 +2021,15 @@ fn claim_subtask_claims_changes_requested_work_subtask() {
     let before_events = count_subtask_claim_events(&covey);
 
     let claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-changes-requested"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-changes-requested"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("claim changes requested subtask");
 
     assert_eq!(claim.subtask_id, subtask_id);
@@ -1991,12 +2067,7 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
     let before_work_events = count_subtask_claim_events(&covey);
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: reviewer.clone(),
-            subtask_id: covey::SubtaskId::parse(work_subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-wrong-role-work"),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(reviewer.clone(), covey::SubtaskId::parse(work_subtask_id.clone()).expect("valid subtask id"), covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"), id_key("claim-subtask-wrong-role-work")).expect("valid claim-subtask request")),
         Err(CoveyError::WrongRole { actual, .. }) if actual == SessionRole::Reviewer
     ));
     assert_eq!(count_subtask_claim_events(&covey), before_work_events);
@@ -2008,20 +2079,26 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
         SessionRole::Executor,
     );
     let work_claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: executor.clone(),
-            subtask_id: covey::SubtaskId::parse(work_subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-review-seed"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                executor.clone(),
+                covey::SubtaskId::parse(work_subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-review-seed"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("claim work target");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: executor.clone(),
-            claim_id: work_claim.claim_id.clone(),
-            fence_seq: work_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                executor.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start work target");
     covey
         .publish_artifact(
@@ -2053,12 +2130,15 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
         )
         .expect("request review target");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: executor.clone(),
-            claim_id: work_claim.claim_id,
-            fence_seq: work_claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                executor.clone(),
+                work_claim.claim_id,
+                work_claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release work target claim");
 
     let review_subtask_id = covey
@@ -2072,12 +2152,7 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
     let before_review_events = count_subtask_claim_events(&covey);
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: executor,
-            subtask_id: covey::SubtaskId::parse(review_subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-wrong-role-review"),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(executor, covey::SubtaskId::parse(review_subtask_id).expect("valid subtask id"), covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"), id_key("claim-subtask-wrong-role-review")).expect("valid claim-subtask request")),
         Err(CoveyError::WrongRole { actual, .. }) if actual == SessionRole::Executor
     ));
     assert_eq!(count_subtask_claim_events(&covey), before_review_events);
@@ -2103,20 +2178,18 @@ fn claim_subtask_rejects_terminal_meta_task() {
     let before_events = count_subtask_claim_events(&covey);
 
     covey
-        .cancel_meta_task(CancelMetaTaskReq {
-            session_token: orch,
-            meta_task_id: meta_task_id.clone(),
-            idempotency_key: id_key("cancel-meta-task"),
-        })
+        .cancel_meta_task(
+            CancelMetaTaskReq::try_from_raw_parts(
+                orch,
+                meta_task_id.clone(),
+                id_key("cancel-meta-task"),
+            )
+            .expect("valid cancel-meta-task request"),
+        )
         .expect("cancel meta task");
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: worker,
-            subtask_id: covey::SubtaskId::parse(subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-terminal-meta"),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(worker, covey::SubtaskId::parse(subtask_id).expect("valid subtask id"), covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"), id_key("claim-subtask-terminal-meta")).expect("valid claim-subtask request")),
         Err(CoveyError::MetaTaskUnavailable { meta_task_id: found_meta_task_id, state })
             if found_meta_task_id == meta_task_id && state == MetaTaskState::Cancelled
     ));
@@ -2136,11 +2209,11 @@ fn claim_subtask_rejects_session_occupancy() {
     );
     let second_subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch,
-            meta_task_id,
-            subtask_id: Some("work_2".into()),
+            session_token: covey::SessionToken::parse(orch).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("work_2")),
             title: "second work".into(),
-            priority: 2,
+            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create second subtask");
@@ -2151,23 +2224,20 @@ fn claim_subtask_rejects_session_occupancy() {
         SessionRole::Executor,
     );
     let _first_claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(first_subtask_id.clone())
-                .expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-first"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                covey::SubtaskId::parse(first_subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-first"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("claim first subtask");
     let before_events = count_subtask_claim_events(&covey);
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(second_subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-second"),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(worker.clone(), covey::SubtaskId::parse(second_subtask_id).expect("valid subtask id"), covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"), id_key("claim-subtask-second")).expect("valid claim-subtask request")),
         Err(CoveyError::SessionAlreadyHasActiveSubtask { session_token, active_subtask_id })
             if session_token == worker && active_subtask_id == first_subtask_id
     ));
@@ -2193,22 +2263,20 @@ fn claim_subtask_rejects_live_claim_conflict() {
     );
 
     let _first_claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: first_worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-live-claim-a"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                first_worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-live-claim-a"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("first claim succeeds");
     let before_events = count_subtask_claim_events(&covey);
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: second_worker,
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-live-claim-b"),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(second_worker, covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"), covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"), id_key("claim-subtask-live-claim-b")).expect("valid claim-subtask request")),
         Err(CoveyError::SubtaskAlreadyClaimed { subtask_id: found_subtask_id, held_by })
             if found_subtask_id == subtask_id && held_by == first_worker
     ));
@@ -2234,23 +2302,29 @@ fn claim_subtask_expires_stale_held_claim_on_target() {
     );
 
     let first_claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: first_worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(5).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-stale-a"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                first_worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(5).expect("valid lease duration"),
+                id_key("claim-subtask-stale-a"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("first targeted claim");
     let before_reclaim_events = count_subtask_claim_events(&covey);
 
     rig.tick(6);
     let second_claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: second_worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-stale-b"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                second_worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-stale-b"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("reclaim after stale expiry");
 
     assert_eq!(
@@ -2299,22 +2373,28 @@ fn claim_subtask_is_idempotent() {
     let idempotency_key = id_key("claim-subtask-idempotent");
 
     let first = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: idempotency_key.clone(),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                idempotency_key.clone(),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("initial targeted claim");
     let events_after_first = count_subtask_claim_events(&covey);
 
     let replay = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key,
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                covey::SubtaskId::parse(subtask_id).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                idempotency_key,
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("idempotent replay");
 
     assert_eq!(replay, first);
@@ -2341,22 +2421,20 @@ fn claim_subtask_rejects_idempotency_key_payload_drift() {
     let idempotency_key = id_key("claim-subtask-stable-key");
 
     let _initial_claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: idempotency_key.clone(),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                covey::SubtaskId::parse(subtask_id).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                idempotency_key.clone(),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("initial targeted claim");
     let before_events = count_subtask_claim_events(&covey);
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: worker.clone(),
-            subtask_id: covey::SubtaskId::parse("work_1").expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(60_000).expect("valid lease duration"),
-            idempotency_key: idempotency_key.clone(),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(worker.clone(), covey::SubtaskId::parse("work_1").expect("valid subtask id"), covey::LeaseDurationMs::parse(60_000).expect("valid lease duration"), idempotency_key.clone()).expect("valid claim-subtask request")),
         Err(CoveyError::IdempotencyConflict { actor_key, operation, idempotency_key: conflict_key })
             if actor_key == worker && operation == "claim_subtask" && conflict_key == idempotency_key
     ));
@@ -2382,20 +2460,26 @@ fn claim_subtask_rejects_illegal_state_without_appending_event() {
     );
 
     let claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: first_worker.clone(),
-            subtask_id: covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-illegal-state-seed"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                first_worker.clone(),
+                covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-illegal-state-seed"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("seed claim");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: first_worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                first_worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start seeded subtask");
     covey
         .publish_artifact(
@@ -2414,22 +2498,20 @@ fn claim_subtask_rejects_illegal_state_without_appending_event() {
         )
         .expect("publish seeded artifact");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: first_worker,
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                first_worker,
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release seeded claim");
     let before_events = count_subtask_claim_events(&covey);
 
     assert!(matches!(
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: second_worker,
-            subtask_id: covey::SubtaskId::parse(subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-illegal-state"),
-        }),
+        covey.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(second_worker, covey::SubtaskId::parse(subtask_id).expect("valid subtask id"), covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"), id_key("claim-subtask-illegal-state")).expect("valid claim-subtask request")),
         Err(CoveyError::IllegalTransition { from, to, object })
             if from == SubtaskState::ArtifactPublished.into()
                 && to == SubtaskState::Claimed.into()
@@ -2463,20 +2545,25 @@ fn claim_subtask_matches_claim_next_for_changes_requested_work() {
     let next_before_events = count_subtask_claim_events(&next_covey);
 
     let targeted = targeted_covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: targeted_worker.clone(),
-            subtask_id: covey::SubtaskId::parse(targeted_subtask_id.clone())
-                .expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-equivalence"),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                targeted_worker.clone(),
+                covey::SubtaskId::parse(targeted_subtask_id.clone()).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-equivalence"),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("targeted changes requested claim");
     let next = next_covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: next_worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next-equivalence"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                next_worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next-equivalence"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("next claim result")
         .expect("next claim payload");
 
@@ -2548,12 +2635,15 @@ fn claim_subtask_mixed_path_race_single_winner() {
         let covey =
             Covey::open_with_clock(targeted_db, targeted_clock).expect("open targeted covey");
         targeted_barrier.wait();
-        covey.claim_subtask(ClaimSubtaskReq {
-            session_token: targeted_session,
-            subtask_id: covey::SubtaskId::parse(targeted_subtask_id).expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-subtask-race"),
-        })
+        covey.claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                targeted_session,
+                covey::SubtaskId::parse(targeted_subtask_id).expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-subtask-race"),
+            )
+            .expect("valid claim-subtask request"),
+        )
     });
 
     let next_db = rig.db_path.clone();
@@ -2563,11 +2653,14 @@ fn claim_subtask_mixed_path_race_single_winner() {
     let next_handle = thread::spawn(move || {
         let covey = Covey::open_with_clock(next_db, next_clock).expect("open next covey");
         next_barrier.wait();
-        covey.claim_next_subtask(ClaimNextReq {
-            session_token: next_session,
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next-race"),
-        })
+        covey.claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                next_session,
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next-race"),
+            )
+            .expect("valid claim-next request"),
+        )
     });
 
     barrier.wait();
@@ -2625,20 +2718,26 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     rig.tick(1);
     covey
@@ -2712,20 +2811,26 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -2774,12 +2879,15 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
         )
         .expect("publish b");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release worker");
 
     let review_subtask_id = covey
@@ -2792,21 +2900,27 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
         .expect("review subtask");
 
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim review")
         .expect("review claim");
     assert_eq!(review_claim.subtask_id, review_subtask_id);
     assert!(matches!(
-        covey.start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-        idempotency_key: id_key("start-subtask"),
-        }),
+        covey.start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        ),
         Err(CoveyError::IllegalTransition { object, .. }) if object == ObjectType::Review
     ));
 
@@ -2834,29 +2948,33 @@ fn ready_queue_orders_items_and_applies_in_order() {
     let gate = register(&covey, "gate", "gate", SessionRole::ApplyGate);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "queue".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "queue",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta task");
     let first = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("ready_1".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("ready_1")),
             title: "first".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask1");
     let second = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("ready_2".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("ready_2")),
             title: "second".into(),
-            priority: 2,
+            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask2");
@@ -2869,21 +2987,22 @@ fn ready_queue_orders_items_and_applies_in_order() {
         let worker = register(&covey, &worker_alias, &worker_alias, SessionRole::Executor);
         attest(&covey, &worker);
         let claim = covey
-            .claim_next_subtask(ClaimNextReq {
-                session_token: worker.clone(),
-                lease_duration_ms: covey::LeaseDurationMs::parse(30_000)
-                    .expect("valid lease duration"),
-                idempotency_key: id_key("claim-next"),
-            })
+            .claim_next_subtask(
+                ClaimNextReq::try_from_raw_parts(worker.clone(), 30_000, id_key("claim-next"))
+                    .expect("valid claim-next request"),
+            )
             .expect("claim")
             .expect("claim result");
         covey
-            .start_subtask(StartSubtaskReq {
-                session_token: worker.clone(),
-                claim_id: claim.claim_id.clone(),
-                fence_seq: claim.fence_seq,
-                idempotency_key: id_key("start-subtask"),
-            })
+            .start_subtask(
+                StartSubtaskReq::try_from_raw_parts(
+                    worker.clone(),
+                    claim.claim_id.clone(),
+                    claim.fence_seq,
+                    id_key("start-subtask"),
+                )
+                .expect("valid start-subtask request"),
+            )
             .expect("start");
         covey
             .publish_artifact(
@@ -2915,12 +3034,15 @@ fn ready_queue_orders_items_and_applies_in_order() {
             )
             .expect("review req");
         covey
-            .release_claim(ReleaseClaimReq {
-                session_token: worker.clone(),
-                claim_id: claim.claim_id,
-                fence_seq: claim.fence_seq,
-                idempotency_key: id_key("release-claim"),
-            })
+            .release_claim(
+                ReleaseClaimReq::try_from_raw_parts(
+                    worker.clone(),
+                    claim.claim_id,
+                    claim.fence_seq,
+                    id_key("release-claim"),
+                )
+                .expect("valid release-claim request"),
+            )
             .expect("release");
         let reviewer_alias = format!("reviewer_{digest}");
         let reviewer = register(
@@ -2931,21 +3053,22 @@ fn ready_queue_orders_items_and_applies_in_order() {
         );
         attest(&covey, &reviewer);
         let review_claim = covey
-            .claim_next_subtask(ClaimNextReq {
-                session_token: reviewer.clone(),
-                lease_duration_ms: covey::LeaseDurationMs::parse(30_000)
-                    .expect("valid lease duration"),
-                idempotency_key: id_key("claim-next"),
-            })
+            .claim_next_subtask(
+                ClaimNextReq::try_from_raw_parts(reviewer.clone(), 30_000, id_key("claim-next"))
+                    .expect("valid claim-next request"),
+            )
             .expect("claim review")
             .expect("review claim");
         covey
-            .start_subtask(StartSubtaskReq {
-                session_token: reviewer.clone(),
-                claim_id: review_claim.claim_id.clone(),
-                fence_seq: review_claim.fence_seq,
-                idempotency_key: id_key("start-subtask"),
-            })
+            .start_subtask(
+                StartSubtaskReq::try_from_raw_parts(
+                    reviewer.clone(),
+                    review_claim.claim_id.clone(),
+                    review_claim.fence_seq,
+                    id_key("start-subtask"),
+                )
+                .expect("valid start-subtask request"),
+            )
             .expect("start review");
         covey
             .decide_review(
@@ -3034,37 +3157,46 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
     attest(&covey, &reviewer);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "queue reclaim".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "queue reclaim",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta");
     let subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("queue_reclaim".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("queue_reclaim")),
             title: "queue reclaim".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask");
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -3096,28 +3228,37 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
         )
         .expect("review req");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release");
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim review")
         .expect("review claim");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review");
     covey
         .decide_review(
@@ -3353,11 +3494,11 @@ fn overlapping_reservations_surface_open_typed_conflicts() {
     );
     let second_subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("shadow_work".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("shadow_work")),
             title: "shadow work".into(),
-            priority: 2,
+            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create second subtask");
@@ -3401,20 +3542,20 @@ fn overlapping_reservations_surface_open_typed_conflicts() {
         })
         .expect("reservation overlap conflict");
     let payload: ReservationOverlapConflictPayload =
-        serde_json::from_str(conflict.payload_json()).expect("typed conflict payload");
+        serde_json::from_str(&conflict.payload_json()).expect("typed conflict payload");
 
     assert_eq!(
         conflict.resolution_state(),
         covey::ConflictResolutionState::Open
     );
-    assert_eq!(payload.reservation_id, second_reservation);
-    assert_eq!(payload.overlapping_reservation_id, first_reservation);
-    assert_eq!(payload.owner_subtask_id, second_subtask_id);
-    assert_eq!(payload.overlapping_owner_subtask_id, first_subtask_id);
-    assert_eq!(payload.scope_class, ScopeClass::ExactPath);
-    assert_eq!(payload.scope_key, "src/covey/store.rs");
-    assert_eq!(payload.overlapping_scope_class, ScopeClass::Subtree);
-    assert_eq!(payload.overlapping_scope_key, "src/covey");
+    assert_eq!(payload.reservation_id(), second_reservation);
+    assert_eq!(payload.overlapping_reservation_id(), first_reservation);
+    assert_eq!(payload.owner_subtask_id(), second_subtask_id);
+    assert_eq!(payload.overlapping_owner_subtask_id(), first_subtask_id);
+    assert_eq!(payload.scope_class(), ScopeClass::ExactPath);
+    assert_eq!(payload.scope_key(), "src/covey/store.rs");
+    assert_eq!(payload.overlapping_scope_class(), ScopeClass::Subtree);
+    assert_eq!(payload.overlapping_scope_key(), "src/covey");
 }
 
 #[test]
@@ -3423,21 +3564,26 @@ fn concurrent_pool_claims_distribute_exactly_once() {
     let covey = rig.covey();
     let orch = register(&covey, "orch", "orch", SessionRole::Orchestrator);
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "parallel".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "parallel",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta task");
     let mut session_tokens = Vec::new();
     for idx in 0..10 {
         covey
             .create_subtask(CreateSubtaskRequest {
-                session_token: orch.clone(),
-                meta_task_id: meta_task_id.clone(),
-                subtask_id: Some(format!("task_{idx}")),
+                session_token: covey::SessionToken::parse(orch.clone())
+                    .expect("valid session token"),
+                meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                    .expect("valid meta-task id"),
+                subtask_id: Some(parse_subtask_id(&format!("task_{idx}"))),
                 title: format!("task {idx}"),
-                priority: idx,
+                priority: covey::SubtaskPriority::parse(idx).expect("valid subtask priority"),
                 idempotency_key: id_key("create-subtask"),
             })
             .expect("create subtask");
@@ -3452,12 +3598,10 @@ fn concurrent_pool_claims_distribute_exactly_once() {
         handles.push(thread::spawn(move || {
             let covey = Covey::open_with_clock(db, clock).expect("open worker covey");
             covey
-                .claim_next_subtask(ClaimNextReq {
-                    session_token,
-                    lease_duration_ms: covey::LeaseDurationMs::parse(30_000)
-                        .expect("valid lease duration"),
-                    idempotency_key: id_key("claim-next"),
-                })
+                .claim_next_subtask(
+                    ClaimNextReq::try_from_raw_parts(session_token, 30_000, id_key("claim-next"))
+                        .expect("valid claim-next request"),
+                )
                 .expect("claim call")
                 .map(|claim| claim.subtask_id)
         }));
@@ -3490,12 +3634,10 @@ fn concurrent_claim_on_single_subtask_has_exactly_one_winner() {
         handles.push(thread::spawn(move || {
             let covey = Covey::open_with_clock(db, clock).expect("open worker covey");
             covey
-                .claim_next_subtask(ClaimNextReq {
-                    session_token,
-                    lease_duration_ms: covey::LeaseDurationMs::parse(30_000)
-                        .expect("valid lease duration"),
-                    idempotency_key: id_key("claim-next"),
-                })
+                .claim_next_subtask(
+                    ClaimNextReq::try_from_raw_parts(session_token, 30_000, id_key("claim-next"))
+                        .expect("valid claim-next request"),
+                )
                 .ok()
                 .flatten()
                 .map(|claim| claim.claim_id)
@@ -3517,11 +3659,14 @@ fn stale_reap_immediately_expires_orphaned_claims_and_clears_session_and_subtask
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let _claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
 
@@ -3558,9 +3703,9 @@ fn event_log_windows_are_strictly_monotonic_and_decode_to_typed_payloads() {
 
     let events = covey.fetch_events(0, 10).expect("all events");
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0].seq, 1);
-    assert_eq!(events[1].seq, 2);
-    assert_eq!(events[2].seq, 3);
+    assert_eq!(events[0].seq(), 1);
+    assert_eq!(events[1].seq(), 2);
+    assert_eq!(events[2].seq(), 3);
     assert_eq!(events[0].event_type(), EventType::SessionRegistered);
     assert_eq!(events[0].object_type(), ObjectType::Session);
     assert_eq!(events[0].actor_kind(), ActorKind::Session);
@@ -3599,7 +3744,7 @@ fn event_log_windows_are_strictly_monotonic_and_decode_to_typed_payloads() {
 
     let after_first = covey.fetch_events(1, 10).expect("windowed events");
     assert_eq!(after_first.len(), 2);
-    assert!(after_first.iter().all(|event| event.seq > 1));
+    assert!(after_first.iter().all(|event| event.seq() > 1));
 }
 
 #[test]
@@ -3611,20 +3756,26 @@ fn observability_queries_report_stuck_work_expiring_claims_and_queue_metrics() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     rig.tick(5_000);
 
@@ -3707,12 +3858,15 @@ fn system_events_use_system_actor_without_session_token_and_generated_tokens_are
     let covey = rig.covey();
 
     let handle = covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: "principal".into(),
-            agent_instance_id: "instance".into(),
-            role: SessionRole::Executor,
-            idempotency_key: id_key("register-session"),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "principal",
+                "instance",
+                SessionRole::Executor,
+                id_key("register-session"),
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register");
     assert_ne!(handle.session_token, "system");
 
@@ -3738,20 +3892,26 @@ fn request_review_rejects_stale_artifact_digest_after_republish() {
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -3844,29 +4004,33 @@ fn reservation_overlap_conflicts_resolve_when_reservations_release_or_expire() {
     let orch = register(&covey, "orch", "orch", SessionRole::Orchestrator);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "reservations".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "reservations",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta");
     let subtask_a = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("reservation_a".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("reservation_a")),
             title: "reservation a".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask a");
     let subtask_b = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("reservation_b".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("reservation_b")),
             title: "reservation b".into(),
-            priority: 2,
+            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask b");
@@ -3907,10 +4071,10 @@ fn reservation_overlap_conflicts_resolve_when_reservations_release_or_expire() {
         .find(|conflict| conflict.resolution_state() == covey::ConflictResolutionState::Open)
         .expect("open conflict");
     let release_payload: ReservationOverlapConflictPayload =
-        serde_json::from_str(release_conflict.payload_json()).expect("release payload");
+        serde_json::from_str(&release_conflict.payload_json()).expect("release payload");
     let release_pairs = HashSet::from([
-        release_payload.reservation_id.clone(),
-        release_payload.overlapping_reservation_id.clone(),
+        release_payload.reservation_id().to_owned(),
+        release_payload.overlapping_reservation_id().to_owned(),
     ]);
     assert_eq!(
         release_pairs,
@@ -3973,10 +4137,10 @@ fn reservation_overlap_conflicts_resolve_when_reservations_release_or_expire() {
         .into_iter()
         .find(|conflict| {
             let payload: ReservationOverlapConflictPayload =
-                serde_json::from_str(conflict.payload_json()).expect("expire payload");
+                serde_json::from_str(&conflict.payload_json()).expect("expire payload");
             let ids = HashSet::from([
-                payload.reservation_id.clone(),
-                payload.overlapping_reservation_id.clone(),
+                payload.reservation_id().to_owned(),
+                payload.overlapping_reservation_id().to_owned(),
             ]);
             ids == HashSet::from([reservation_c.clone(), reservation_d.clone()])
         })
@@ -4034,38 +4198,47 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "queue".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "queue",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta task");
     let subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("queue_target".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("queue_target")),
             title: "queue target".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask");
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -4097,28 +4270,37 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
         )
         .expect("review req");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release");
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim review")
         .expect("review claim");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review");
     covey
         .decide_review(
@@ -4181,38 +4363,47 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "queue drift".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "queue drift",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta task");
     let subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("queue_drift_target".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("queue_drift_target")),
             title: "queue drift target".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask");
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -4244,29 +4435,38 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
         )
         .expect("review req");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release");
 
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim review")
         .expect("review claim");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review");
     covey
         .decide_review(
@@ -4357,70 +4557,80 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
     let other = register(&covey, "other", "other", SessionRole::Executor);
 
     assert!(matches!(
-        covey.submit_meta_task(SubmitMetaTaskReq {
-            session_token: worker.clone(),
-            prompt_text: "nope".into(),
-        idempotency_key: id_key("submit-meta-task"),
-        }),
+        covey.submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(worker.clone(), "nope", id_key("submit-meta-task"))
+                .expect("valid submit-meta-task request"),
+        ),
         Err(CoveyError::WrongRole { actual, .. }) if actual == SessionRole::Executor
     ));
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(5).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(5).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
 
     let second_meta = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "second".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "second",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta");
     covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: second_meta,
-            subtask_id: Some("work_2".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(second_meta).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("work_2")),
             title: "second work".into(),
-            priority: 2,
+            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("second subtask");
 
     assert!(matches!(
-        covey.claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-        idempotency_key: id_key("claim-next"),
-        }),
+        covey.claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(worker.clone(), 30_000, id_key("claim-next"))
+                .expect("valid claim-next request"),
+        ),
         Err(CoveyError::SessionAlreadyHasActiveSubtask { session_token, active_subtask_id })
             if session_token == worker && active_subtask_id == subtask_id
     ));
 
     assert!(matches!(
-        covey.release_claim(ReleaseClaimReq {
-            session_token: other.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-        idempotency_key: id_key("release-claim"),
-        }),
+        covey.release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                other.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        ),
         Err(CoveyError::NotClaimOwner { session_token, claim_owner })
             if session_token == other && claim_owner == worker
     ));
 
     rig.tick(10);
     assert!(matches!(
-        covey.start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-        idempotency_key: id_key("start-subtask"),
-        }),
+        covey.start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        ),
         Err(CoveyError::LeaseExpired { object_id }) if object_id == claim.claim_id
     ));
 
@@ -4436,21 +4646,25 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
         Err(CoveyError::ReservationNotFound)
     ));
     assert!(matches!(
-        covey.resolve_conflict(ResolveConflictReq {
-            session_token: orch.clone(),
-            conflict_id: "missing".into(),
-            resolution_state: covey::ConflictResolutionState::Resolved,
-            idempotency_key: id_key("resolve-conflict"),
-        }),
+        covey.resolve_conflict(
+            ResolveConflictReq::try_from_raw_parts(
+                orch.clone(),
+                "missing",
+                covey::ConflictResolutionState::Resolved,
+                id_key("resolve-conflict"),
+            )
+            .expect("valid conflict resolution request"),
+        ),
         Err(CoveyError::ConflictNotFound)
     ));
     assert!(matches!(
         covey.create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: "meta_does_not_exist".into(),
-            subtask_id: Some("review_bad".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse("meta_does_not_exist")
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("review_bad")),
             title: "bad review".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         }),
         Err(CoveyError::MetaTaskNotFound)
@@ -4472,30 +4686,34 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "errors".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "errors",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("meta");
     covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("dup".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("dup")),
             title: "dup".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("first subtask");
 
     assert!(matches!(
         covey.create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("dup".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone()).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("dup")),
             title: "dup".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
         idempotency_key: id_key("create-subtask"),
         }),
         Err(CoveyError::DuplicateSubtaskId { subtask_id }) if subtask_id == "dup"
@@ -4507,20 +4725,26 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
     ));
 
     let work_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: work_claim.claim_id.clone(),
-            fence_seq: work_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -4540,11 +4764,12 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
         .expect("publish");
     covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("other_work".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("other_work")),
             title: "other work".into(),
-            priority: 3,
+            priority: covey::SubtaskPriority::parse(3).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("other work subtask");
@@ -4578,29 +4803,35 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
         .expect("request review");
     covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("wrong_claim_subtask".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("wrong_claim_subtask")),
             title: "wrong claim subtask".into(),
-            priority: 0,
+            priority: covey::SubtaskPriority::parse(0).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("wrong claim subtask");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker.clone(),
-            claim_id: work_claim.claim_id,
-            fence_seq: work_claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id,
+                work_claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release");
 
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim wrong subtask")
         .expect("claim result");
     assert_eq!(review_claim.subtask_id, "review_dup");
@@ -4622,11 +4853,14 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
     ));
 
     let worker_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim work subtask")
         .expect("claim result");
     assert_eq!(worker_claim.subtask_id, "wrong_claim_subtask");
@@ -4674,7 +4908,7 @@ fn concurrent_heartbeats_succeed_for_all_sessions() {
             .session_status(&session_token)
             .expect("session status");
         assert_eq!(status.session().state(), SessionState::Active);
-        assert!(status.session().last_heartbeat_at >= status.session().created_at);
+        assert!(status.session().last_heartbeat_at() >= status.session().created_at());
     }
 }
 
@@ -4726,12 +4960,15 @@ fn write_transactions_retry_when_the_database_is_temporarily_busy() {
 
     let handle = thread::spawn(move || {
         covey
-            .register_session(RegisterSessionReq {
-                agent_principal_id: "retry_principal".into(),
-                agent_instance_id: "retry_instance".into(),
-                role: SessionRole::Executor,
-                idempotency_key: id_key("register-session"),
-            })
+            .register_session(
+                RegisterSessionReq::try_from_raw_parts(
+                    "retry_principal",
+                    "retry_instance",
+                    SessionRole::Executor,
+                    id_key("register-session"),
+                )
+                .expect("valid session registration request"),
+            )
             .expect("register after retry")
             .session_token
     });
@@ -4849,12 +5086,15 @@ fn sqlite_fault_helper_rolls_back_mid_transaction() {
     let covey = rig.covey();
 
     install_sqlite_fault_callback(SQLITE_SYNC_FAULT_CODE);
-    let result = covey.register_session(RegisterSessionReq {
-        agent_principal_id: "faulty_principal".into(),
-        agent_instance_id: "faulty_instance".into(),
-        role: SessionRole::Executor,
-        idempotency_key: id_key("register-session"),
-    });
+    let result = covey.register_session(
+        RegisterSessionReq::try_from_raw_parts(
+            "faulty_principal",
+            "faulty_instance",
+            SessionRole::Executor,
+            id_key("register-session"),
+        )
+        .expect("valid session registration request"),
+    );
     uninstall_sqlite_fault_callback();
 
     assert!(
@@ -4916,48 +5156,58 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
     attest(&covey, &gate);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "full flow".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "full flow",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit");
     let apply_subtask = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("apply_me".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("apply_me")),
             title: "apply me".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask a");
     let abandon_subtask = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("abandon_me".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("abandon_me")),
             title: "abandon me".into(),
-            priority: 2,
+            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("subtask b");
 
     let claim_a = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker_a.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker_a.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim a")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker_a.clone(),
-            claim_id: claim_a.claim_id.clone(),
-            fence_seq: claim_a.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker_a.clone(),
+                claim_a.claim_id.clone(),
+                claim_a.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start a");
     covey
         .publish_artifact(
@@ -4989,29 +5239,38 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
         )
         .expect("request review");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker_a.clone(),
-            claim_id: claim_a.claim_id,
-            fence_seq: claim_a.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker_a.clone(),
+                claim_a.claim_id,
+                claim_a.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release a");
 
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim review")
         .expect("review claim");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review");
     covey
         .decide_review(
@@ -5066,28 +5325,37 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
         .expect("applied");
 
     let claim_b = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker_b.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker_b.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim b")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker_b.clone(),
-            claim_id: claim_b.claim_id.clone(),
-            fence_seq: claim_b.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker_b.clone(),
+                claim_b.claim_id.clone(),
+                claim_b.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start b");
     covey
-        .abandon_subtask(AbandonSubtaskReq {
-            session_token: worker_b.clone(),
-            claim_id: claim_b.claim_id,
-            fence_seq: claim_b.fence_seq,
-            idempotency_key: id_key("abandon-subtask"),
-        })
+        .abandon_subtask(
+            AbandonSubtaskReq::try_from_raw_parts(
+                worker_b.clone(),
+                claim_b.claim_id,
+                claim_b.fence_seq,
+                id_key("abandon-subtask"),
+            )
+            .expect("valid abandon-subtask request"),
+        )
         .expect("abandon");
 
     assert_eq!(
@@ -5113,7 +5381,7 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
     let events = covey.fetch_events(0, 1_000).expect("events");
     assert!(!events.is_empty());
     for pair in events.windows(2) {
-        assert!(pair[0].seq < pair[1].seq);
+        assert!(pair[0].seq() < pair[1].seq());
         let _ = pair[0].typed().expect("typed event");
     }
     let _ = events
@@ -5136,28 +5404,32 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
     attest(&covey, &gate);
 
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "meta lifecycle".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "meta lifecycle",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta");
     assert_eq!(
         covey
             .meta_task_status(&meta_task_id)
             .expect("planning status")
             .meta_task()
-            .state,
+            .state(),
         MetaTaskState::Planning
     );
 
     let subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some("meta_flow_work".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                .expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("meta_flow_work")),
             title: "meta flow work".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create subtask");
@@ -5166,25 +5438,31 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
             .meta_task_status(&meta_task_id)
             .expect("active status")
             .meta_task()
-            .state,
+            .state(),
         MetaTaskState::Active
     );
 
     let work_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: work_claim.claim_id.clone(),
-            fence_seq: work_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
     covey
         .publish_artifact(
@@ -5216,29 +5494,38 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
         )
         .expect("request review");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker,
-            claim_id: work_claim.claim_id,
-            fence_seq: work_claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker,
+                work_claim.claim_id,
+                work_claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release work claim");
 
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("review claim")
         .expect("review claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review");
     covey
         .decide_review(
@@ -5298,7 +5585,7 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
             .meta_task_status(&meta_task_id)
             .expect("completed status")
             .meta_task()
-            .state,
+            .state(),
         MetaTaskState::Completed
     );
 }
@@ -5309,52 +5596,65 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
     let covey = rig.covey();
     let long = "x".repeat(10_000);
 
-    assert!(matches!(
-        covey.register_session(RegisterSessionReq {
-            agent_principal_id: long.clone(),
-            agent_instance_id: "instance".into(),
-            role: SessionRole::Executor,
-            idempotency_key: id_key("register-session"),
-        }),
-        Err(CoveyError::InputTooLarge { field, .. }) if field == "agent_principal_id"
-    ));
-    assert!(matches!(
-        covey.register_session(RegisterSessionReq {
-            agent_principal_id: "principal".into(),
-            agent_instance_id: long.clone(),
-            role: SessionRole::Executor,
-            idempotency_key: id_key("register-session"),
-        }),
-        Err(CoveyError::InputTooLarge { field, .. }) if field == "agent_instance_id"
-    ));
+    let oversized_principal = RegisterSessionReq::try_from_raw_parts(
+        long.clone(),
+        "instance",
+        SessionRole::Executor,
+        id_key("register-session"),
+    )
+    .expect_err("oversized agent principal id should be rejected before operation execution");
+    assert!(
+        oversized_principal
+            .to_string()
+            .contains("invalid agent_principal_id"),
+        "unexpected error: {oversized_principal}"
+    );
+    let oversized_instance = RegisterSessionReq::try_from_raw_parts(
+        "principal",
+        long.clone(),
+        SessionRole::Executor,
+        id_key("register-session"),
+    )
+    .expect_err("oversized agent instance id should be rejected before operation execution");
+    assert!(
+        oversized_instance
+            .to_string()
+            .contains("invalid agent_instance_id"),
+        "unexpected error: {oversized_instance}"
+    );
 
     let orch = register(&covey, "orch", "orch", SessionRole::Orchestrator);
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "bounds".into(),
-            idempotency_key: id_key("submit-meta-task"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "bounds",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta");
-    assert!(matches!(
-        covey.create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id: meta_task_id.clone(),
-            subtask_id: Some(long.clone()),
-            title: "too long".into(),
-            priority: 1,
-            idempotency_key: id_key("create-subtask"),
-        }),
-        Err(CoveyError::InputTooLarge { field, .. }) if field == "subtask_id"
-    ));
+    let oversized_subtask_id = CreateSubtaskRequest::try_from_raw_parts(
+        orch.clone(),
+        meta_task_id.clone(),
+        Some(long.clone()),
+        "too long",
+        1,
+        id_key("create-subtask"),
+    )
+    .expect_err("oversized subtask id should be rejected before operation execution");
+    assert!(
+        oversized_subtask_id.to_string().contains("subtask_id"),
+        "unexpected error: {oversized_subtask_id}"
+    );
 
     let subtask_id = covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("bounds_work".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(parse_subtask_id("bounds_work")),
             title: "bounds work".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create subtask");
@@ -5362,20 +5662,26 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
 
     let claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: worker.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("claim")
         .expect("claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: worker.clone(),
-            claim_id: claim.claim_id.clone(),
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start");
 
     let base_rev_err = PublishArtifactReq::try_from_raw_parts(
@@ -5394,10 +5700,22 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
         base_rev_err.to_string().contains("base_rev"),
         "unexpected error: {base_rev_err}"
     );
-    assert!(matches!(
-        covey.publish_artifact(PublishArtifactReq::try_from_raw_parts(worker.clone(), claim.claim_id.clone(), claim.fence_seq, "blake3:bounds_b".into(), ArtifactKind::PatchBundle, "base".into(), long.clone(), "blake3:bounds_paths".into(), id_key("publish-artifact")).expect("valid artifact publication request")),
-        Err(CoveyError::InputTooLarge { field, .. }) if field == "manifest_path"
-    ));
+    let manifest_path_err = PublishArtifactReq::try_from_raw_parts(
+        worker.clone(),
+        claim.claim_id.clone(),
+        claim.fence_seq,
+        "blake3:bounds_b".into(),
+        ArtifactKind::PatchBundle,
+        "base".into(),
+        long.clone(),
+        "blake3:bounds_paths".into(),
+        id_key("publish-artifact"),
+    )
+    .expect_err("manifest path bounds should be enforced by the request type");
+    assert!(
+        manifest_path_err.to_string().contains("manifest_path"),
+        "unexpected error: {manifest_path_err}"
+    );
     let changed_paths_err = PublishArtifactReq::try_from_raw_parts(
         worker.clone(),
         claim.claim_id.clone(),
@@ -5447,29 +5765,38 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
         )
         .expect("request review");
     covey
-        .release_claim(ReleaseClaimReq {
-            session_token: worker,
-            claim_id: claim.claim_id,
-            fence_seq: claim.fence_seq,
-            idempotency_key: id_key("release-claim"),
-        })
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker,
+                claim.claim_id,
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
+        )
         .expect("release work claim");
 
     let review_claim = covey
-        .claim_next_subtask(ClaimNextReq {
-            session_token: reviewer.clone(),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: id_key("claim-next"),
-        })
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
         .expect("review claim")
         .expect("review claim result");
     covey
-        .start_subtask(StartSubtaskReq {
-            session_token: reviewer.clone(),
-            claim_id: review_claim.claim_id.clone(),
-            fence_seq: review_claim.fence_seq,
-            idempotency_key: id_key("start-subtask"),
-        })
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-subtask"),
+            )
+            .expect("valid start-subtask request"),
+        )
         .expect("start review");
 
     let findings_err = DecideReviewReq::try_from_raw_parts(

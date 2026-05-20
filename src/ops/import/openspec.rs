@@ -23,9 +23,6 @@ use crate::{
     validators::{MAX_OBJECT_ID_LEN, MAX_PATH_LEN, ensure_length, require_role},
 };
 
-const OPENSPEC_PLANNING_FORMAT: &str = "openspec";
-const OPENSPEC_ACTIVE_CLAIM_CONFLICT: &str = "active_claim_changed_source";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenSpecSourceSnapshot {
     change_id: String,
@@ -47,6 +44,7 @@ struct OpenSpecSourceTask {
     source_path: String,
     task_digest: String,
     task_type: Option<String>,
+    dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +59,7 @@ struct OpenSpecImportRecord {
     object_id: String,
     openspec_task_id: Option<String>,
     title: Option<String>,
+    dependencies: Vec<String>,
     action: ImportOpenSpecAction,
     provenance: OpenSpecImportProvenance,
 }
@@ -88,10 +87,11 @@ impl Covey {
     /// or mutates the OpenSpec source files.
     pub fn import_openspec(&self, req: ImportOpenSpecReq) -> Result<ImportOpenSpecResult> {
         let started_at = Instant::now();
-        ensure_length("project_root", &req.project_root, MAX_PATH_LEN)?;
+        ensure_length("project_root", req.project_root.as_str(), MAX_PATH_LEN)?;
         ensure_length("change_id", &req.change_id, MAX_OBJECT_ID_LEN)?;
         ids::validate_openspec_change_id(&req.change_id)?;
-        let source = source::load_openspec_source_snapshot(&req.project_root, &req.change_id)?;
+        let source =
+            source::load_openspec_source_snapshot(req.project_root.as_str(), &req.change_id)?;
 
         let result = if req.is_dry_run() {
             self.with_read_tx(|tx| {
@@ -125,7 +125,7 @@ impl Covey {
                         .items()
                         .iter()
                         .filter(|item| item.object_type() == ObjectType::Subtask)
-                        .map(|item| format!("subtask:{}", item.object_id)),
+                        .map(|item| format!("subtask:{}", item.object_id())),
                 );
                 affected
             },

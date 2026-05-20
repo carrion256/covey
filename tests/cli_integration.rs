@@ -85,31 +85,47 @@ fn attest_session(db_path: &Path, session_token: &str, role_label: &str) {
 
 fn register_orchestrator(covey: &Covey, principal: &str) -> String {
     covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: principal.to_owned(),
-            agent_instance_id: format!("{principal}-instance"),
-            role: SessionRole::Orchestrator,
-            idempotency_key: format!("register-{principal}"),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                principal,
+                format!("{principal}-instance"),
+                SessionRole::Orchestrator,
+                format!("register-{principal}"),
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register orchestrator")
         .session_token
+        .to_string()
 }
 
 fn seed_ready_queue_item(db_path: &Path, session_token: &str, subtask_id: &str, queue_id: &str) {
     let conn = Connection::open(db_path).expect("open seeded covey db");
+    let fixture_now_ms: i64 = conn
+        .query_row(
+            "SELECT created_at FROM subtasks WHERE subtask_id = ?1",
+            params![subtask_id],
+            |row| row.get(0),
+        )
+        .expect("seeded subtask created_at");
     conn.execute(
         r#"
         INSERT INTO artifacts (
             artifact_digest, artifact_kind, base_rev, produced_by_subtask_id,
             produced_by_session, manifest_path, changed_paths_digest, created_at
-        ) VALUES (?1, 'patch_bundle', 'base', ?2, ?3, 'manifest.json', 'blake3:paths', 1000)
+        ) VALUES (?1, 'patch_bundle', 'base', ?2, ?3, 'manifest.json', 'blake3:paths', ?4)
         "#,
-        params!["blake3:seeded-queue", subtask_id, session_token],
+        params![
+            "blake3:seeded-queue",
+            subtask_id,
+            session_token,
+            fixture_now_ms
+        ],
     )
     .expect("insert artifact fixture");
     conn.execute(
-        "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = 'blake3:seeded-queue', updated_at = 1000 WHERE subtask_id = ?1",
-        params![subtask_id],
+        "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = 'blake3:seeded-queue', updated_at = ?2 WHERE subtask_id = ?1",
+        params![subtask_id, fixture_now_ms],
     )
     .expect("mark subtask fixture ready for apply");
     conn.execute(
@@ -118,9 +134,9 @@ fn seed_ready_queue_item(db_path: &Path, session_token: &str, subtask_id: &str, 
             queue_id, artifact_digest, subtask_id, settlement_target, state,
             claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
             enqueued_at, updated_at
-        ) VALUES (?1, 'blake3:seeded-queue', ?2, 'canonical', 'queued', NULL, NULL, NULL, 1000, 1000)
+        ) VALUES (?1, 'blake3:seeded-queue', ?2, 'canonical', 'queued', NULL, NULL, NULL, ?3, ?3)
         "#,
-        params![queue_id, subtask_id],
+        params![queue_id, subtask_id, fixture_now_ms],
     )
     .expect("insert ready queue fixture");
 }
@@ -933,11 +949,14 @@ fn import_rejects_ambiguous_destination_flags() {
     let covey = Covey::open(&db).expect("open covey");
     let orch = register_orchestrator(&covey, "orch-import");
     let existing_meta = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "existing destination".into(),
-            idempotency_key: "submit-existing-meta".into(),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "existing destination",
+                "submit-existing-meta",
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta task");
 
     let both = covey.import_bd_v1_work_subtask(
@@ -969,18 +988,24 @@ fn import_rejects_ambiguous_destination_flags() {
     ));
 
     let terminal_meta = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "terminal destination".into(),
-            idempotency_key: "submit-terminal-meta".into(),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "terminal destination",
+                "submit-terminal-meta",
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit terminal meta");
     covey
-        .cancel_meta_task(covey::CancelMetaTaskReq {
-            session_token: orch.clone(),
-            meta_task_id: terminal_meta.clone(),
-            idempotency_key: "cancel-terminal-meta".into(),
-        })
+        .cancel_meta_task(
+            covey::CancelMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                terminal_meta.clone(),
+                "cancel-terminal-meta",
+            )
+            .expect("valid cancel-meta-task request"),
+        )
         .expect("cancel terminal meta");
 
     let terminal = covey.import_bd_v1_work_subtask(
@@ -1382,12 +1407,15 @@ fn import_openspec_updates_unclaimed_task_and_conflicts_on_active_claim_change()
     let covey = Covey::open(&db).expect("open covey");
     let orch = register_orchestrator(&covey, "orch-openspec-update");
     let worker = covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: "worker-openspec-update".to_owned(),
-            agent_instance_id: "worker-openspec-update-1".to_owned(),
-            role: SessionRole::Executor,
-            idempotency_key: "register-worker-openspec-update".to_owned(),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "worker-openspec-update",
+                "worker-openspec-update-1",
+                SessionRole::Executor,
+                "register-worker-openspec-update",
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register worker")
         .session_token;
 
@@ -1444,13 +1472,16 @@ fn import_openspec_updates_unclaimed_task_and_conflicts_on_active_claim_change()
     );
 
     let _claim = covey
-        .claim_subtask(ClaimSubtaskReq {
-            session_token: worker,
-            subtask_id: covey::SubtaskId::parse("openspec:openspec-covey-importer:1.1".to_owned())
-                .expect("valid subtask id"),
-            lease_duration_ms: covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-            idempotency_key: "claim-openspec-imported-task".to_owned(),
-        })
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker,
+                covey::SubtaskId::parse("openspec:openspec-covey-importer:1.1".to_owned())
+                    .expect("valid subtask id"),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                "claim-openspec-imported-task".to_owned(),
+            )
+            .expect("valid claim-subtask request"),
+        )
         .expect("claim imported subtask");
     seed_openspec_change(
         tmp.path(),
@@ -1593,11 +1624,14 @@ fn import_command_into_existing_active_meta_task() {
     let covey = Covey::open(&db).expect("open covey");
     let orch = register_orchestrator(&covey, "orch-import-existing");
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "existing active destination".into(),
-            idempotency_key: "submit-existing-active-meta".into(),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "existing active destination",
+                "submit-existing-active-meta",
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta task");
 
     let beads_db = tmp.path().join("existing-beads.db");
@@ -1631,18 +1665,24 @@ fn import_command_rejects_terminal_meta_task() {
     let covey = Covey::open(&db).expect("open covey");
     let orch = register_orchestrator(&covey, "orch-import-terminal-cli");
     let terminal_meta = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "terminal destination".into(),
-            idempotency_key: "submit-terminal-meta-cli".into(),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "terminal destination",
+                "submit-terminal-meta-cli",
+            )
+            .expect("valid submit-meta-task request"),
+        )
         .expect("submit meta task");
     covey
-        .cancel_meta_task(covey::CancelMetaTaskReq {
-            session_token: orch.clone(),
-            meta_task_id: terminal_meta.clone(),
-            idempotency_key: "cancel-terminal-meta-cli".into(),
-        })
+        .cancel_meta_task(
+            covey::CancelMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                terminal_meta.clone(),
+                "cancel-terminal-meta-cli",
+            )
+            .expect("valid cancel-meta-task request"),
+        )
         .expect("cancel terminal meta");
 
     let beads_db = tmp.path().join("terminal-beads.db");

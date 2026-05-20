@@ -57,13 +57,13 @@ impl Covey {
                     let session = require_active_session(tx, &req.session_token)?;
                     let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
-                    require_session_can_claim_kind(&session, subtask.kind)?;
-                    if subtask.kind != SubtaskKind::Work {
+                    require_session_can_claim_kind(&session, subtask.kind())?;
+                    if subtask.kind() != SubtaskKind::Work {
                         return Err(CoveyError::ReviewKindMismatch);
                     }
                     ensure_subtask_transition(
-                        subtask.kind,
-                        subtask.state,
+                        subtask.kind(),
+                        subtask.state(),
                         SubtaskState::ArtifactPublished,
                     )?;
                     ensure_artifact_digest_unused(tx, &req.artifact_digest)?;
@@ -116,12 +116,12 @@ impl Covey {
                             req.artifact_digest,
                             SubtaskState::ArtifactPublished.to_string(),
                             now,
-                            subtask.state.to_string()
+                            subtask.state().to_string()
                         ],
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: subtask.state.into(),
+                            from: subtask.state().into(),
                             to: SubtaskState::ArtifactPublished.into(),
                             object: ObjectType::Subtask,
                         });
@@ -160,22 +160,22 @@ impl Covey {
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
-                &req.session_token,
+                req.session_token.as_str(),
                 "request_review",
                 &req.idempotency_key,
                 &req,
                 crate::model::TimestampMs::parse(now)?,
                 || {
-                    let session = require_active_session(tx, &req.session_token)?;
+                    let session = require_active_session(tx, req.session_token.as_str())?;
                     require_session_can_request_review(&session)?;
                     ensure_length("subtask_id", &req.subtask_id, MAX_OBJECT_ID_LEN)?;
                     ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
                     let subtask = load_subtask_tx(tx, &req.subtask_id)?;
-                    if subtask.kind != SubtaskKind::Work {
+                    if subtask.kind() != SubtaskKind::Work {
                         return Err(CoveyError::ReviewKindMismatch);
                     }
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
-                    if subtask.artifact_digest.as_ref() != Some(&req.artifact_digest) {
+                    if subtask.artifact_digest() != Some(&req.artifact_digest) {
                         return Err(CoveyError::UnknownArtifactDigest {
                             digest: req.artifact_digest.to_string(),
                         });
@@ -183,8 +183,8 @@ impl Covey {
                     ensure_artifact_exists(tx, &req.artifact_digest)?;
                     ensure_no_open_review_round(tx, &req.subtask_id, &req.artifact_digest)?;
                     ensure_subtask_transition(
-                        subtask.kind,
-                        subtask.state,
+                        subtask.kind(),
+                        subtask.state(),
                         SubtaskState::ReviewPending,
                     )?;
 
@@ -217,7 +217,7 @@ impl Covey {
                             req.subtask_id.as_str(),
                             req.artifact_digest.as_str(),
                             SubtaskState::Available.to_string(),
-                            req.priority,
+                            req.priority.get(),
                             now
                         ],
                     )?;
@@ -237,7 +237,7 @@ impl Covey {
                             review_id,
                             req.subtask_id.as_str(),
                             req.artifact_digest.as_str(),
-                            req.session_token,
+                            req.session_token.as_str(),
                             review_subtask_id,
                             ReviewState::Requested.to_string(),
                             now
@@ -249,13 +249,13 @@ impl Covey {
                             req.subtask_id,
                             SubtaskState::ReviewPending.to_string(),
                             now,
-                            subtask.state.to_string(),
+                            subtask.state().to_string(),
                             req.artifact_digest.as_str()
                         ],
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: subtask.state.into(),
+                            from: subtask.state().into(),
                             to: SubtaskState::ReviewPending.into(),
                             object: ObjectType::Subtask,
                         });
@@ -265,7 +265,7 @@ impl Covey {
                         EventType::ReviewRequested,
                         ObjectType::Review,
                         &review_id,
-                        &req.session_token,
+                        req.session_token.as_str(),
                         &req,
                         now,
                     )?;
@@ -275,7 +275,7 @@ impl Covey {
         });
         self.log_operation(
             "request_review",
-            &req.session_token,
+            req.session_token.as_str(),
             started_at,
             &result,
             |review_id| {
@@ -323,13 +323,32 @@ impl Covey {
                     }
                     let review_subtask = load_subtask_tx(tx, &review_subtask_id)?;
                     ensure_meta_task_is_schedulable(tx, &review_subtask.meta_task_id)?;
-                    require_session_can_claim_kind(&session, review_subtask.kind)?;
+                    require_session_can_claim_kind(&session, review_subtask.kind())?;
                     let artifact = load_artifact_tx(tx, review.artifact_digest())?;
                     let producer_session = load_session_tx(tx, &artifact.produced_by_session)?;
                     if producer_session.agent_principal_id == session.agent_principal_id {
                         return Err(CoveyError::SeparationOfDutiesViolation {
-                            reviewer_principal_id: session.agent_principal_id,
-                            producer_principal_id: producer_session.agent_principal_id,
+                            reviewer_principal_id: session.agent_principal_id().to_owned(),
+                            producer_principal_id: producer_session.agent_principal_id().to_owned(),
+                        });
+                    }
+                    let work_subtask = load_subtask_tx(tx, review.subtask_id())?;
+                    if work_subtask.artifact_digest().map(AsRef::as_ref)
+                        != Some(review.artifact_digest())
+                    {
+                        let Some(current_artifact_digest) = work_subtask.artifact_digest().cloned()
+                        else {
+                            return Err(CoveyError::UnknownArtifactDigest {
+                                digest: review.artifact_digest().to_owned(),
+                            });
+                        };
+                        return Err(CoveyError::StaleReviewArtifact {
+                            review_id: req.review_id.to_string(),
+                            subtask_id: crate::model::SubtaskId::parse(review.subtask_id())?,
+                            artifact_digest: crate::model::ArtifactDigest::parse(
+                                review.artifact_digest(),
+                            )?,
+                            current_artifact_digest,
                         });
                     }
                     crate::validators::ensure_review_transition(review.state(), ReviewState::Decided)?;
@@ -362,8 +381,8 @@ impl Covey {
                         });
                     }
                     ensure_subtask_transition(
-                        review_subtask.kind,
-                        review_subtask.state,
+                        review_subtask.kind(),
+                        review_subtask.state(),
                         SubtaskState::Decided,
                     )?;
                     let subtask_updated = tx.execute(
@@ -373,12 +392,12 @@ impl Covey {
                             SubtaskState::Decided.to_string(),
                             now,
                             claim.claim_id,
-                            review_subtask.state.to_string()
+                            review_subtask.state().to_string()
                         ],
                     )?;
                     if subtask_updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: review_subtask.state.into(),
+                            from: review_subtask.state().into(),
                             to: SubtaskState::Decided.into(),
                             object: ObjectType::Subtask,
                         });
@@ -386,24 +405,20 @@ impl Covey {
                     close_claim_and_detach(tx, &claim, ClaimState::Released, now)?;
                     clear_session_active_subtask(tx, &req.session_token, now)?;
 
-                    let work_subtask = load_subtask_tx(tx, review.subtask_id())?;
-                    if work_subtask.artifact_digest.as_deref() == Some(review.artifact_digest())
-                    {
-                        let work_state = match req.verdict {
-                            ReviewVerdict::Approve => SubtaskState::Approved,
-                            ReviewVerdict::ChangesRequested => SubtaskState::ChangesRequested,
-                        };
-                        let _ = tx.execute(
-                            "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
-                            params![
-                                review.subtask_id(),
-                                work_state.to_string(),
-                                now,
-                                review.artifact_digest(),
-                                work_subtask.state.to_string()
-                            ],
-                        )?;
-                    }
+                    let work_state = match req.verdict {
+                        ReviewVerdict::Approve => SubtaskState::Approved,
+                        ReviewVerdict::ChangesRequested => SubtaskState::ChangesRequested,
+                    };
+                    let _ = tx.execute(
+                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
+                        params![
+                            review.subtask_id(),
+                            work_state.to_string(),
+                            now,
+                            review.artifact_digest(),
+                            work_subtask.state().to_string()
+                        ],
+                    )?;
 
                     append_session_event(
                         tx,

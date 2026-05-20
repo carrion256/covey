@@ -7,45 +7,166 @@ use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
-    ArtifactDigest, ArtifactKind, BaseRev, ChangedPathsDigest, ClaimId, ConflictResolutionState,
-    CoveyTypeValidationError, FenceSeq, FindingsDigest, LeaseDeadlineMs, LeaseDurationMs,
-    MetaTaskId, QueueId, ReservationId, ReservationScope, ReviewId, ReviewVerdict, ScopeClass,
-    SessionRole, SettlementTarget, SubtaskId,
+    AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
+    ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
+    CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LeaseDeadlineMs,
+    LeaseDurationMs, MetaTaskId, ModelId, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId,
+    RepoopsPath, ReservationId, ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId,
+    RuntimeProcessId, ScopeClass, SessionRole, SessionToken, SettlementTarget, SubtaskId,
+    SubtaskPriority, TimestampMs, VerifierId,
 };
+
+fn parse_idempotency_key(
+    value: impl Into<String>,
+) -> Result<IdempotencyKey, CoveyTypeValidationError> {
+    IdempotencyKey::parse(value.into())
+}
+
+fn parse_idempotency_key_string(value: impl Into<String>) -> Result<IdempotencyKey, String> {
+    parse_idempotency_key(value).map_err(|err| err.to_string())
+}
 
 /// Request to register a session with immutable identity metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterSessionReq {
-    pub agent_principal_id: String,
-    pub agent_instance_id: String,
+    pub agent_principal_id: AgentPrincipalId,
+    pub agent_instance_id: AgentInstanceId,
     pub role: SessionRole,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RegisterSessionReq {
+    /// Builds a registration request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either agent identity is not token-shaped.
+    pub fn try_from_raw_parts(
+        agent_principal_id: impl Into<String>,
+        agent_instance_id: impl Into<String>,
+        role: SessionRole,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            agent_principal_id: AgentPrincipalId::parse(agent_principal_id.into())?,
+            agent_instance_id: AgentInstanceId::parse(agent_instance_id.into())?,
+            role,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Returns the validated stable agent principal identity.
+    #[must_use]
+    pub fn agent_principal_id(&self) -> &str {
+        self.agent_principal_id.as_str()
+    }
+
+    /// Returns the validated concrete agent process identity.
+    #[must_use]
+    pub fn agent_instance_id(&self) -> &str {
+        self.agent_instance_id.as_str()
+    }
 }
 
 /// Session identity returned after successful registration.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHandle {
-    pub session_token: String,
-    pub agent_principal_id: String,
-    pub agent_instance_id: String,
+    pub session_token: SessionToken,
+    pub agent_principal_id: AgentPrincipalId,
+    pub agent_instance_id: AgentInstanceId,
     pub role: SessionRole,
+}
+
+impl SessionHandle {
+    /// Builds a session handle from unvalidated scalar values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any identity field is not token-shaped. Use
+    /// [`SessionHandle::try_from_raw_parts`] when parsing untrusted input.
+    #[must_use]
+    pub fn new(
+        session_token: impl Into<String>,
+        agent_principal_id: impl Into<String>,
+        agent_instance_id: impl Into<String>,
+        role: SessionRole,
+    ) -> Self {
+        Self::try_from_raw_parts(session_token, agent_principal_id, agent_instance_id, role)
+            .expect("session handle fields must be valid Covey identities")
+    }
+
+    /// Parses a session handle from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identity field is not token-shaped.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        agent_principal_id: impl Into<String>,
+        agent_instance_id: impl Into<String>,
+        role: SessionRole,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            agent_principal_id: AgentPrincipalId::parse(agent_principal_id.into())?,
+            agent_instance_id: AgentInstanceId::parse(agent_instance_id.into())?,
+            role,
+        })
+    }
+
+    /// Returns the validated session token.
+    #[must_use]
+    pub fn session_token(&self) -> &str {
+        self.session_token.as_str()
+    }
+
+    /// Returns the validated stable agent principal identity.
+    #[must_use]
+    pub fn agent_principal_id(&self) -> &str {
+        self.agent_principal_id.as_str()
+    }
+
+    /// Returns the validated concrete agent process identity.
+    #[must_use]
+    pub fn agent_instance_id(&self) -> &str {
+        self.agent_instance_id.as_str()
+    }
 }
 
 /// Request to create a meta-task from operator intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitMetaTaskReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub prompt_text: String,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl SubmitMetaTaskReq {
+    /// Builds a submit-meta-task request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        prompt_text: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            prompt_text: prompt_text.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to cancel a meta-task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelMetaTaskReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub meta_task_id: MetaTaskId,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl CancelMetaTaskReq {
@@ -53,16 +174,16 @@ impl CancelMetaTaskReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the meta-task id is invalid.
+    /// Returns an error when the session token or meta-task id is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         meta_task_id: impl Into<String>,
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -70,43 +191,77 @@ impl CancelMetaTaskReq {
 /// Request to heartbeat an active session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeartbeatReq {
-    pub session_token: String,
-    pub idempotency_key: String,
+    pub session_token: SessionToken,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl HeartbeatReq {
+    /// Builds a heartbeat request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to exit an active session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitSessionReq {
-    pub session_token: String,
-    pub idempotency_key: String,
+    pub session_token: SessionToken,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ExitSessionReq {
+    /// Builds a session-exit request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to bind runtime identity evidence to a Covey session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordRuntimeAttestationReq {
-    pub session_token: String,
-    pub provider: String,
-    pub model: String,
-    pub provider_run_id: String,
-    pub provider_run_id_issuer: String,
+    pub session_token: SessionToken,
+    pub provider: ProviderId,
+    pub model: ModelId,
+    provider_run_id: ProviderRunId,
+    provider_run_id_issuer: ProviderRunIdIssuer,
     runtime_identity: RuntimeAttestationIdentityReq,
-    pub command_transcript_digest: String,
-    pub started_at: i64,
-    pub ended_at: i64,
-    pub idempotency_key: String,
+    pub command_transcript_digest: CommandTranscriptDigest,
+    started_at: TimestampMs,
+    ended_at: TimestampMs,
+    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeAttestationIdentityReq {
     Process {
-        process_id: String,
+        process_id: RuntimeProcessId,
     },
     Container {
-        container_id: String,
+        container_id: RuntimeContainerId,
     },
     ProcessAndContainer {
-        process_id: String,
-        container_id: String,
+        process_id: RuntimeProcessId,
+        container_id: RuntimeContainerId,
     },
 }
 
@@ -147,17 +302,30 @@ impl RecordRuntimeAttestationReq {
     ) -> Result<Self, String> {
         let runtime_identity =
             RuntimeAttestationIdentityReq::try_from_parts(process_id, container_id)?;
+        let started_at = TimestampMs::parse(started_at).map_err(|err| err.to_string())?;
+        let ended_at = TimestampMs::parse(ended_at).map_err(|err| err.to_string())?;
+        if ended_at < started_at {
+            return Err("ended_at must be greater than or equal to started_at".to_owned());
+        }
+        let provider_run_id = ProviderRunId::parse(provider_run_id.into())
+            .map_err(runtime_text_error("provider_run_id"))?;
+        let provider_run_id_issuer = ProviderRunIdIssuer::parse(provider_run_id_issuer.into())
+            .map_err(runtime_text_error("provider_run_id_issuer"))?;
         Ok(Self {
-            session_token: session_token.into(),
-            provider: provider.into(),
-            model: model.into(),
-            provider_run_id: provider_run_id.into(),
-            provider_run_id_issuer: provider_run_id_issuer.into(),
+            session_token: SessionToken::parse(session_token.into())
+                .map_err(|err| err.to_string())?,
+            provider: ProviderId::parse(provider.into()).map_err(|err| err.to_string())?,
+            model: ModelId::parse(model.into()).map_err(|err| err.to_string())?,
+            provider_run_id,
+            provider_run_id_issuer,
             runtime_identity,
-            command_transcript_digest: command_transcript_digest.into(),
+            command_transcript_digest: CommandTranscriptDigest::parse(
+                command_transcript_digest.into(),
+            )
+            .map_err(|err| err.to_string())?,
             started_at,
             ended_at,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key_string(idempotency_key)?,
         })
     }
 
@@ -172,6 +340,30 @@ impl RecordRuntimeAttestationReq {
     pub fn container_id(&self) -> Option<&str> {
         self.runtime_identity.container_id()
     }
+
+    /// Returns the provider-specific runtime run identifier.
+    #[must_use]
+    pub fn provider_run_id(&self) -> &str {
+        self.provider_run_id.as_str()
+    }
+
+    /// Returns the authority that issued the provider run identifier.
+    #[must_use]
+    pub fn provider_run_id_issuer(&self) -> &str {
+        self.provider_run_id_issuer.as_str()
+    }
+
+    /// Returns the non-negative runtime start timestamp.
+    #[must_use]
+    pub const fn started_at(&self) -> TimestampMs {
+        self.started_at
+    }
+
+    /// Returns the non-negative runtime end timestamp.
+    #[must_use]
+    pub const fn ended_at(&self) -> TimestampMs {
+        self.ended_at
+    }
 }
 
 impl RuntimeAttestationIdentityReq {
@@ -179,8 +371,56 @@ impl RuntimeAttestationIdentityReq {
         process_id: Option<String>,
         container_id: Option<String>,
     ) -> Result<Self, String> {
-        let process_id = normalize_optional_runtime_identity(process_id, "process_id")?;
-        let container_id = normalize_optional_runtime_identity(container_id, "container_id")?;
+        Self::try_from_runtime_parts(
+            parse_optional_runtime_process_id(process_id)?,
+            parse_optional_runtime_container_id(container_id)?,
+        )
+    }
+
+    fn process_id(&self) -> Option<&str> {
+        match self {
+            Self::Process { process_id } | Self::ProcessAndContainer { process_id, .. } => {
+                Some(process_id.as_str())
+            }
+            Self::Container { .. } => None,
+        }
+    }
+
+    fn container_id(&self) -> Option<&str> {
+        match self {
+            Self::Container { container_id } | Self::ProcessAndContainer { container_id, .. } => {
+                Some(container_id.as_str())
+            }
+            Self::Process { .. } => None,
+        }
+    }
+}
+
+fn parse_optional_runtime_process_id(
+    value: Option<String>,
+) -> Result<Option<RuntimeProcessId>, String> {
+    value
+        .map(|value| RuntimeProcessId::parse(value).map_err(runtime_text_error("process_id")))
+        .transpose()
+}
+
+fn parse_optional_runtime_container_id(
+    value: Option<String>,
+) -> Result<Option<RuntimeContainerId>, String> {
+    value
+        .map(|value| RuntimeContainerId::parse(value).map_err(runtime_text_error("container_id")))
+        .transpose()
+}
+
+fn runtime_text_error(field: &'static str) -> impl Fn(CoveyTypeValidationError) -> String + Copy {
+    move |err| format!("{field} {}", err.reason())
+}
+
+impl RuntimeAttestationIdentityReq {
+    fn try_from_runtime_parts(
+        process_id: Option<RuntimeProcessId>,
+        container_id: Option<RuntimeContainerId>,
+    ) -> Result<Self, String> {
         match (process_id, container_id) {
             (Some(process_id), Some(container_id)) => Ok(Self::ProcessAndContainer {
                 process_id,
@@ -191,55 +431,22 @@ impl RuntimeAttestationIdentityReq {
             (None, None) => Err("process_id or container_id is required".to_owned()),
         }
     }
-
-    fn process_id(&self) -> Option<&str> {
-        match self {
-            Self::Process { process_id } | Self::ProcessAndContainer { process_id, .. } => {
-                Some(process_id)
-            }
-            Self::Container { .. } => None,
-        }
-    }
-
-    fn container_id(&self) -> Option<&str> {
-        match self {
-            Self::Container { container_id } | Self::ProcessAndContainer { container_id, .. } => {
-                Some(container_id)
-            }
-            Self::Process { .. } => None,
-        }
-    }
-}
-
-fn normalize_optional_runtime_identity(
-    value: Option<String>,
-    field: &str,
-) -> Result<Option<String>, String> {
-    value
-        .map(|value| {
-            if value.trim().is_empty() {
-                Err(format!("{field} must not be empty"))
-            } else {
-                Ok(value)
-            }
-        })
-        .transpose()
 }
 
 impl From<&RecordRuntimeAttestationReq> for RawRecordRuntimeAttestationReq {
     fn from(req: &RecordRuntimeAttestationReq) -> Self {
         Self {
-            session_token: req.session_token.clone(),
-            provider: req.provider.clone(),
-            model: req.model.clone(),
-            provider_run_id: req.provider_run_id.clone(),
-            provider_run_id_issuer: req.provider_run_id_issuer.clone(),
+            session_token: req.session_token.to_string(),
+            provider: req.provider.to_string(),
+            model: req.model.to_string(),
+            provider_run_id: req.provider_run_id().to_owned(),
+            provider_run_id_issuer: req.provider_run_id_issuer().to_owned(),
             process_id: req.process_id().map(str::to_owned),
             container_id: req.container_id().map(str::to_owned),
-            command_transcript_digest: req.command_transcript_digest.clone(),
-            started_at: req.started_at,
-            ended_at: req.ended_at,
-            idempotency_key: req.idempotency_key.clone(),
+            command_transcript_digest: req.command_transcript_digest.to_string(),
+            started_at: req.started_at().get(),
+            ended_at: req.ended_at().get(),
+            idempotency_key: req.idempotency_key.to_string(),
         }
     }
 }
@@ -279,12 +486,12 @@ impl<'de> Deserialize<'de> for RecordRuntimeAttestationReq {
 /// Request to create a work subtask from orchestrator-owned input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSubtaskRequest {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub meta_task_id: MetaTaskId,
     pub subtask_id: Option<SubtaskId>,
     pub title: String,
-    pub priority: i64,
-    pub idempotency_key: String,
+    pub priority: SubtaskPriority,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl CreateSubtaskRequest {
@@ -292,7 +499,8 @@ impl CreateSubtaskRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error when the meta-task id or optional subtask id is invalid.
+    /// Returns an error when the session token, meta-task id, optional subtask
+    /// id, or priority is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         meta_task_id: impl Into<String>,
@@ -302,12 +510,12 @@ impl CreateSubtaskRequest {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
             subtask_id: subtask_id.map(SubtaskId::parse).transpose()?,
             title: title.into(),
-            priority,
-            idempotency_key: idempotency_key.into(),
+            priority: SubtaskPriority::parse(priority)?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -315,9 +523,11 @@ impl CreateSubtaskRequest {
 /// Request to claim the next available subtask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimNextReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub lease_duration_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_task_id: Option<MetaTaskId>,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl ClaimNextReq {
@@ -325,16 +535,38 @@ impl ClaimNextReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the lease duration is not positive.
+    /// Returns an error when the session token is invalid or lease duration is
+    /// not positive.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         lease_duration_ms: impl Into<i64>,
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
-            idempotency_key: idempotency_key.into(),
+            meta_task_id: None,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Builds a claim-next request constrained to one meta-task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, meta-task id, or lease
+    /// duration is invalid.
+    pub fn try_from_raw_parts_scoped(
+        session_token: impl Into<String>,
+        lease_duration_ms: impl Into<i64>,
+        meta_task_id: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
+            meta_task_id: meta_task_id.map(MetaTaskId::parse).transpose()?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -342,10 +574,10 @@ impl ClaimNextReq {
 /// Request to claim a specific subtask by ID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimSubtaskReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub subtask_id: SubtaskId,
     pub lease_duration_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl ClaimSubtaskReq {
@@ -353,7 +585,7 @@ impl ClaimSubtaskReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the subtask id or lease duration is invalid.
+    /// Returns an error when the session token, subtask id, or lease duration is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         subtask_id: impl Into<String>,
@@ -361,10 +593,10 @@ impl ClaimSubtaskReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             subtask_id: SubtaskId::parse(subtask_id.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -382,52 +614,139 @@ pub struct ClaimResult {
 /// Request to start work on a claimed subtask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartSubtaskReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl StartSubtaskReq {
+    /// Builds a start-subtask request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, claim id, or fence sequence is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to abandon a claimed subtask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AbandonSubtaskReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl AbandonSubtaskReq {
+    /// Builds an abandon-subtask request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, claim id, or fence sequence is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to release a held claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseClaimReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ReleaseClaimReq {
+    /// Builds a release-claim request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, claim id, or fence sequence is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to renew an active claim lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenewClaimReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
     pub extend_by_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RenewClaimReq {
+    /// Builds a renew-claim request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, claim id, fence sequence, or
+    /// lease extension is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        extend_by_ms: impl Into<i64>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            extend_by_ms: LeaseDurationMs::parse(extend_by_ms.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 /// Request to publish an immutable artifact for a work subtask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishArtifactReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
     pub artifact_digest: ArtifactDigest,
     pub artifact_kind: ArtifactKind,
     pub base_rev: BaseRev,
-    pub manifest_path: String,
+    pub manifest_path: ArtifactManifestPath,
     pub changed_paths_digest: ChangedPathsDigest,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl PublishArtifactReq {
@@ -435,8 +754,9 @@ impl PublishArtifactReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the claim id, fence sequence, artifact digest,
-    /// base revision, or changed paths digest is invalid.
+    /// Returns an error when the session token, claim id, fence sequence,
+    /// artifact digest, base revision, manifest path, or changed paths digest
+    /// is invalid.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
@@ -447,18 +767,18 @@ impl PublishArtifactReq {
         base_rev: String,
         manifest_path: String,
         changed_paths_digest: String,
-        idempotency_key: String,
+        idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
             artifact_digest: ArtifactDigest::parse(artifact_digest)?,
             artifact_kind,
             base_rev: BaseRev::parse(base_rev)?,
-            manifest_path,
+            manifest_path: ArtifactManifestPath::parse(manifest_path)?,
             changed_paths_digest: ChangedPathsDigest::parse(changed_paths_digest)?,
-            idempotency_key,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -466,12 +786,12 @@ impl PublishArtifactReq {
 /// Request to create a review subtask for an exact artifact digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestReviewReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub subtask_id: SubtaskId,
     pub artifact_digest: ArtifactDigest,
     pub review_subtask_id: Option<SubtaskId>,
-    pub priority: i64,
-    pub idempotency_key: String,
+    pub priority: SubtaskPriority,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl RequestReviewReq {
@@ -479,8 +799,8 @@ impl RequestReviewReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the work subtask id, artifact digest, or explicit
-    /// review subtask id is invalid.
+    /// Returns an error when the session token, work subtask id, artifact
+    /// digest, explicit review subtask id, or priority is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         subtask_id: impl Into<String>,
@@ -490,7 +810,8 @@ impl RequestReviewReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, String> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())
+                .map_err(|err| err.to_string())?,
             subtask_id: SubtaskId::parse(subtask_id.into()).map_err(|err| err.to_string())?,
             artifact_digest: ArtifactDigest::parse(artifact_digest.into())
                 .map_err(|err| err.to_string())?,
@@ -498,8 +819,8 @@ impl RequestReviewReq {
                 .map(SubtaskId::parse)
                 .transpose()
                 .map_err(|err| err.to_string())?,
-            priority,
-            idempotency_key: idempotency_key.into(),
+            priority: SubtaskPriority::parse(priority).map_err(|err| err.to_string())?,
+            idempotency_key: parse_idempotency_key_string(idempotency_key)?,
         })
     }
 }
@@ -507,13 +828,13 @@ impl RequestReviewReq {
 /// Request to decide a review while holding the matching review-subtask claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecideReviewReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub review_id: ReviewId,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
     pub verdict: ReviewVerdict,
     pub findings_digest: FindingsDigest,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl DecideReviewReq {
@@ -521,8 +842,8 @@ impl DecideReviewReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the review id, claim id, fence sequence, or
-    /// findings digest is invalid.
+    /// Returns an error when the session token, review id, claim id, fence
+    /// sequence, or findings digest is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         review_id: String,
@@ -530,16 +851,16 @@ impl DecideReviewReq {
         fence_seq: impl Into<i64>,
         verdict: ReviewVerdict,
         findings_digest: String,
-        idempotency_key: String,
+        idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             review_id: ReviewId::parse(review_id)?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
             verdict,
             findings_digest: FindingsDigest::parse(findings_digest)?,
-            idempotency_key,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -547,11 +868,11 @@ impl DecideReviewReq {
 /// Request to enqueue an approved artifact for apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnqueueForApplyReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub artifact_digest: ArtifactDigest,
     pub subtask_id: SubtaskId,
     pub settlement_target: SettlementTarget,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl EnqueueForApplyReq {
@@ -559,20 +880,21 @@ impl EnqueueForApplyReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the artifact digest or subtask id is invalid.
+    /// Returns an error when the session token, artifact digest, or subtask id
+    /// is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         artifact_digest: String,
         subtask_id: String,
         settlement_target: SettlementTarget,
-        idempotency_key: String,
+        idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             artifact_digest: ArtifactDigest::parse(artifact_digest)?,
             subtask_id: SubtaskId::parse(subtask_id)?,
             settlement_target,
-            idempotency_key,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -580,9 +902,9 @@ impl EnqueueForApplyReq {
 /// Request to atomically claim the next ready-queue item for apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimReadyQueueReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub lease_duration_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl ClaimReadyQueueReq {
@@ -590,16 +912,17 @@ impl ClaimReadyQueueReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the lease duration is not positive.
+    /// Returns an error when the session token is invalid or the lease duration
+    /// is not positive.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         lease_duration_ms: impl Into<i64>,
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -619,10 +942,10 @@ pub struct ReadyQueueClaim {
 /// Request to mark a ready-queue item in flight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkInFlightReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub queue_id: QueueId,
     pub lease_duration_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl MarkInFlightReq {
@@ -630,7 +953,8 @@ impl MarkInFlightReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the queue id or lease duration is invalid.
+    /// Returns an error when the session token, queue id, or lease duration is
+    /// invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         queue_id: impl Into<String>,
@@ -638,10 +962,10 @@ impl MarkInFlightReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -649,16 +973,16 @@ impl MarkInFlightReq {
 /// Request to record an accepted verifier verdict for one apply attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordApplyVerificationReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub queue_id: QueueId,
     pub artifact_digest: ArtifactDigest,
     pub review_id: ReviewId,
     pub findings_digest: FindingsDigest,
     pub claim_fence_seq: FenceSeq,
-    pub verifier: String,
+    pub verifier: VerifierId,
     pub verdict_digest: ArtifactDigest,
     pub seal_digest: ArtifactDigest,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl RecordApplyVerificationReq {
@@ -666,8 +990,8 @@ impl RecordApplyVerificationReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when any queue, artifact, review, findings, fence, or
-    /// verifier digest field is invalid.
+    /// Returns an error when the session token or any queue, artifact, review,
+    /// findings, fence, verifier, or digest field is invalid.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
@@ -682,16 +1006,16 @@ impl RecordApplyVerificationReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
             artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
             review_id: ReviewId::parse(review_id.into())?,
             findings_digest: FindingsDigest::parse(findings_digest.into())?,
             claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
-            verifier: verifier.into(),
+            verifier: VerifierId::parse(verifier.into())?,
             verdict_digest: ArtifactDigest::parse(verdict_digest.into())?,
             seal_digest: ArtifactDigest::parse(seal_digest.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -699,13 +1023,13 @@ impl RecordApplyVerificationReq {
 /// Request to verify that a landing authorization is still backed by live Covey state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifyLandingAuthorizationReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub queue_id: QueueId,
     pub artifact_digest: ArtifactDigest,
     pub review_id: ReviewId,
     pub findings_digest: FindingsDigest,
     pub claim_fence_seq: FenceSeq,
-    pub verifier: String,
+    pub verifier: VerifierId,
     pub verdict_digest: ArtifactDigest,
     pub seal_digest: ArtifactDigest,
 }
@@ -715,8 +1039,8 @@ impl VerifyLandingAuthorizationReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when any queue, artifact, review, findings, fence, or
-    /// verifier digest field is invalid.
+    /// Returns an error when the session token or any queue, artifact, review,
+    /// findings, fence, verifier, or digest field is invalid.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
@@ -730,13 +1054,13 @@ impl VerifyLandingAuthorizationReq {
         seal_digest: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
             artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
             review_id: ReviewId::parse(review_id.into())?,
             findings_digest: FindingsDigest::parse(findings_digest.into())?,
             claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
-            verifier: verifier.into(),
+            verifier: VerifierId::parse(verifier.into())?,
             verdict_digest: ArtifactDigest::parse(verdict_digest.into())?,
             seal_digest: ArtifactDigest::parse(seal_digest.into())?,
         })
@@ -746,10 +1070,10 @@ impl VerifyLandingAuthorizationReq {
 /// Request to mark an in-flight queue item applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkAppliedReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub queue_id: QueueId,
     pub claim_fence_seq: FenceSeq,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl MarkAppliedReq {
@@ -757,7 +1081,8 @@ impl MarkAppliedReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the queue id or fence sequence is invalid.
+    /// Returns an error when the session token, queue id, or fence sequence is
+    /// invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         queue_id: impl Into<String>,
@@ -765,10 +1090,10 @@ impl MarkAppliedReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
             claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -776,9 +1101,9 @@ impl MarkAppliedReq {
 /// Request to supersede a queued or in-flight queue item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupersedeQueueItemReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub queue_id: QueueId,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl SupersedeQueueItemReq {
@@ -786,16 +1111,16 @@ impl SupersedeQueueItemReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the queue id is invalid.
+    /// Returns an error when the session token or queue id is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         queue_id: impl Into<String>,
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -803,11 +1128,11 @@ impl SupersedeQueueItemReq {
 /// Request to create an advisory reservation for a subtask.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestReservationReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub owner_subtask_id: SubtaskId,
     scope: ReservationScope,
     pub lease_duration_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -826,7 +1151,8 @@ impl RequestReservationReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the scope class/key/member shape is invalid.
+    /// Returns an error when the session token or scope class/key/member shape
+    /// is invalid.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_parts(
         session_token: impl Into<String>,
@@ -838,11 +1164,12 @@ impl RequestReservationReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, String> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())
+                .map_err(|err| err.to_string())?,
             owner_subtask_id,
             scope: ReservationScope::from_parts(scope_class, scope_key.into(), generated_members)?,
             lease_duration_ms,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key_string(idempotency_key)?,
         })
     }
 
@@ -850,7 +1177,8 @@ impl RequestReservationReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the owner id, lease duration, or scope shape is invalid.
+    /// Returns an error when the session token, owner id, lease duration, or
+    /// scope shape is invalid.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
@@ -900,13 +1228,13 @@ impl RequestReservationReq {
 impl From<&RequestReservationReq> for RawRequestReservationReq {
     fn from(req: &RequestReservationReq) -> Self {
         Self {
-            session_token: req.session_token.clone(),
+            session_token: req.session_token.to_string(),
             owner_subtask_id: req.owner_subtask_id.clone(),
             scope_class: req.scope_class(),
             scope_key: req.scope_key().to_owned(),
             generated_members: req.generated_members().to_vec(),
             lease_duration_ms: req.lease_duration_ms,
-            idempotency_key: req.idempotency_key.clone(),
+            idempotency_key: req.idempotency_key.to_string(),
         }
     }
 }
@@ -950,9 +1278,9 @@ impl<'de> Deserialize<'de> for RequestReservationReq {
 /// Request to release an existing reservation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseReservationReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub reservation_id: ReservationId,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl ReleaseReservationReq {
@@ -960,16 +1288,16 @@ impl ReleaseReservationReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the reservation id is invalid.
+    /// Returns an error when the session token or reservation id is invalid.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         reservation_id: impl Into<String>,
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             reservation_id: ReservationId::parse(reservation_id.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -977,10 +1305,10 @@ impl ReleaseReservationReq {
 /// Request to renew an active reservation lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenewReservationReq {
-    pub session_token: String,
+    pub session_token: SessionToken,
     pub reservation_id: ReservationId,
     pub extend_by_ms: LeaseDurationMs,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 impl RenewReservationReq {
@@ -988,8 +1316,8 @@ impl RenewReservationReq {
     ///
     /// # Errors
     ///
-    /// Returns an error when the reservation id is invalid or the extension is
-    /// not positive.
+    /// Returns an error when the session token or reservation id is invalid, or
+    /// the extension is not positive.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         reservation_id: impl Into<String>,
@@ -997,10 +1325,10 @@ impl RenewReservationReq {
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
         Ok(Self {
-            session_token: session_token.into(),
+            session_token: SessionToken::parse(session_token.into())?,
             reservation_id: ReservationId::parse(reservation_id.into())?,
             extend_by_ms: LeaseDurationMs::parse(extend_by_ms.into())?,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }
@@ -1094,17 +1422,63 @@ impl<'de> Deserialize<'de> for OverlapQueryReq {
 /// Query for the Covey lifecycle facts needed by mutAI repoops preflight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoopsAuthoritySnapshotReq {
-    pub session_token: String,
-    pub claim_id: String,
-    pub fence_seq: i64,
-    pub paths: Vec<String>,
+    pub session_token: SessionToken,
+    pub claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub paths: Vec<RepoopsPath>,
+}
+
+impl RepoopsAuthoritySnapshotReq {
+    /// Builds a repoops authority snapshot request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, claim id, or fence sequence is
+    /// invalid, or when any path is empty or traverses outside the repository.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        paths: Vec<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            paths: paths
+                .into_iter()
+                .map(RepoopsPath::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
 }
 
 /// Request to update the resolution state of a surfaced conflict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveConflictReq {
-    pub session_token: String,
-    pub conflict_id: String,
+    pub session_token: SessionToken,
+    pub conflict_id: ConflictId,
     pub resolution_state: ConflictResolutionState,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ResolveConflictReq {
+    /// Builds a typed conflict resolution request from raw wire or CLI parts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or conflict id is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        conflict_id: impl Into<String>,
+        resolution_state: ConflictResolutionState,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            conflict_id: ConflictId::parse(conflict_id.into())?,
+            resolution_state,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }

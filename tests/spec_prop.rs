@@ -6,8 +6,8 @@ use std::sync::{
 mod support;
 
 use covey::{
-    ClaimNextReq, Covey, CreateSubtaskRequest, ManualClock, RegisterSessionReq, ReleaseClaimReq,
-    RequestReservationReq, ScopeClass, SessionRole, SubmitMetaTaskReq,
+    ClaimNextReq, Covey, CreateSubtaskRequest, IdempotencyKey, ManualClock, RegisterSessionReq,
+    ReleaseClaimReq, RequestReservationReq, ScopeClass, SessionRole, SubmitMetaTaskReq,
 };
 use proptest::prelude::*;
 use tempfile::TempDir;
@@ -20,66 +20,76 @@ fn fresh_covey() -> (TempDir, Arc<ManualClock>, Covey) {
     (dir, clock, covey)
 }
 
-fn id_key(label: &str) -> String {
+fn id_key(label: &str) -> IdempotencyKey {
     static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
-    format!("{label}-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    IdempotencyKey::parse(format!(
+        "{label}-{}",
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+    .expect("valid idempotency key")
 }
 
 fn seed_single_work_subtask(covey: &Covey) -> String {
     let orch = covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: "orch".into(),
-            agent_instance_id: "orch-1".into(),
-            role: SessionRole::Orchestrator,
-            idempotency_key: id_key("register-orch"),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "orch",
+                "orch-1",
+                SessionRole::Orchestrator,
+                id_key("register-orch"),
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register orch")
         .session_token;
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "meta".into(),
-            idempotency_key: id_key("submit-meta"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(orch.clone(), "meta", id_key("submit-meta"))
+                .expect("valid submit-meta-task request"),
+        )
         .expect("meta task");
     covey
         .create_subtask(CreateSubtaskRequest {
-            session_token: orch.clone(),
-            meta_task_id,
-            subtask_id: Some("work".into()),
+            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
+            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
+            subtask_id: Some(covey::SubtaskId::parse("work").expect("valid subtask id")),
             title: "work".into(),
-            priority: 1,
+            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create work");
-    orch
+    orch.to_string()
 }
 
 fn seed_two_work_subtasks(covey: &Covey) {
     let orch = covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: "orch".into(),
-            agent_instance_id: "orch-1".into(),
-            role: SessionRole::Orchestrator,
-            idempotency_key: id_key("register-orch"),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "orch",
+                "orch-1",
+                SessionRole::Orchestrator,
+                id_key("register-orch"),
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register orch")
         .session_token;
     let meta_task_id = covey
-        .submit_meta_task(SubmitMetaTaskReq {
-            session_token: orch.clone(),
-            prompt_text: "meta".into(),
-            idempotency_key: id_key("submit-meta"),
-        })
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(orch.clone(), "meta", id_key("submit-meta"))
+                .expect("valid submit-meta-task request"),
+        )
         .expect("meta task");
     for (subtask_id, priority) in [("work_a", 1_i64), ("work_b", 2_i64)] {
         covey
             .create_subtask(CreateSubtaskRequest {
-                session_token: orch.clone(),
-                meta_task_id: meta_task_id.clone(),
-                subtask_id: Some(subtask_id.into()),
+                session_token: covey::SessionToken::parse(orch.clone())
+                    .expect("valid session token"),
+                meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
+                    .expect("valid meta-task id"),
+                subtask_id: Some(covey::SubtaskId::parse(subtask_id).expect("valid subtask id")),
                 title: subtask_id.into(),
-                priority,
+                priority: covey::SubtaskPriority::parse(priority).expect("valid subtask priority"),
                 idempotency_key: id_key("create-subtask"),
             })
             .expect("create work");
@@ -92,33 +102,36 @@ proptest! {
         let (_dir, clock, covey) = fresh_covey();
         let _orch = seed_single_work_subtask(&covey);
         let worker = covey
-            .register_session(RegisterSessionReq {
-                agent_principal_id: "worker".into(),
-                agent_instance_id: "worker-1".into(),
-                role: SessionRole::Executor,
-                idempotency_key: id_key("register-worker"),
-            })
+            .register_session(
+                RegisterSessionReq::try_from_raw_parts(
+                    "worker",
+                    "worker-1",
+                    SessionRole::Executor,
+                    id_key("register-worker"),
+                )
+                .expect("valid session registration request"),
+            )
             .expect("register worker")
             .session_token;
 
         let mut seen = Vec::new();
         for _ in 0..reclaim_count {
             let claim = covey
-                .claim_next_subtask(ClaimNextReq {
-                    session_token: worker.clone(),
-                    lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-                    idempotency_key: id_key("claim-next"),
-                })
+                .claim_next_subtask(ClaimNextReq::try_from_raw_parts(
+                    worker.clone(),
+                    covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                    id_key("claim-next"),
+                    ).expect("valid claim-next request"))
                 .expect("claim call")
                 .expect("claim result");
             seen.push(claim.fence_seq);
             covey
-                .release_claim(ReleaseClaimReq {
-                    session_token: worker.clone(),
-                    claim_id: claim.claim_id,
-                    fence_seq: claim.fence_seq,
-                    idempotency_key: id_key("release-claim"),
-                })
+                .release_claim(ReleaseClaimReq::try_from_raw_parts(
+                    worker.clone(),
+                    claim.claim_id,
+                    claim.fence_seq,
+                    id_key("release-claim"),
+                    ).expect("valid release-claim request"))
                 .expect("release");
             clock.advance(1);
         }
@@ -182,63 +195,69 @@ proptest! {
         let (_dir, clock, covey) = fresh_covey();
         seed_two_work_subtasks(&covey);
         let worker_a = covey
-            .register_session(RegisterSessionReq {
-                agent_principal_id: "worker_a".into(),
-                agent_instance_id: "worker_a-1".into(),
-                role: SessionRole::Executor,
-                idempotency_key: id_key("register-worker"),
-            })
+            .register_session(
+                RegisterSessionReq::try_from_raw_parts(
+                    "worker_a",
+                    "worker_a-1",
+                    SessionRole::Executor,
+                    id_key("register-worker"),
+                )
+                .expect("valid session registration request"),
+            )
             .expect("register worker")
             .session_token;
         let worker_b = covey
-            .register_session(RegisterSessionReq {
-                agent_principal_id: "worker_b".into(),
-                agent_instance_id: "worker_b-1".into(),
-                role: SessionRole::Executor,
-                idempotency_key: id_key("register-worker"),
-            })
+            .register_session(
+                RegisterSessionReq::try_from_raw_parts(
+                    "worker_b",
+                    "worker_b-1",
+                    SessionRole::Executor,
+                    id_key("register-worker"),
+                )
+                .expect("valid session registration request"),
+            )
             .expect("register worker")
             .session_token;
 
         let mut seen = Vec::new();
         for _ in 0..reclaim_count {
             let claim = covey
-                .claim_next_subtask(ClaimNextReq {
-                    session_token: worker_a.clone(),
-                    lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-                    idempotency_key: id_key("claim-next"),
-                })
+                .claim_next_subtask(ClaimNextReq::try_from_raw_parts(
+                    worker_a.clone(),
+                    covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                    id_key("claim-next"),
+                    ).expect("valid claim-next request"))
                 .expect("claim call")
                 .expect("claim result");
             prop_assert_eq!(claim.subtask_id, "work_a");
             seen.push(claim.fence_seq);
             covey
-                .release_claim(ReleaseClaimReq {
-                    session_token: worker_a.clone(),
-                    claim_id: claim.claim_id,
-                    fence_seq: claim.fence_seq,
-                    idempotency_key: id_key("release-claim"),
-                })
+                .release_claim(ReleaseClaimReq::try_from_raw_parts(
+                    worker_a.clone(),
+                    claim.claim_id,
+                    claim.fence_seq,
+                    id_key("release-claim"),
+                    ).expect("valid release-claim request"))
                 .expect("release");
             clock.advance(1);
         }
 
         let held_a = covey
-            .claim_next_subtask(ClaimNextReq {
-                session_token: worker_a,
-                lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-                idempotency_key: id_key("claim-next"),
-            })
+            .claim_next_subtask(ClaimNextReq::try_from_raw_parts(
+                worker_a,
+                covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-next"),
+                ).expect("valid claim-next request"))
             .expect("claim a")
             .expect("claim result");
         prop_assert_eq!(held_a.subtask_id, "work_a");
 
         let first_b = covey
-            .claim_next_subtask(ClaimNextReq {
-                session_token: worker_b,
-                lease_duration_ms: covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
-                idempotency_key: id_key("claim-next"),
-            })
+            .claim_next_subtask(ClaimNextReq::try_from_raw_parts(
+                worker_b,
+                covey::LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-next"),
+                ).expect("valid claim-next request"))
             .expect("claim b")
             .expect("claim result");
         prop_assert_eq!(first_b.subtask_id, "work_b");

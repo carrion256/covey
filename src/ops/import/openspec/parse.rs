@@ -53,6 +53,7 @@ pub(super) fn parse_openspec_tasks(
             source_path: source_path.to_owned(),
             task_digest: blake3_digest(format!("{task_id}\n{title}").as_bytes()),
             task_type: None,
+            dependencies: Vec::new(),
         });
     }
 

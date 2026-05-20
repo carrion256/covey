@@ -70,12 +70,12 @@ fn find_overlapping_reservations<E: ReservationExecutor>(
     exec: &E,
     candidate: &OverlapCandidate,
 ) -> Result<Vec<Reservation>> {
-    let reservation_ids = match candidate.scope_class {
+    let reservation_ids = match candidate.scope_class() {
         ScopeClass::RepoGlobal => load_active_reservation_ids(exec)?,
-        ScopeClass::ExactPath => query_overlap_ids_for_exact(exec, &candidate.scope_key)?,
-        ScopeClass::Subtree => query_overlap_ids_for_subtree(exec, &candidate.scope_key)?,
+        ScopeClass::ExactPath => query_overlap_ids_for_exact(exec, candidate.scope_key())?,
+        ScopeClass::Subtree => query_overlap_ids_for_subtree(exec, candidate.scope_key())?,
         ScopeClass::GeneratedSet => {
-            query_overlap_ids_for_generated(exec, &candidate.generated_members)?
+            query_overlap_ids_for_generated(exec, candidate.generated_members())?
         }
     };
     load_reservations_by_ids(exec, &reservation_ids.into_iter().collect::<Vec<_>>())
@@ -133,16 +133,17 @@ pub(crate) fn record_reservation_overlap_conflicts(
     now: i64,
 ) -> Result<()> {
     for overlap in overlaps {
-        let payload = ReservationOverlapConflictPayload {
-            reservation_id: reservation_id.to_owned(),
-            overlapping_reservation_id: overlap.reservation_id.to_string(),
-            owner_subtask_id: req.owner_subtask_id.to_string(),
-            overlapping_owner_subtask_id: overlap.owner_subtask_id.to_string(),
-            scope_class: req.scope_class(),
-            scope_key: req.scope_key().to_owned(),
-            overlapping_scope_class: overlap.scope_class(),
-            overlapping_scope_key: overlap.scope_key().to_owned(),
-        };
+        let payload = ReservationOverlapConflictPayload::try_from_raw_parts(
+            reservation_id,
+            overlap.reservation_id.to_string(),
+            req.owner_subtask_id.to_string(),
+            overlap.owner_subtask_id.to_string(),
+            req.scope_class(),
+            normalize_scope_key(req.scope_class(), req.scope_key())?,
+            overlap.scope_class(),
+            overlap.scope_key().to_owned(),
+        )
+        .map_err(|reason| CoveyError::InvalidEventShape { reason })?;
         let (left, right) = ordered_pair(reservation_id, &overlap.reservation_id);
         let conflict_id = format!("conflict_reservation_overlap_{left}_{right}");
         tx.execute(
@@ -552,16 +553,13 @@ mod tests {
         .expect("generated overlap query should succeed");
         assert_eq!(reservation_ids(&generated), vec!["repo", "generated"]);
 
-        let empty_generated = find_overlapping_reservations_conn(
-            &conn,
-            &OverlapCandidate::new(
-                ScopeClass::GeneratedSet,
-                "generated-key".to_owned(),
-                Vec::<String>::new(),
-            ),
-        )
-        .expect("empty generated set still checks repo-global reservations");
-        assert_eq!(reservation_ids(&empty_generated), vec!["repo"]);
+        let empty_generated =
+            OverlapCandidate::try_new(ScopeClass::GeneratedSet, "generated-key", Vec::new())
+                .expect_err("generated-set candidates require members");
+        assert_eq!(
+            empty_generated,
+            "generated-set reservations require generated_members"
+        );
     }
 
     #[test]

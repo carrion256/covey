@@ -137,8 +137,8 @@ impl From<CoveyError> for ReportableError {
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, SubtaskAlreadyClaimed, SubtaskNotFound,
-            TypeValidationError, UnknownArtifactDigest, WrongRole,
+            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
+            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match error {
@@ -197,6 +197,7 @@ impl From<CoveyError> for ReportableError {
             | LeaseExpired { .. }
             | ReviewKindMismatch
             | ReviewAlreadyOpen { .. }
+            | StaleReviewArtifact { .. }
             | MetaTaskUnavailable { .. }
             | ArtifactDigestCollision { .. }
             | DuplicateSubtaskId { .. }

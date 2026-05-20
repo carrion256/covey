@@ -129,7 +129,7 @@ impl Covey {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
                     ensure_length("reservation_id", &req.reservation_id, MAX_OBJECT_ID_LEN)?;
                     let reservation = load_reservation_tx(tx, req.reservation_id.as_str())?;
-                    ensure_reservation_transition(reservation.state, ReservationState::Released)?;
+                    ensure_reservation_transition(reservation.state(), ReservationState::Released)?;
                     let updated = tx.execute(
                         "UPDATE reservations SET state = ?2, updated_at = ?3 WHERE reservation_id = ?1 AND state = ?4",
                         params![
@@ -141,7 +141,7 @@ impl Covey {
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: reservation.state.into(),
+                            from: reservation.state().into(),
                             to: ReservationState::Released.into(),
                             object: ObjectType::Reservation,
                         });
@@ -150,6 +150,7 @@ impl Covey {
                     let scope_class = reservation.scope_class();
                     let scope_key = reservation.scope_key().to_owned();
                     let generated_members = reservation.generated_members().to_vec();
+                    let created_at = reservation.created_at();
                     let released = Reservation::try_from_parts(
                         reservation.reservation_id,
                         reservation.owner_subtask_id,
@@ -158,7 +159,7 @@ impl Covey {
                         generated_members,
                         reservation.lease_deadline,
                         ReservationState::Released,
-                        reservation.created_at,
+                        created_at,
                         crate::model::TimestampMs::parse(now)
                             .expect("wall clock timestamps are non-negative"),
                     )
@@ -203,9 +204,9 @@ impl Covey {
                     ensure_positive_lease_duration("extend_by_ms", req.extend_by_ms.get())?;
                     ensure_length("reservation_id", &req.reservation_id, MAX_OBJECT_ID_LEN)?;
                     let reservation = load_reservation_tx(tx, req.reservation_id.as_str())?;
-                    if reservation.state != ReservationState::Active {
+                    if reservation.state() != ReservationState::Active {
                         return Err(CoveyError::IllegalTransition {
-                            from: reservation.state.into(),
+                            from: reservation.state().into(),
                             to: ReservationState::Active.into(),
                             object: ObjectType::Reservation,
                         });
@@ -228,14 +229,15 @@ impl Covey {
                     )?;
                     if updated != 1 {
                         return Err(CoveyError::IllegalTransition {
-                            from: reservation.state.into(),
-                            to: reservation.state.into(),
+                            from: reservation.state().into(),
+                            to: reservation.state().into(),
                             object: ObjectType::Reservation,
                         });
                     }
                     let scope_class = reservation.scope_class();
                     let scope_key = reservation.scope_key().to_owned();
                     let generated_members = reservation.generated_members().to_vec();
+                    let created_at = reservation.created_at();
                     let renewed = Reservation::try_from_parts(
                         reservation.reservation_id,
                         reservation.owner_subtask_id,
@@ -245,7 +247,7 @@ impl Covey {
                         crate::model::LeaseDeadlineMs::parse(renewed_deadline)
                             .expect("renewed lease deadlines are non-negative"),
                         ReservationState::Active,
-                        reservation.created_at,
+                        created_at,
                         crate::model::TimestampMs::parse(now)
                             .expect("wall clock timestamps are non-negative"),
                     )
@@ -326,7 +328,7 @@ impl Covey {
         self.log_operation("fetch_events", "system", started_at, &result, |events| {
             events
                 .iter()
-                .map(|event| format!("event_seq:{}", event.seq))
+                .map(|event| format!("event_seq:{}", event.seq()))
                 .collect()
         });
         result
@@ -378,7 +380,6 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
-                    ensure_length("conflict_id", &req.conflict_id, MAX_OBJECT_ID_LEN)?;
                     let updated = tx.execute(
                         "UPDATE conflicts SET resolution_state = ?2 WHERE conflict_id = ?1",
                         params![req.conflict_id, req.resolution_state.to_string()],
@@ -390,7 +391,7 @@ impl Covey {
                         tx,
                         EventType::ConflictResolved,
                         ObjectType::Conflict,
-                        &req.conflict_id,
+                        req.conflict_id.as_str(),
                         &req.session_token,
                         &req,
                         now,

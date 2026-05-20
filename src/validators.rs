@@ -109,12 +109,12 @@ pub(crate) fn ensure_meta_task_is_schedulable(
 ) -> Result<()> {
     let meta_task = load_meta_task_tx(tx, meta_task_id)?;
     if matches!(
-        meta_task.state,
+        meta_task.state(),
         MetaTaskState::Completed | MetaTaskState::Cancelled
     ) {
         Err(CoveyError::MetaTaskUnavailable {
             meta_task_id: meta_task_id.to_owned(),
-            state: meta_task.state,
+            state: meta_task.state(),
         })
     } else {
         Ok(())
@@ -252,10 +252,11 @@ pub(crate) fn require_current_claim(
             provided: fence_seq.get(),
         });
     }
-    if claim.state != ClaimState::Held {
+    if claim.state() != ClaimState::Held {
+        let state = claim.state();
         return Err(CoveyError::ClaimNotHeld {
             claim_id: claim.claim_id,
-            state: claim.state,
+            state,
         });
     }
     if claim.lease_deadline <= now {

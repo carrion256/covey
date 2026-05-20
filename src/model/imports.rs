@@ -4,25 +4,38 @@
 //! Imported records are converted into Covey's validated domain records before
 //! becoming live lifecycle state.
 
+use std::{fmt, ops::Deref};
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::{Display, EnumString};
 
-use super::{ObjectType, TimestampMs};
+use super::{
+    CoveyTypeValidationError, IdempotencyKey, MetaTaskId, ObjectType, OpenSpecChangeId,
+    OpenSpecDigest, SessionToken, SourceIssueId, SubtaskId, TimestampMs,
+};
 
 /// Request to import eligible bd issues from a beads database into Covey as work subtasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBdV1Req {
-    pub session_token: String,
-    pub beads_db_path: String,
+    pub session_token: SessionToken,
+    pub beads_db_path: BeadsDbPath,
     destination: ImportBdV1Destination,
-    pub idempotency_key: String,
+    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImportBdV1Destination {
-    ExistingMetaTask { meta_task_id: String },
+    ExistingMetaTask { meta_task_id: MetaTaskId },
     NewMetaTask { prompt_text: String },
 }
+
+/// Filesystem path to a source beads database.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BeadsDbPath(String);
+
+/// Filesystem path to the project root that owns an OpenSpec change.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectRootPath(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawImportBdV1Req {
@@ -43,12 +56,16 @@ impl ImportBdV1Req {
         idempotency_key: impl Into<String>,
     ) -> Self {
         Self {
-            session_token: session_token.into(),
-            beads_db_path: beads_db_path.into(),
+            session_token: SessionToken::parse(session_token.into())
+                .expect("import bd request session_token must be a valid Covey token"),
+            beads_db_path: BeadsDbPath::parse(beads_db_path.into())
+                .expect("import bd request beads_db_path must be valid"),
             destination: ImportBdV1Destination::ExistingMetaTask {
-                meta_task_id: meta_task_id.into(),
+                meta_task_id: MetaTaskId::parse(meta_task_id.into())
+                    .expect("import bd request meta_task_id must be a valid Covey id"),
             },
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: IdempotencyKey::parse(idempotency_key.into())
+                .expect("import bd request idempotency_key must be valid"),
         }
     }
 
@@ -61,12 +78,15 @@ impl ImportBdV1Req {
         idempotency_key: impl Into<String>,
     ) -> Self {
         Self {
-            session_token: session_token.into(),
-            beads_db_path: beads_db_path.into(),
+            session_token: SessionToken::parse(session_token.into())
+                .expect("import bd request session_token must be a valid Covey token"),
+            beads_db_path: BeadsDbPath::parse(beads_db_path.into())
+                .expect("import bd request beads_db_path must be valid"),
             destination: ImportBdV1Destination::NewMetaTask {
                 prompt_text: prompt_text.into(),
             },
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: IdempotencyKey::parse(idempotency_key.into())
+                .expect("import bd request idempotency_key must be valid"),
         }
     }
 
@@ -82,14 +102,20 @@ impl ImportBdV1Req {
         meta_task_id: Option<String>,
         prompt_text: Option<String>,
         idempotency_key: impl Into<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CoveyTypeValidationError> {
         let destination = ImportBdV1Destination::from_flat_selectors(meta_task_id, prompt_text)?;
         Ok(Self {
-            session_token: session_token.into(),
-            beads_db_path: beads_db_path.into(),
+            session_token: SessionToken::parse(session_token.into())?,
+            beads_db_path: BeadsDbPath::parse(beads_db_path.into())?,
             destination,
-            idempotency_key: idempotency_key.into(),
+            idempotency_key: IdempotencyKey::parse(idempotency_key.into())?,
         })
+    }
+
+    /// Returns the session token that authorizes this import.
+    #[must_use]
+    pub fn session_token(&self) -> &SessionToken {
+        &self.session_token
     }
 
     /// Returns the existing meta-task selector, when this request uses one.
@@ -109,17 +135,22 @@ impl ImportBdV1Destination {
     fn from_flat_selectors(
         meta_task_id: Option<String>,
         prompt_text: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CoveyTypeValidationError> {
         match (meta_task_id, prompt_text) {
-            (Some(meta_task_id), None) => Ok(Self::ExistingMetaTask { meta_task_id }),
+            (Some(meta_task_id), None) => Ok(Self::ExistingMetaTask {
+                meta_task_id: MetaTaskId::parse(meta_task_id)?,
+            }),
             (None, Some(prompt_text)) => Ok(Self::NewMetaTask { prompt_text }),
-            _ => Err("bd import request requires exactly one destination selector".into()),
+            _ => Err(CoveyTypeValidationError::new(
+                "bd_import_destination",
+                "requires exactly one destination selector",
+            )),
         }
     }
 
     fn meta_task_id(&self) -> Option<&str> {
         match self {
-            Self::ExistingMetaTask { meta_task_id } => Some(meta_task_id),
+            Self::ExistingMetaTask { meta_task_id } => Some(meta_task_id.as_str()),
             Self::NewMetaTask { .. } => None,
         }
     }
@@ -132,14 +163,132 @@ impl ImportBdV1Destination {
     }
 }
 
+fn validate_import_filesystem_path(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.trim() != value {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not include leading or trailing whitespace",
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+impl BeadsDbPath {
+    /// Parses and validates a source beads database path.
+    pub fn parse(value: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        let value = value.into();
+        validate_import_filesystem_path("beads_db_path", &value)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the validated path string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ProjectRootPath {
+    /// Parses and validates an OpenSpec project root path.
+    pub fn parse(value: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        let value = value.into();
+        validate_import_filesystem_path("project_root", &value)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the validated path string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BeadsDbPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl fmt::Display for ProjectRootPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Deref for BeadsDbPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl Deref for ProjectRootPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl Serialize for BeadsDbPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl Serialize for ProjectRootPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BeadsDbPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectRootPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 impl From<&ImportBdV1Req> for RawImportBdV1Req {
     fn from(req: &ImportBdV1Req) -> Self {
         Self {
-            session_token: req.session_token.clone(),
-            beads_db_path: req.beads_db_path.clone(),
+            session_token: req.session_token.to_string(),
+            beads_db_path: req.beads_db_path.to_string(),
             meta_task_id: req.meta_task_id().map(str::to_owned),
             prompt_text: req.prompt_text().map(str::to_owned),
-            idempotency_key: req.idempotency_key.clone(),
+            idempotency_key: req.idempotency_key.to_string(),
         }
     }
 }
@@ -174,7 +323,7 @@ impl<'de> Deserialize<'de> for ImportBdV1Req {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBdV1Result {
-    pub meta_task_id: String,
+    pub meta_task_id: MetaTaskId,
     tally: ImportBdV1ResultTally,
     items: Vec<ImportBdV1ItemResult>,
 }
@@ -216,7 +365,7 @@ impl ImportBdV1Result {
             expected_tally.matches(tally)?;
         }
         Ok(Self {
-            meta_task_id: meta_task_id.into(),
+            meta_task_id: MetaTaskId::parse(meta_task_id.into()).map_err(|err| err.to_string())?,
             tally,
             items,
         })
@@ -244,7 +393,7 @@ impl ImportBdV1Result {
     #[must_use]
     pub fn into_flat_parts(self) -> (String, usize, usize, Vec<ImportBdV1ItemResult>) {
         (
-            self.meta_task_id,
+            self.meta_task_id.to_string(),
             self.tally.imported_count,
             self.tally.skipped_count,
             self.items,
@@ -320,7 +469,7 @@ impl ImportBdV1ResultTally {
 impl From<&ImportBdV1Result> for RawImportBdV1Result {
     fn from(result: &ImportBdV1Result) -> Self {
         Self {
-            meta_task_id: result.meta_task_id.clone(),
+            meta_task_id: result.meta_task_id.to_string(),
             imported_count: result.tally.imported_count,
             skipped_count: result.tally.skipped_count,
             items: result.items.clone(),
@@ -358,17 +507,17 @@ impl<'de> Deserialize<'de> for ImportBdV1Result {
 /// Per-item outcome for a V1 bd import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBdV1ItemResult {
-    pub source_issue_id: String,
+    pub source_issue_id: SourceIssueId,
     outcome: ImportBdV1ItemOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImportBdV1ItemOutcome {
     Imported {
-        subtask_id: String,
+        subtask_id: SubtaskId,
     },
     Skipped {
-        subtask_id: Option<String>,
+        subtask_id: Option<SubtaskId>,
         skip_reason: ImportBdV1SkipReason,
     },
 }
@@ -385,9 +534,11 @@ impl ImportBdV1ItemResult {
     #[must_use]
     pub fn imported(source_issue_id: impl Into<String>, subtask_id: impl Into<String>) -> Self {
         Self {
-            source_issue_id: source_issue_id.into(),
+            source_issue_id: SourceIssueId::parse(source_issue_id.into())
+                .expect("imported bd item source_issue_id must be valid"),
             outcome: ImportBdV1ItemOutcome::Imported {
-                subtask_id: subtask_id.into(),
+                subtask_id: SubtaskId::parse(subtask_id.into())
+                    .expect("imported bd item subtask_id must be a valid Covey id"),
             },
         }
     }
@@ -399,21 +550,29 @@ impl ImportBdV1ItemResult {
         subtask_id: Option<String>,
         skip_reason: ImportBdV1SkipReason,
     ) -> Self {
+        let outcome = ImportBdV1ItemOutcome::try_from_parts(subtask_id, Some(skip_reason))
+            .expect("skipped bd item outcome must be internally consistent");
         Self {
-            source_issue_id: source_issue_id.into(),
-            outcome: ImportBdV1ItemOutcome::Skipped {
-                subtask_id,
-                skip_reason,
-            },
+            source_issue_id: SourceIssueId::parse(source_issue_id.into())
+                .expect("skipped bd item source_issue_id must be valid"),
+            outcome,
         }
+    }
+
+    /// Returns the source issue id that produced this import item.
+    #[must_use]
+    pub fn source_issue_id(&self) -> &str {
+        self.source_issue_id.as_str()
     }
 
     /// Returns the imported or duplicate-existing subtask id, when present.
     #[must_use]
     pub fn subtask_id(&self) -> Option<&str> {
         match &self.outcome {
-            ImportBdV1ItemOutcome::Imported { subtask_id } => Some(subtask_id),
-            ImportBdV1ItemOutcome::Skipped { subtask_id, .. } => subtask_id.as_deref(),
+            ImportBdV1ItemOutcome::Imported { subtask_id } => Some(subtask_id.as_str()),
+            ImportBdV1ItemOutcome::Skipped { subtask_id, .. } => {
+                subtask_id.as_ref().map(SubtaskId::as_str)
+            }
         }
     }
 
@@ -433,11 +592,18 @@ impl ImportBdV1ItemOutcome {
         skip_reason: Option<ImportBdV1SkipReason>,
     ) -> Result<Self, String> {
         match (subtask_id, skip_reason) {
-            (Some(subtask_id), None) => Ok(Self::Imported { subtask_id }),
-            (subtask_id, Some(ImportBdV1SkipReason::DeterministicDuplicate)) => Ok(Self::Skipped {
-                subtask_id,
-                skip_reason: ImportBdV1SkipReason::DeterministicDuplicate,
+            (Some(subtask_id), None) => Ok(Self::Imported {
+                subtask_id: SubtaskId::parse(subtask_id).map_err(|err| err.to_string())?,
             }),
+            (Some(subtask_id), Some(ImportBdV1SkipReason::DeterministicDuplicate)) => {
+                Ok(Self::Skipped {
+                    subtask_id: Some(SubtaskId::parse(subtask_id).map_err(|err| err.to_string())?),
+                    skip_reason: ImportBdV1SkipReason::DeterministicDuplicate,
+                })
+            }
+            (None, Some(ImportBdV1SkipReason::DeterministicDuplicate)) => {
+                Err("deterministic duplicate bd import items require subtask_id".into())
+            }
             (None, Some(skip_reason @ ImportBdV1SkipReason::InvalidRow { .. })) => {
                 Ok(Self::Skipped {
                     subtask_id: None,
@@ -455,8 +621,8 @@ impl ImportBdV1ItemOutcome {
 
     fn subtask_id(&self) -> Option<&str> {
         match self {
-            Self::Imported { subtask_id } => Some(subtask_id),
-            Self::Skipped { subtask_id, .. } => subtask_id.as_deref(),
+            Self::Imported { subtask_id } => Some(subtask_id.as_str()),
+            Self::Skipped { subtask_id, .. } => subtask_id.as_ref().map(SubtaskId::as_str),
         }
     }
 
@@ -474,7 +640,7 @@ impl Serialize for ImportBdV1ItemResult {
         S: Serializer,
     {
         RawImportBdV1ItemResult {
-            source_issue_id: self.source_issue_id.clone(),
+            source_issue_id: self.source_issue_id.to_string(),
             subtask_id: self.outcome.subtask_id().map(str::to_owned),
             skip_reason: self.outcome.skip_reason().cloned(),
         }
@@ -491,7 +657,8 @@ impl<'de> Deserialize<'de> for ImportBdV1ItemResult {
         let outcome = ImportBdV1ItemOutcome::try_from_parts(raw.subtask_id, raw.skip_reason)
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
-            source_issue_id: raw.source_issue_id,
+            source_issue_id: SourceIssueId::parse(raw.source_issue_id)
+                .map_err(serde::de::Error::custom)?,
             outcome,
         })
     }
@@ -507,15 +674,15 @@ pub enum ImportBdV1SkipReason {
 /// Request to import one OpenSpec change into Covey task state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecReq {
-    pub change_id: String,
-    pub project_root: String,
+    pub change_id: OpenSpecChangeId,
+    pub project_root: ProjectRootPath,
     mode: ImportOpenSpecMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImportOpenSpecMode {
-    DryRun { session_token: Option<String> },
-    Write { session_token: String },
+    DryRun { session_token: Option<SessionToken> },
+    Write { session_token: SessionToken },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,8 +698,10 @@ impl ImportOpenSpecReq {
     #[must_use]
     pub fn dry_run(change_id: impl Into<String>, project_root: impl Into<String>) -> Self {
         Self {
-            change_id: change_id.into(),
-            project_root: project_root.into(),
+            change_id: OpenSpecChangeId::parse(change_id.into())
+                .expect("OpenSpec import change_id must be kebab-case ASCII"),
+            project_root: ProjectRootPath::parse(project_root.into())
+                .expect("OpenSpec import project_root must be valid"),
             mode: ImportOpenSpecMode::DryRun {
                 session_token: None,
             },
@@ -547,10 +716,15 @@ impl ImportOpenSpecReq {
         project_root: impl Into<String>,
     ) -> Self {
         Self {
-            change_id: change_id.into(),
-            project_root: project_root.into(),
+            change_id: OpenSpecChangeId::parse(change_id.into())
+                .expect("OpenSpec import change_id must be kebab-case ASCII"),
+            project_root: ProjectRootPath::parse(project_root.into())
+                .expect("OpenSpec import project_root must be valid"),
             mode: ImportOpenSpecMode::DryRun {
-                session_token: Some(session_token.into()),
+                session_token: Some(
+                    SessionToken::parse(session_token.into())
+                        .expect("OpenSpec dry-run session_token must be a valid Covey token"),
+                ),
             },
         }
     }
@@ -563,10 +737,13 @@ impl ImportOpenSpecReq {
         project_root: impl Into<String>,
     ) -> Self {
         Self {
-            change_id: change_id.into(),
-            project_root: project_root.into(),
+            change_id: OpenSpecChangeId::parse(change_id.into())
+                .expect("OpenSpec import change_id must be kebab-case ASCII"),
+            project_root: ProjectRootPath::parse(project_root.into())
+                .expect("OpenSpec import project_root must be valid"),
             mode: ImportOpenSpecMode::Write {
-                session_token: session_token.into(),
+                session_token: SessionToken::parse(session_token.into())
+                    .expect("OpenSpec write session_token must be a valid Covey token"),
             },
         }
     }
@@ -581,11 +758,11 @@ impl ImportOpenSpecReq {
         change_id: impl Into<String>,
         project_root: impl Into<String>,
         dry_run: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CoveyTypeValidationError> {
         let mode = ImportOpenSpecMode::from_flat_mode(session_token, dry_run)?;
         Ok(Self {
-            change_id: change_id.into(),
-            project_root: project_root.into(),
+            change_id: OpenSpecChangeId::parse(change_id.into())?,
+            project_root: ProjectRootPath::parse(project_root.into())?,
             mode,
         })
     }
@@ -610,27 +787,41 @@ impl ImportOpenSpecReq {
 }
 
 impl ImportOpenSpecMode {
-    fn from_flat_mode(session_token: Option<String>, dry_run: bool) -> Result<Self, String> {
+    fn from_flat_mode(
+        session_token: Option<String>,
+        dry_run: bool,
+    ) -> Result<Self, CoveyTypeValidationError> {
         if dry_run {
-            Ok(Self::DryRun { session_token })
+            Ok(Self::DryRun {
+                session_token: session_token.map(SessionToken::parse).transpose()?,
+            })
         } else {
             session_token
-                .map(|session_token| Self::Write { session_token })
-                .ok_or_else(|| "write mode requires --session-token".to_owned())
+                .map(|session_token| {
+                    Ok(Self::Write {
+                        session_token: SessionToken::parse(session_token)?,
+                    })
+                })
+                .ok_or_else(|| {
+                    CoveyTypeValidationError::new(
+                        "session_token",
+                        "write mode requires --session-token",
+                    )
+                })?
         }
     }
 
     fn session_token(&self) -> Option<&str> {
         match self {
-            Self::DryRun { session_token } => session_token.as_deref(),
-            Self::Write { session_token } => Some(session_token),
+            Self::DryRun { session_token } => session_token.as_ref().map(SessionToken::as_str),
+            Self::Write { session_token } => Some(session_token.as_str()),
         }
     }
 
     fn write_session_token(&self) -> Option<&str> {
         match self {
             Self::DryRun { .. } => None,
-            Self::Write { session_token } => Some(session_token),
+            Self::Write { session_token } => Some(session_token.as_str()),
         }
     }
 
@@ -646,8 +837,8 @@ impl From<&ImportOpenSpecReq> for RawImportOpenSpecReq {
     fn from(req: &ImportOpenSpecReq) -> Self {
         Self {
             session_token: req.session_token().map(str::to_owned),
-            change_id: req.change_id.clone(),
-            project_root: req.project_root.clone(),
+            change_id: req.change_id.to_string(),
+            project_root: req.project_root.to_string(),
             dry_run: req.is_dry_run(),
         }
     }
@@ -682,8 +873,8 @@ impl<'de> Deserialize<'de> for ImportOpenSpecReq {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecResult {
-    pub change_id: String,
-    pub meta_task_id: String,
+    pub change_id: OpenSpecChangeId,
+    pub meta_task_id: MetaTaskId,
     dry_run: bool,
     tally: ImportOpenSpecResultTally,
     conflicts: Vec<ImportOpenSpecConflict>,
@@ -747,8 +938,8 @@ impl ImportOpenSpecResult {
             expected_tally.matches(tally)?;
         }
         Ok(Self {
-            change_id: change_id.into(),
-            meta_task_id: meta_task_id.into(),
+            change_id: OpenSpecChangeId::parse(change_id.into()).map_err(|err| err.to_string())?,
+            meta_task_id: MetaTaskId::parse(meta_task_id.into()).map_err(|err| err.to_string())?,
             dry_run,
             tally,
             conflicts,
@@ -807,8 +998,8 @@ impl ImportOpenSpecResult {
         Vec<ImportOpenSpecItemResult>,
     ) {
         (
-            self.change_id,
-            self.meta_task_id,
+            self.change_id.to_string(),
+            self.meta_task_id.to_string(),
             self.dry_run,
             self.tally.created,
             self.tally.updated,
@@ -878,8 +1069,8 @@ impl ImportOpenSpecResultTally {
 impl From<&ImportOpenSpecResult> for RawImportOpenSpecResult {
     fn from(result: &ImportOpenSpecResult) -> Self {
         Self {
-            change_id: result.change_id.clone(),
-            meta_task_id: result.meta_task_id.clone(),
+            change_id: result.change_id.to_string(),
+            meta_task_id: result.meta_task_id.to_string(),
             dry_run: result.dry_run,
             created: result.tally.created,
             updated: result.tally.updated,
@@ -922,10 +1113,137 @@ impl<'de> Deserialize<'de> for ImportOpenSpecResult {
     }
 }
 
+/// Normalized OpenSpec-relative path stored in import DTOs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpenSpecPath(String);
+
+impl OpenSpecPath {
+    /// Parses a raw path into a validated OpenSpec-relative path.
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("OpenSpec path must not be empty".to_owned());
+        }
+        if value.trim() != value {
+            return Err("OpenSpec path must not include leading or trailing whitespace".to_owned());
+        }
+        if value.starts_with('/') || value.starts_with('\\') {
+            return Err("OpenSpec path must be relative".to_owned());
+        }
+        if value.chars().any(char::is_control) {
+            return Err("OpenSpec path must not contain control characters".to_owned());
+        }
+        if value.split(['/', '\\']).any(|component| component == "..") {
+            return Err("OpenSpec path must not escape upward".to_owned());
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated path string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for OpenSpecPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Deref for OpenSpecPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl Serialize for OpenSpecPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenSpecPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Stable OpenSpec task identifier such as `1.1` or `2.3.4`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpenSpecTaskId(String);
+
+impl OpenSpecTaskId {
+    /// Parses a raw OpenSpec task id into hierarchical numeric form.
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if !value.contains('.') {
+            return Err("OpenSpec task id must be hierarchical numeric form".to_owned());
+        }
+        if value
+            .split('.')
+            .any(|segment| segment.is_empty() || !segment.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return Err(
+                "OpenSpec task id must contain only numeric dot-separated segments".to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated task id string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for OpenSpecTaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Deref for OpenSpecTaskId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl Serialize for OpenSpecTaskId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenSpecTaskId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Per-logical-record outcome for an OpenSpec import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecItemResult {
-    pub object_id: String,
     action: ImportOpenSpecAction,
     object: ImportOpenSpecItemObject,
 }
@@ -933,14 +1251,16 @@ pub struct ImportOpenSpecItemResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImportOpenSpecItemObject {
     MetaTask {
+        object_id: MetaTaskId,
         title: String,
     },
     Subtask {
-        openspec_task_id: String,
+        object_id: SubtaskId,
+        openspec_task_id: OpenSpecTaskId,
         title: String,
         task_type: Option<String>,
-        task_digest: String,
-        source_path: String,
+        task_digest: OpenSpecDigest,
+        source_path: OpenSpecPath,
     },
 }
 
@@ -968,9 +1288,9 @@ impl ImportOpenSpecItemResult {
             return Err("metatask OpenSpec import items cannot use conflict action".into());
         }
         Ok(Self {
-            object_id: object_id.into(),
             action,
             object: ImportOpenSpecItemObject::MetaTask {
+                object_id: MetaTaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
                 title: title.into(),
             },
         })
@@ -986,24 +1306,31 @@ impl ImportOpenSpecItemResult {
         task_digest: impl Into<String>,
         source_path: impl Into<String>,
         action: ImportOpenSpecAction,
-    ) -> Self {
-        Self {
-            object_id: object_id.into(),
+    ) -> Result<Self, String> {
+        Ok(Self {
             action,
             object: ImportOpenSpecItemObject::Subtask {
-                openspec_task_id: openspec_task_id.into(),
+                object_id: SubtaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
+                openspec_task_id: OpenSpecTaskId::parse(openspec_task_id.into())?,
                 title: title.into(),
                 task_type,
-                task_digest: task_digest.into(),
-                source_path: source_path.into(),
+                task_digest: OpenSpecDigest::parse(task_digest.into())
+                    .map_err(|err| err.to_string())?,
+                source_path: OpenSpecPath::parse(source_path.into())?,
             },
-        }
+        })
     }
 
     /// Returns the imported Covey object type.
     #[must_use]
     pub const fn object_type(&self) -> ObjectType {
         self.object.object_type()
+    }
+
+    /// Returns the imported Covey object id.
+    #[must_use]
+    pub fn object_id(&self) -> &str {
+        self.object.object_id()
     }
 
     /// Returns the import action for this item.
@@ -1019,7 +1346,7 @@ impl ImportOpenSpecItemResult {
             ImportOpenSpecItemObject::MetaTask { .. } => None,
             ImportOpenSpecItemObject::Subtask {
                 openspec_task_id, ..
-            } => Some(openspec_task_id),
+            } => Some(openspec_task_id.as_str()),
         }
     }
 
@@ -1027,7 +1354,7 @@ impl ImportOpenSpecItemResult {
     #[must_use]
     pub fn title(&self) -> &str {
         match &self.object {
-            ImportOpenSpecItemObject::MetaTask { title } => title,
+            ImportOpenSpecItemObject::MetaTask { title, .. } => title,
             ImportOpenSpecItemObject::Subtask { title, .. } => title,
         }
     }
@@ -1046,7 +1373,7 @@ impl ImportOpenSpecItemResult {
     pub fn task_digest(&self) -> Option<&str> {
         match &self.object {
             ImportOpenSpecItemObject::MetaTask { .. } => None,
-            ImportOpenSpecItemObject::Subtask { task_digest, .. } => Some(task_digest),
+            ImportOpenSpecItemObject::Subtask { task_digest, .. } => Some(task_digest.as_str()),
         }
     }
 
@@ -1055,7 +1382,7 @@ impl ImportOpenSpecItemResult {
     pub fn source_path(&self) -> Option<&str> {
         match &self.object {
             ImportOpenSpecItemObject::MetaTask { .. } => None,
-            ImportOpenSpecItemObject::Subtask { source_path, .. } => Some(source_path),
+            ImportOpenSpecItemObject::Subtask { source_path, .. } => Some(source_path.as_str()),
         }
     }
 }
@@ -1063,6 +1390,7 @@ impl ImportOpenSpecItemResult {
 impl ImportOpenSpecItemObject {
     fn try_from_raw_parts(
         object_type: ObjectType,
+        object_id: String,
         openspec_task_id: Option<String>,
         title: Option<String>,
         task_type: Option<String>,
@@ -1082,7 +1410,10 @@ impl ImportOpenSpecItemObject {
                 }
                 let title = title
                     .ok_or_else(|| "metatask OpenSpec import items require title".to_owned())?;
-                Ok(Self::MetaTask { title })
+                Ok(Self::MetaTask {
+                    object_id: MetaTaskId::parse(object_id).map_err(|err| err.to_string())?,
+                    title,
+                })
             }
             ObjectType::Subtask => {
                 let openspec_task_id = openspec_task_id.ok_or_else(|| {
@@ -1097,11 +1428,13 @@ impl ImportOpenSpecItemObject {
                     "subtask OpenSpec import items require source_path".to_owned()
                 })?;
                 Ok(Self::Subtask {
-                    openspec_task_id,
+                    object_id: SubtaskId::parse(object_id).map_err(|err| err.to_string())?,
+                    openspec_task_id: OpenSpecTaskId::parse(openspec_task_id)?,
                     title,
                     task_type,
-                    task_digest,
-                    source_path,
+                    task_digest: OpenSpecDigest::parse(task_digest)
+                        .map_err(|err| err.to_string())?,
+                    source_path: OpenSpecPath::parse(source_path)?,
                 })
             }
             _ => Err("OpenSpec import items only support metatask and subtask objects".into()),
@@ -1112,6 +1445,13 @@ impl ImportOpenSpecItemObject {
         match self {
             Self::MetaTask { .. } => ObjectType::MetaTask,
             Self::Subtask { .. } => ObjectType::Subtask,
+        }
+    }
+
+    fn object_id(&self) -> &str {
+        match self {
+            Self::MetaTask { object_id, .. } => object_id.as_str(),
+            Self::Subtask { object_id, .. } => object_id.as_str(),
         }
     }
 
@@ -1131,7 +1471,7 @@ impl Serialize for ImportOpenSpecItemResult {
         S: Serializer,
     {
         let (openspec_task_id, title, task_type, task_digest, source_path) = match &self.object {
-            ImportOpenSpecItemObject::MetaTask { title } => {
+            ImportOpenSpecItemObject::MetaTask { title, .. } => {
                 (None, Some(title.clone()), None, None, None)
             }
             ImportOpenSpecItemObject::Subtask {
@@ -1140,17 +1480,18 @@ impl Serialize for ImportOpenSpecItemResult {
                 task_type,
                 task_digest,
                 source_path,
+                ..
             } => (
-                Some(openspec_task_id.clone()),
+                Some(openspec_task_id.to_string()),
                 Some(title.clone()),
                 task_type.clone(),
-                Some(task_digest.clone()),
-                Some(source_path.clone()),
+                Some(task_digest.to_string()),
+                Some(source_path.to_string()),
             ),
         };
         RawImportOpenSpecItemResult {
             object_type: self.object_type(),
-            object_id: self.object_id.clone(),
+            object_id: self.object_id().to_owned(),
             openspec_task_id,
             title,
             task_type,
@@ -1170,6 +1511,7 @@ impl<'de> Deserialize<'de> for ImportOpenSpecItemResult {
         let raw = RawImportOpenSpecItemResult::deserialize(deserializer)?;
         let object = ImportOpenSpecItemObject::try_from_raw_parts(
             raw.object_type,
+            raw.object_id,
             raw.openspec_task_id,
             raw.title,
             raw.task_type,
@@ -1181,7 +1523,6 @@ impl<'de> Deserialize<'de> for ImportOpenSpecItemResult {
             .validate_action(raw.action)
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
-            object_id: raw.object_id,
             action: raw.action,
             object,
         })
@@ -1202,17 +1543,26 @@ pub enum ImportOpenSpecAction {
 /// Conflict reported by the OpenSpec importer without mutating unsafe records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOpenSpecConflict {
-    pub object_id: String,
-    pub reason: String,
-    pub source_path: String,
+    pub reason: ImportOpenSpecConflictReason,
+    pub source_path: OpenSpecPath,
     object: ImportOpenSpecConflictObject,
+}
+
+/// Machine-readable reason for an OpenSpec import conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ImportOpenSpecConflictReason {
+    ActiveClaimChangedSource,
+    ExistingSubtaskDifferentMetaTask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImportOpenSpecConflictObject {
     Subtask {
-        openspec_task_id: String,
-        task_digest: String,
+        object_id: SubtaskId,
+        openspec_task_id: OpenSpecTaskId,
+        task_digest: OpenSpecDigest,
     },
 }
 
@@ -1221,7 +1571,7 @@ struct RawImportOpenSpecConflict {
     object_type: ObjectType,
     object_id: String,
     openspec_task_id: Option<String>,
-    reason: String,
+    reason: ImportOpenSpecConflictReason,
     source_path: String,
     task_digest: Option<String>,
 }
@@ -1232,19 +1582,20 @@ impl ImportOpenSpecConflict {
     pub fn subtask(
         object_id: impl Into<String>,
         openspec_task_id: impl Into<String>,
-        reason: impl Into<String>,
+        reason: ImportOpenSpecConflictReason,
         source_path: impl Into<String>,
         task_digest: impl Into<String>,
-    ) -> Self {
-        Self {
-            object_id: object_id.into(),
-            reason: reason.into(),
-            source_path: source_path.into(),
+    ) -> Result<Self, String> {
+        Ok(Self {
+            reason,
+            source_path: OpenSpecPath::parse(source_path.into())?,
             object: ImportOpenSpecConflictObject::Subtask {
-                openspec_task_id: openspec_task_id.into(),
-                task_digest: task_digest.into(),
+                object_id: SubtaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
+                openspec_task_id: OpenSpecTaskId::parse(openspec_task_id.into())?,
+                task_digest: OpenSpecDigest::parse(task_digest.into())
+                    .map_err(|err| err.to_string())?,
             },
-        }
+        })
     }
 
     /// Returns the conflicting Covey object type.
@@ -1253,13 +1604,19 @@ impl ImportOpenSpecConflict {
         self.object.object_type()
     }
 
+    /// Returns the conflicting Covey object id.
+    #[must_use]
+    pub fn object_id(&self) -> &str {
+        self.object.object_id()
+    }
+
     /// Returns the OpenSpec task id for this subtask conflict.
     #[must_use]
     pub fn openspec_task_id(&self) -> &str {
         match &self.object {
             ImportOpenSpecConflictObject::Subtask {
                 openspec_task_id, ..
-            } => openspec_task_id,
+            } => openspec_task_id.as_str(),
         }
     }
 
@@ -1267,14 +1624,21 @@ impl ImportOpenSpecConflict {
     #[must_use]
     pub fn task_digest(&self) -> &str {
         match &self.object {
-            ImportOpenSpecConflictObject::Subtask { task_digest, .. } => task_digest,
+            ImportOpenSpecConflictObject::Subtask { task_digest, .. } => task_digest.as_str(),
         }
+    }
+
+    /// Returns the typed conflict reason.
+    #[must_use]
+    pub const fn reason(&self) -> ImportOpenSpecConflictReason {
+        self.reason
     }
 }
 
 impl ImportOpenSpecConflictObject {
     fn try_from_raw_parts(
         object_type: ObjectType,
+        object_id: String,
         openspec_task_id: Option<String>,
         task_digest: Option<String>,
     ) -> Result<Self, String> {
@@ -1287,8 +1651,10 @@ impl ImportOpenSpecConflictObject {
                     "subtask OpenSpec import conflicts require task_digest".to_owned()
                 })?;
                 Ok(Self::Subtask {
-                    openspec_task_id,
-                    task_digest,
+                    object_id: SubtaskId::parse(object_id).map_err(|err| err.to_string())?,
+                    openspec_task_id: OpenSpecTaskId::parse(openspec_task_id)?,
+                    task_digest: OpenSpecDigest::parse(task_digest)
+                        .map_err(|err| err.to_string())?,
                 })
             }
             _ => Err("OpenSpec import conflicts only support subtask objects".into()),
@@ -1300,6 +1666,12 @@ impl ImportOpenSpecConflictObject {
             Self::Subtask { .. } => ObjectType::Subtask,
         }
     }
+
+    fn object_id(&self) -> &str {
+        match self {
+            Self::Subtask { object_id, .. } => object_id.as_str(),
+        }
+    }
 }
 
 impl Serialize for ImportOpenSpecConflict {
@@ -1309,10 +1681,10 @@ impl Serialize for ImportOpenSpecConflict {
     {
         RawImportOpenSpecConflict {
             object_type: self.object_type(),
-            object_id: self.object_id.clone(),
+            object_id: self.object_id().to_owned(),
             openspec_task_id: Some(self.openspec_task_id().to_owned()),
-            reason: self.reason.clone(),
-            source_path: self.source_path.clone(),
+            reason: self.reason,
+            source_path: self.source_path.to_string(),
             task_digest: Some(self.task_digest().to_owned()),
         }
         .serialize(serializer)
@@ -1327,14 +1699,14 @@ impl<'de> Deserialize<'de> for ImportOpenSpecConflict {
         let raw = RawImportOpenSpecConflict::deserialize(deserializer)?;
         let object = ImportOpenSpecConflictObject::try_from_raw_parts(
             raw.object_type,
+            raw.object_id,
             raw.openspec_task_id,
             raw.task_digest,
         )
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
-            object_id: raw.object_id,
             reason: raw.reason,
-            source_path: raw.source_path,
+            source_path: OpenSpecPath::parse(raw.source_path).map_err(serde::de::Error::custom)?,
             object,
         })
     }
@@ -1350,26 +1722,27 @@ pub struct OpenSpecImportProvenance {
 /// Object-independent OpenSpec provenance fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpecImportProvenanceCommon {
-    object_id: String,
-    openspec_change_id: String,
-    openspec_change_path: String,
-    tasks_digest: String,
+    openspec_change_id: OpenSpecChangeId,
+    openspec_change_path: OpenSpecPath,
+    tasks_digest: OpenSpecDigest,
     source_digests: Vec<OpenSpecSourceDigest>,
     mission_artifact_digests: Vec<OpenSpecSourceDigest>,
-    mission_artifacts: Vec<String>,
+    mission_artifacts: Vec<OpenSpecPath>,
     updated_at: TimestampMs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OpenSpecImportProvenanceObject {
     MetaTask {
-        proposal_digest: String,
-        design_digest: String,
+        object_id: MetaTaskId,
+        proposal_digest: OpenSpecDigest,
+        design_digest: OpenSpecDigest,
         spec_digests: Vec<OpenSpecSourceDigest>,
     },
     Subtask {
-        openspec_task_id: String,
-        task_digest: String,
+        object_id: SubtaskId,
+        openspec_task_id: OpenSpecTaskId,
+        task_digest: OpenSpecDigest,
     },
 }
 
@@ -1396,9 +1769,7 @@ impl OpenSpecImportProvenanceCommon {
     const PLANNING_FORMAT: &'static str = "openspec";
 
     /// Builds common OpenSpec provenance fields.
-    #[must_use]
     pub fn new(
-        object_id: impl Into<String>,
         openspec_change_id: impl Into<String>,
         openspec_change_path: impl Into<String>,
         tasks_digest: impl Into<String>,
@@ -1406,21 +1777,25 @@ impl OpenSpecImportProvenanceCommon {
         mission_artifact_digests: Vec<OpenSpecSourceDigest>,
         mission_artifacts: Vec<String>,
         updated_at: TimestampMs,
-    ) -> Self {
-        Self {
-            object_id: object_id.into(),
-            openspec_change_id: openspec_change_id.into(),
-            openspec_change_path: openspec_change_path.into(),
-            tasks_digest: tasks_digest.into(),
+    ) -> Result<Self, String> {
+        let mission_artifacts = mission_artifacts
+            .into_iter()
+            .map(OpenSpecPath::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())
+                .map_err(|err| err.to_string())?,
+            openspec_change_path: OpenSpecPath::parse(openspec_change_path.into())?,
+            tasks_digest: OpenSpecDigest::parse(tasks_digest.into())
+                .map_err(|err| err.to_string())?,
             source_digests,
             mission_artifact_digests,
             mission_artifacts,
             updated_at,
-        }
+        })
     }
 
     fn from_raw_parts(
-        object_id: String,
         planning_format: String,
         openspec_change_id: String,
         openspec_change_path: String,
@@ -1433,8 +1808,7 @@ impl OpenSpecImportProvenanceCommon {
         if planning_format != Self::PLANNING_FORMAT {
             return Err("OpenSpec provenance planning_format must be openspec".to_owned());
         }
-        Ok(Self::new(
-            object_id,
+        Self::new(
             openspec_change_id,
             openspec_change_path,
             tasks_digest,
@@ -1442,12 +1816,7 @@ impl OpenSpecImportProvenanceCommon {
             mission_artifact_digests,
             mission_artifacts,
             updated_at,
-        ))
-    }
-
-    #[must_use]
-    pub fn object_id(&self) -> &str {
-        &self.object_id
+        )
     }
 
     #[must_use]
@@ -1457,17 +1826,17 @@ impl OpenSpecImportProvenanceCommon {
 
     #[must_use]
     pub fn openspec_change_id(&self) -> &str {
-        &self.openspec_change_id
+        self.openspec_change_id.as_str()
     }
 
     #[must_use]
     pub fn openspec_change_path(&self) -> &str {
-        &self.openspec_change_path
+        self.openspec_change_path.as_str()
     }
 
     #[must_use]
     pub fn tasks_digest(&self) -> &str {
-        &self.tasks_digest
+        self.tasks_digest.as_str()
     }
 
     #[must_use]
@@ -1481,7 +1850,7 @@ impl OpenSpecImportProvenanceCommon {
     }
 
     #[must_use]
-    pub fn mission_artifacts(&self) -> &[String] {
+    pub fn mission_artifacts(&self) -> &[OpenSpecPath] {
         &self.mission_artifacts
     }
 
@@ -1500,40 +1869,47 @@ impl OpenSpecImportProvenance {
     #[must_use]
     pub fn meta_task(
         common: OpenSpecImportProvenanceCommon,
+        object_id: impl Into<String>,
         proposal_digest: String,
         design_digest: String,
         spec_digests: Vec<OpenSpecSourceDigest>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             common,
             object: OpenSpecImportProvenanceObject::MetaTask {
-                proposal_digest,
-                design_digest,
+                object_id: MetaTaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
+                proposal_digest: OpenSpecDigest::parse(proposal_digest)
+                    .map_err(|err| err.to_string())?,
+                design_digest: OpenSpecDigest::parse(design_digest)
+                    .map_err(|err| err.to_string())?,
                 spec_digests,
             },
-        }
+        })
     }
 
     /// Builds Subtask provenance from validated task evidence.
     #[must_use]
     pub fn subtask(
         common: OpenSpecImportProvenanceCommon,
+        object_id: impl Into<String>,
         openspec_task_id: String,
         task_digest: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             common,
             object: OpenSpecImportProvenanceObject::Subtask {
-                openspec_task_id,
-                task_digest,
+                object_id: SubtaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
+                openspec_task_id: OpenSpecTaskId::parse(openspec_task_id)?,
+                task_digest: OpenSpecDigest::parse(task_digest).map_err(|err| err.to_string())?,
             },
-        }
+        })
     }
 
     /// Parses the flat persisted/wire shape into object-kind-specific provenance.
     pub(crate) fn from_raw(raw: RawOpenSpecImportProvenance) -> Result<Self, String> {
         let object = OpenSpecImportProvenanceObject::try_from_raw_parts(
             raw.object_type,
+            raw.object_id,
             raw.openspec_task_id,
             raw.proposal_digest,
             raw.design_digest,
@@ -1542,7 +1918,6 @@ impl OpenSpecImportProvenance {
         )?;
         Ok(Self {
             common: OpenSpecImportProvenanceCommon::from_raw_parts(
-                raw.object_id,
                 raw.planning_format,
                 raw.openspec_change_id,
                 raw.openspec_change_path,
@@ -1572,7 +1947,11 @@ impl OpenSpecImportProvenance {
             spec_digests: self.spec_digests().to_vec(),
             source_digests: self.source_digests().to_vec(),
             mission_artifact_digests: self.mission_artifact_digests().to_vec(),
-            mission_artifacts: self.mission_artifacts().to_vec(),
+            mission_artifacts: self
+                .mission_artifacts()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             task_digest: self.task_digest().map(str::to_owned),
             updated_at: self.updated_at(),
         }
@@ -1586,7 +1965,7 @@ impl OpenSpecImportProvenance {
 
     #[must_use]
     pub fn object_id(&self) -> &str {
-        self.common.object_id()
+        self.object.object_id()
     }
 
     #[must_use]
@@ -1610,7 +1989,7 @@ impl OpenSpecImportProvenance {
             OpenSpecImportProvenanceObject::MetaTask { .. } => None,
             OpenSpecImportProvenanceObject::Subtask {
                 openspec_task_id, ..
-            } => Some(openspec_task_id),
+            } => Some(openspec_task_id.as_str()),
         }
     }
 
@@ -1619,7 +1998,7 @@ impl OpenSpecImportProvenance {
         match &self.object {
             OpenSpecImportProvenanceObject::MetaTask {
                 proposal_digest, ..
-            } => Some(proposal_digest),
+            } => Some(proposal_digest.as_str()),
             OpenSpecImportProvenanceObject::Subtask { .. } => None,
         }
     }
@@ -1627,7 +2006,9 @@ impl OpenSpecImportProvenance {
     #[must_use]
     pub fn design_digest(&self) -> Option<&str> {
         match &self.object {
-            OpenSpecImportProvenanceObject::MetaTask { design_digest, .. } => Some(design_digest),
+            OpenSpecImportProvenanceObject::MetaTask { design_digest, .. } => {
+                Some(design_digest.as_str())
+            }
             OpenSpecImportProvenanceObject::Subtask { .. } => None,
         }
     }
@@ -1656,7 +2037,7 @@ impl OpenSpecImportProvenance {
     }
 
     #[must_use]
-    pub fn mission_artifacts(&self) -> &[String] {
+    pub fn mission_artifacts(&self) -> &[OpenSpecPath] {
         self.common.mission_artifacts()
     }
 
@@ -1664,7 +2045,9 @@ impl OpenSpecImportProvenance {
     pub fn task_digest(&self) -> Option<&str> {
         match &self.object {
             OpenSpecImportProvenanceObject::MetaTask { .. } => None,
-            OpenSpecImportProvenanceObject::Subtask { task_digest, .. } => Some(task_digest),
+            OpenSpecImportProvenanceObject::Subtask { task_digest, .. } => {
+                Some(task_digest.as_str())
+            }
         }
     }
 
@@ -1681,6 +2064,7 @@ impl OpenSpecImportProvenance {
 impl OpenSpecImportProvenanceObject {
     fn try_from_raw_parts(
         object_type: ObjectType,
+        object_id: String,
         openspec_task_id: Option<String>,
         proposal_digest: Option<String>,
         design_digest: Option<String>,
@@ -1699,8 +2083,11 @@ impl OpenSpecImportProvenanceObject {
                     "metatask OpenSpec provenance requires design_digest".to_owned()
                 })?;
                 Ok(Self::MetaTask {
-                    proposal_digest,
-                    design_digest,
+                    object_id: MetaTaskId::parse(object_id).map_err(|err| err.to_string())?,
+                    proposal_digest: OpenSpecDigest::parse(proposal_digest)
+                        .map_err(|err| err.to_string())?,
+                    design_digest: OpenSpecDigest::parse(design_digest)
+                        .map_err(|err| err.to_string())?,
                     spec_digests,
                 })
             }
@@ -1717,8 +2104,10 @@ impl OpenSpecImportProvenanceObject {
                 let task_digest = task_digest
                     .ok_or_else(|| "subtask OpenSpec provenance requires task_digest".to_owned())?;
                 Ok(Self::Subtask {
-                    openspec_task_id,
-                    task_digest,
+                    object_id: SubtaskId::parse(object_id).map_err(|err| err.to_string())?,
+                    openspec_task_id: OpenSpecTaskId::parse(openspec_task_id)?,
+                    task_digest: OpenSpecDigest::parse(task_digest)
+                        .map_err(|err| err.to_string())?,
                 })
             }
             _ => Err("OpenSpec provenance only supports metatask and subtask objects".into()),
@@ -1729,6 +2118,13 @@ impl OpenSpecImportProvenanceObject {
         match self {
             Self::MetaTask { .. } => ObjectType::MetaTask,
             Self::Subtask { .. } => ObjectType::Subtask,
+        }
+    }
+
+    fn object_id(&self) -> &str {
+        match self {
+            Self::MetaTask { object_id, .. } => object_id.as_str(),
+            Self::Subtask { object_id, .. } => object_id.as_str(),
         }
     }
 }
@@ -1755,8 +2151,8 @@ impl<'de> Deserialize<'de> for OpenSpecImportProvenance {
 /// Digest for one OpenSpec source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpecSourceDigest {
-    path: String,
-    digest: String,
+    path: OpenSpecPath,
+    digest: OpenSpecDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1775,52 +2171,30 @@ impl OpenSpecSourceDigest {
     pub fn new(path: impl Into<String>, digest: impl Into<String>) -> Result<Self, String> {
         let path = path.into();
         let digest = digest.into();
-        Self::validate_path(&path)?;
-        Self::validate_digest(&digest)?;
-        Ok(Self { path, digest })
+        Ok(Self {
+            path: OpenSpecPath::parse(path)?,
+            digest: OpenSpecDigest::parse(digest).map_err(|err| err.to_string())?,
+        })
     }
 
     /// Returns the normalized relative source path.
     #[must_use]
     pub fn path(&self) -> &str {
-        &self.path
+        self.path.as_str()
     }
 
     /// Returns the source digest.
     #[must_use]
     pub fn digest(&self) -> &str {
-        &self.digest
-    }
-
-    fn validate_path(path: &str) -> Result<(), String> {
-        if path.trim().is_empty() {
-            return Err("OpenSpec source digest path must not be empty".to_owned());
-        }
-        if path.starts_with('/') || path.starts_with('\\') {
-            return Err("OpenSpec source digest path must be relative".to_owned());
-        }
-        if path.split(['/', '\\']).any(|component| component == "..") {
-            return Err("OpenSpec source digest path must not escape upward".to_owned());
-        }
-        Ok(())
-    }
-
-    fn validate_digest(digest: &str) -> Result<(), String> {
-        let Some(rest) = digest.strip_prefix("blake3:") else {
-            return Err("OpenSpec source digest must use blake3: prefix".to_owned());
-        };
-        if rest.is_empty() {
-            return Err("OpenSpec source digest must include digest bytes".to_owned());
-        }
-        Ok(())
+        self.digest.as_str()
     }
 }
 
 impl From<&OpenSpecSourceDigest> for RawOpenSpecSourceDigest {
     fn from(digest: &OpenSpecSourceDigest) -> Self {
         Self {
-            path: digest.path.clone(),
-            digest: digest.digest.clone(),
+            path: digest.path.to_string(),
+            digest: digest.digest.to_string(),
         }
     }
 }

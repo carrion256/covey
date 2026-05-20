@@ -59,6 +59,8 @@ pub(crate) struct ClaimNextArgs {
     #[arg(long)]
     pub(crate) lease_duration_ms: i64,
     #[arg(long)]
+    pub(crate) meta_task_id: Option<String>,
+    #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }
 

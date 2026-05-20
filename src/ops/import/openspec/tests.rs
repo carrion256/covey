@@ -35,12 +35,15 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
     let db_path = tmp.path().join("covey.db");
     let covey = Covey::open(&db_path).expect("open covey");
     let orchestrator = covey
-        .register_session(RegisterSessionReq {
-            agent_principal_id: "orch".to_owned(),
-            agent_instance_id: "orch-1".to_owned(),
-            role: SessionRole::Orchestrator,
-            idempotency_key: "register-orch".to_owned(),
-        })
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "orch",
+                "orch-1",
+                SessionRole::Orchestrator,
+                "register-orch",
+            )
+            .expect("valid session registration request"),
+        )
         .expect("register orchestrator");
 
     let result = covey
@@ -54,7 +57,7 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
         .items()
         .iter()
         .find(|item| item.object_type() == ObjectType::Subtask)
-        .map(|item| item.object_id.clone())
+        .map(|item| item.object_id().to_owned())
         .expect("imported subtask id");
 
     let provenance = covey

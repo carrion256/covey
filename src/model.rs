@@ -25,10 +25,13 @@ pub use records::{
 pub use requests::*;
 pub use state::*;
 pub use types::{
-    ArtifactDigest, BaseRev, ChangedPathsDigest, ClaimId, CommandTranscriptDigest,
-    CoveyTypeValidationError, FenceSeq, FindingsDigest, LeaseDeadlineMs, LeaseDurationMs,
-    MetaTaskId, ModelId, ProviderId, QueueId, RepoopsClaimRef, ReservationId, ReviewId,
-    SessionToken, SubtaskId, TimestampMs,
+    AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactManifestPath, BaseRev,
+    ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, CoveyTypeValidationError,
+    EventObjectId, EventSeq, FenceSeq, FindingsDigest, IdempotencyKey, LeaseDeadlineMs,
+    LeaseDurationMs, MetaTaskId, ModelId, OpenSpecChangeId, OpenSpecDigest, ProviderId,
+    ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsClaimRef, RepoopsPath, ReservationId,
+    ReviewId, RuntimeContainerId, RuntimeProcessId, SessionHeartbeatTick, SessionToken,
+    SourceIssueId, SubtaskId, SubtaskPriority, TimestampMs, VerifierId,
 };
 pub use views::*;
 
