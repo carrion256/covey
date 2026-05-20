@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
     error::{CoveyError, Result},
@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    provenance::{append_openspec_import_event_tx, upsert_openspec_provenance_tx},
     OpenSpecImportRecord,
+    provenance::{append_openspec_import_event_tx, upsert_openspec_provenance_tx},
 };
 
 pub(super) fn apply_openspec_import_diff_tx(
