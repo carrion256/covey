@@ -300,7 +300,7 @@ impl Covey {
                 .transpose()?
                 .map(crate::model::SubtaskView::try_from)
                 .transpose()?;
-            crate::model::SessionStatus::new(session, active_subtask)
+            crate::model::SessionStatus::from_parts(session, active_subtask)
                 .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation(

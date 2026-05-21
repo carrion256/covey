@@ -36,7 +36,7 @@ impl Covey {
             let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
             let reservations = load_active_reservations_tx(tx, now)?;
             let session = crate::queries::load_session_tx(tx, &req.session_token)?;
-            let paths = normalize_requested_paths(&req.paths);
+            let paths = normalize_requested_paths(req.paths());
             let scope_in = scope_patterns_for_subtask(&reservations, &claim.subtask_id);
             let scope = RepoopsAuthorityScopeFact::new(scope_in.clone(), Vec::new())
                 .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
@@ -959,6 +959,54 @@ mod tests {
         });
         serde_json::from_value::<RepoopsAuthoritySnapshot>(padded_fact_source_snapshot)
             .expect_err("snapshot serde must reject padded fact sources");
+
+        let control_fact_source_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": null,
+            "ownership_token": null,
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": null,
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": "claim unavailable",
+            "fact_sources": ["session_token_ref:token\nref"]
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(control_fact_source_snapshot)
+            .expect_err("snapshot serde must reject control characters in fact sources");
+
+        let duplicate_fact_source_snapshot = serde_json::json!({
+            "schema_version": "covey_repoops_authority_snapshot.v1",
+            "agent_id": "worker-1",
+            "claim_id": null,
+            "ownership_token": null,
+            "override_token": null,
+            "policy": {
+                "mode": "enforce",
+                "phase": 2,
+                "denied_rule_id": null
+            },
+            "claim": null,
+            "scope": {
+                "in": ["src/**"],
+                "out": []
+            },
+            "locks": [],
+            "git_context": null,
+            "constraint_reason": "claim unavailable",
+            "fact_sources": ["session_token_ref:token-ref", "session_token_ref:token-ref"]
+        });
+        serde_json::from_value::<RepoopsAuthoritySnapshot>(duplicate_fact_source_snapshot)
+            .expect_err("snapshot serde must reject duplicate fact sources");
     }
 
     #[test]

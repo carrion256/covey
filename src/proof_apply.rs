@@ -9,7 +9,7 @@ use crate::model::{
 };
 use clap::Parser;
 use rusqlite::{Connection, Row, params};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -436,16 +436,14 @@ enum ReviewProofLifecycle {
     Superseded,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct RawReviewRow<'a> {
-    review_id: &'a str,
-    subtask_id: &'a str,
-    artifact_digest: &'a str,
-    reviewer_session: &'a str,
-    review_subtask_id: &'a str,
-    verdict: Option<String>,
-    findings_digest: Option<&'a str>,
-    state: String,
+#[derive(Debug, Clone)]
+enum ReviewProofDecisionEvidence {
+    Absent,
+    Forbidden,
+    Decided {
+        verdict: ReviewVerdict,
+        findings_digest: FindingsDigest,
+    },
 }
 
 impl ReviewRow {
@@ -456,19 +454,15 @@ impl ReviewRow {
         artifact_digest: String,
         reviewer_session: String,
         review_subtask_id: String,
-        verdict: Option<String>,
-        findings_digest: Option<String>,
-        state: String,
+        state: ReviewState,
+        decision_evidence: ReviewProofDecisionEvidence,
     ) -> Result<Self, ApplyProofError> {
         let review_id = parse_proof_field(review_id, "review_id")?;
         let subtask_id = parse_proof_field(subtask_id, "subtask_id")?;
         let artifact_digest = parse_proof_field(artifact_digest, "artifact_digest")?;
         let reviewer_session = parse_proof_field(reviewer_session, "reviewer_session")?;
         let review_subtask_id = parse_proof_field(review_subtask_id, "review_subtask_id")?;
-        let state = ReviewState::from_str(&state).map_err(|err| {
-            ApplyProofError::Verification(format!("invalid review state in proof row: {err}"))
-        })?;
-        let lifecycle = ReviewProofLifecycle::from_parts(state, verdict, findings_digest)?;
+        let lifecycle = ReviewProofLifecycle::from_parts(state, decision_evidence)?;
         Ok(Self {
             review_id,
             subtask_id,
@@ -505,48 +499,34 @@ impl ReviewRow {
 impl ReviewProofLifecycle {
     fn from_parts(
         state: ReviewState,
-        verdict: Option<String>,
-        findings_digest: Option<String>,
+        decision_evidence: ReviewProofDecisionEvidence,
     ) -> Result<Self, ApplyProofError> {
         match state {
             ReviewState::Requested => {
-                reject_review_decision_evidence("requested", verdict, findings_digest)?;
+                reject_review_decision_evidence("requested", decision_evidence)?;
                 Ok(Self::Requested)
             }
             ReviewState::InProgress => {
-                reject_review_decision_evidence("in-progress", verdict, findings_digest)?;
+                reject_review_decision_evidence("in-progress", decision_evidence)?;
                 Ok(Self::InProgress)
             }
             ReviewState::Decided => {
-                let verdict = verdict
-                    .ok_or_else(|| {
-                        ApplyProofError::Verification(
-                            "decided review proof row requires verdict".into(),
-                        )
-                    })
-                    .and_then(|verdict| {
-                        ReviewVerdict::from_str(&verdict).map_err(|err| {
-                            ApplyProofError::Verification(format!(
-                                "invalid review verdict in proof row: {err}"
-                            ))
-                        })
-                    })?;
-                let findings_digest = findings_digest
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|digest| parse_proof_field(digest, "findings_digest"))
-                    .transpose()?
-                    .ok_or_else(|| {
-                        ApplyProofError::Verification(
-                            "decided review proof row requires non-empty findings_digest".into(),
-                        )
-                    })?;
+                let ReviewProofDecisionEvidence::Decided {
+                    verdict,
+                    findings_digest,
+                } = decision_evidence
+                else {
+                    return Err(ApplyProofError::Verification(
+                        "decided review proof row requires decision evidence".into(),
+                    ));
+                };
                 Ok(Self::Decided {
                     verdict,
                     findings_digest,
                 })
             }
             ReviewState::Superseded => {
-                reject_review_decision_evidence("superseded", verdict, findings_digest)?;
+                reject_review_decision_evidence("superseded", decision_evidence)?;
                 Ok(Self::Superseded)
             }
         }
@@ -578,12 +558,60 @@ impl ReviewProofLifecycle {
     }
 }
 
+impl ReviewProofDecisionEvidence {
+    fn from_raw_for_state(
+        state: ReviewState,
+        raw_verdict: Option<String>,
+        raw_findings_digest: Option<String>,
+    ) -> Result<Self, ApplyProofError> {
+        match state {
+            ReviewState::Decided => {
+                let verdict = raw_verdict
+                    .ok_or_else(|| {
+                        ApplyProofError::Verification(
+                            "decided review proof row requires verdict".into(),
+                        )
+                    })
+                    .and_then(|verdict| {
+                        ReviewVerdict::from_str(&verdict).map_err(|err| {
+                            ApplyProofError::Verification(format!(
+                                "invalid review verdict in proof row: {err}"
+                            ))
+                        })
+                    })?;
+                let findings_digest = raw_findings_digest
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|digest| parse_proof_field(digest, "findings_digest"))
+                    .transpose()?
+                    .ok_or_else(|| {
+                        ApplyProofError::Verification(
+                            "decided review proof row requires non-empty findings_digest".into(),
+                        )
+                    })?;
+                Ok(Self::Decided {
+                    verdict,
+                    findings_digest,
+                })
+            }
+            ReviewState::Requested | ReviewState::InProgress | ReviewState::Superseded => {
+                if raw_verdict.is_some() || raw_findings_digest.is_some() {
+                    Ok(Self::Forbidden)
+                } else {
+                    Ok(Self::Absent)
+                }
+            }
+        }
+    }
+}
+
 fn reject_review_decision_evidence(
     state: &str,
-    verdict: Option<String>,
-    findings_digest: Option<String>,
+    decision_evidence: ReviewProofDecisionEvidence,
 ) -> Result<(), ApplyProofError> {
-    if verdict.is_some() || findings_digest.is_some() {
+    if matches!(
+        decision_evidence,
+        ReviewProofDecisionEvidence::Decided { .. } | ReviewProofDecisionEvidence::Forbidden
+    ) {
         return Err(ApplyProofError::Verification(format!(
             "{state} review proof row must not carry decision evidence"
         )));
@@ -596,17 +624,19 @@ impl Serialize for ReviewRow {
     where
         S: serde::Serializer,
     {
-        RawReviewRow {
-            review_id: self.review_id.as_str(),
-            subtask_id: self.subtask_id.as_str(),
-            artifact_digest: self.artifact_digest.as_str(),
-            reviewer_session: self.reviewer_session.as_str(),
-            review_subtask_id: self.review_subtask_id.as_str(),
-            verdict: self.verdict().map(|verdict| verdict.to_string()),
-            findings_digest: self.findings_digest(),
-            state: self.state().to_string(),
-        }
-        .serialize(serializer)
+        let verdict = self.verdict();
+        let findings_digest = self.findings_digest();
+        let state = self.state();
+        let mut row = serializer.serialize_struct("ReviewRow", 8)?;
+        row.serialize_field("review_id", self.review_id.as_str())?;
+        row.serialize_field("subtask_id", self.subtask_id.as_str())?;
+        row.serialize_field("artifact_digest", self.artifact_digest.as_str())?;
+        row.serialize_field("reviewer_session", self.reviewer_session.as_str())?;
+        row.serialize_field("review_subtask_id", self.review_subtask_id.as_str())?;
+        row.serialize_field("verdict", &verdict)?;
+        row.serialize_field("findings_digest", &findings_digest)?;
+        row.serialize_field("state", &state)?;
+        row.end()
     }
 }
 
@@ -639,14 +669,20 @@ enum ReadyQueueProofLifecycle {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct RawReadyQueueRow<'a> {
-    queue_id: &'a str,
-    artifact_digest: &'a str,
-    subtask_id: &'a str,
-    state: &'a str,
-    claimed_by_session_token: Option<&'a str>,
-    claim_fence_seq: Option<i64>,
+#[derive(Debug, Clone)]
+enum ReadyQueueProofClaimEvidence {
+    Absent {
+        last_claim_fence_seq: Option<FenceSeq>,
+    },
+    Active {
+        claimed_by_session_token: SessionToken,
+        claim_fence_seq: FenceSeq,
+        claim_lease_deadline: LeaseDeadlineMs,
+    },
+    Applied {
+        claim_fence_seq: FenceSeq,
+    },
+    Forbidden,
 }
 
 impl ReadyQueueRow {
@@ -654,91 +690,13 @@ impl ReadyQueueRow {
         queue_id: String,
         artifact_digest: String,
         subtask_id: String,
-        state: String,
-        claimed_by_session_token: Option<String>,
-        claim_fence_seq: Option<i64>,
-        claim_lease_deadline: Option<i64>,
+        state: ReadyQueueState,
+        claim_evidence: ReadyQueueProofClaimEvidence,
     ) -> Result<Self, ApplyProofError> {
         let queue_id = parse_proof_field(queue_id, "queue_id")?;
         let artifact_digest = parse_proof_field(artifact_digest, "artifact_digest")?;
         let subtask_id = parse_proof_field(subtask_id, "subtask_id")?;
-        let state = ReadyQueueState::from_str(&state).map_err(|error| {
-            ApplyProofError::Verification(format!("ready queue row has invalid state: {error}"))
-        })?;
-        let lifecycle = match state {
-            ReadyQueueState::Queued => {
-                reject_active_ready_queue_claim(
-                    state,
-                    claimed_by_session_token.as_ref(),
-                    claim_lease_deadline,
-                )?;
-                ReadyQueueProofLifecycle::Queued {
-                    last_claim_fence_seq: parse_optional_fence_seq(claim_fence_seq)?,
-                }
-            }
-            ReadyQueueState::InFlight => {
-                let claimed_by_session_token = claimed_by_session_token
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| {
-                        ApplyProofError::Verification(
-                            "in-flight ready queue row requires claimed_by_session_token".into(),
-                        )
-                    })?;
-                let claimed_by_session_token =
-                    parse_proof_field(claimed_by_session_token, "claimed_by_session_token")?;
-                let claim_fence_seq = claim_fence_seq.ok_or_else(|| {
-                    ApplyProofError::Verification(
-                        "in-flight ready queue row requires claim_fence_seq".into(),
-                    )
-                })?;
-                let claim_fence_seq = parse_fence_seq(claim_fence_seq)?;
-                let claim_lease_deadline = claim_lease_deadline.ok_or_else(|| {
-                    ApplyProofError::Verification(
-                        "in-flight ready queue row requires claim_lease_deadline".into(),
-                    )
-                })?;
-                let claim_lease_deadline = parse_lease_deadline(claim_lease_deadline)?;
-                ReadyQueueProofLifecycle::InFlight {
-                    claimed_by_session_token,
-                    claim_fence_seq,
-                    claim_lease_deadline,
-                }
-            }
-            ReadyQueueState::Applied => {
-                reject_active_ready_queue_claim(
-                    state,
-                    claimed_by_session_token.as_ref(),
-                    claim_lease_deadline,
-                )?;
-                ReadyQueueProofLifecycle::Applied {
-                    claim_fence_seq: parse_fence_seq(claim_fence_seq.ok_or_else(|| {
-                        ApplyProofError::Verification(
-                            "applied ready queue row requires claim_fence_seq".into(),
-                        )
-                    })?)?,
-                }
-            }
-            ReadyQueueState::Superseded => {
-                reject_active_ready_queue_claim(
-                    state,
-                    claimed_by_session_token.as_ref(),
-                    claim_lease_deadline,
-                )?;
-                ReadyQueueProofLifecycle::Superseded {
-                    last_claim_fence_seq: parse_optional_fence_seq(claim_fence_seq)?,
-                }
-            }
-            ReadyQueueState::Cancelled => {
-                reject_active_ready_queue_claim(
-                    state,
-                    claimed_by_session_token.as_ref(),
-                    claim_lease_deadline,
-                )?;
-                ReadyQueueProofLifecycle::Cancelled {
-                    last_claim_fence_seq: parse_optional_fence_seq(claim_fence_seq)?,
-                }
-            }
-        };
+        let lifecycle = ReadyQueueProofLifecycle::from_parts(state, claim_evidence)?;
         Ok(Self {
             queue_id,
             artifact_digest,
@@ -812,17 +770,139 @@ impl ReadyQueueRow {
     }
 }
 
-fn reject_active_ready_queue_claim(
-    state: ReadyQueueState,
-    claimed_by_session_token: Option<&String>,
-    claim_lease_deadline: Option<i64>,
-) -> Result<(), ApplyProofError> {
-    if claimed_by_session_token.is_some() || claim_lease_deadline.is_some() {
-        return Err(ApplyProofError::Verification(format!(
-            "{state} ready queue row must not carry active claim fields"
-        )));
+impl ReadyQueueProofLifecycle {
+    fn from_parts(
+        state: ReadyQueueState,
+        claim_evidence: ReadyQueueProofClaimEvidence,
+    ) -> Result<Self, ApplyProofError> {
+        match state {
+            ReadyQueueState::Queued => {
+                let ReadyQueueProofClaimEvidence::Absent {
+                    last_claim_fence_seq,
+                } = claim_evidence
+                else {
+                    return reject_ready_queue_claim_evidence(state);
+                };
+                Ok(Self::Queued {
+                    last_claim_fence_seq,
+                })
+            }
+            ReadyQueueState::InFlight => {
+                let ReadyQueueProofClaimEvidence::Active {
+                    claimed_by_session_token,
+                    claim_fence_seq,
+                    claim_lease_deadline,
+                } = claim_evidence
+                else {
+                    return Err(ApplyProofError::Verification(
+                        "in-flight ready queue row requires complete active claim evidence".into(),
+                    ));
+                };
+                Ok(Self::InFlight {
+                    claimed_by_session_token,
+                    claim_fence_seq,
+                    claim_lease_deadline,
+                })
+            }
+            ReadyQueueState::Applied => {
+                let ReadyQueueProofClaimEvidence::Applied { claim_fence_seq } = claim_evidence
+                else {
+                    return reject_ready_queue_claim_evidence(state);
+                };
+                Ok(Self::Applied { claim_fence_seq })
+            }
+            ReadyQueueState::Superseded => {
+                let ReadyQueueProofClaimEvidence::Absent {
+                    last_claim_fence_seq,
+                } = claim_evidence
+                else {
+                    return reject_ready_queue_claim_evidence(state);
+                };
+                Ok(Self::Superseded {
+                    last_claim_fence_seq,
+                })
+            }
+            ReadyQueueState::Cancelled => {
+                let ReadyQueueProofClaimEvidence::Absent {
+                    last_claim_fence_seq,
+                } = claim_evidence
+                else {
+                    return reject_ready_queue_claim_evidence(state);
+                };
+                Ok(Self::Cancelled {
+                    last_claim_fence_seq,
+                })
+            }
+        }
     }
-    Ok(())
+}
+
+impl ReadyQueueProofClaimEvidence {
+    fn from_raw_for_state(
+        state: ReadyQueueState,
+        raw_claimed_by_session_token: Option<String>,
+        raw_claim_fence_seq: Option<i64>,
+        raw_claim_lease_deadline: Option<i64>,
+    ) -> Result<Self, ApplyProofError> {
+        match state {
+            ReadyQueueState::Queued | ReadyQueueState::Superseded | ReadyQueueState::Cancelled => {
+                if raw_claimed_by_session_token.is_some() || raw_claim_lease_deadline.is_some() {
+                    Ok(Self::Forbidden)
+                } else {
+                    Ok(Self::Absent {
+                        last_claim_fence_seq: parse_optional_fence_seq(raw_claim_fence_seq)?,
+                    })
+                }
+            }
+            ReadyQueueState::InFlight => {
+                let claimed_by_session_token = raw_claimed_by_session_token
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        ApplyProofError::Verification(
+                            "in-flight ready queue row requires claimed_by_session_token".into(),
+                        )
+                    })?;
+                let claimed_by_session_token =
+                    parse_proof_field(claimed_by_session_token, "claimed_by_session_token")?;
+                let claim_fence_seq = raw_claim_fence_seq.ok_or_else(|| {
+                    ApplyProofError::Verification(
+                        "in-flight ready queue row requires claim_fence_seq".into(),
+                    )
+                })?;
+                let claim_fence_seq = parse_fence_seq(claim_fence_seq)?;
+                let claim_lease_deadline = raw_claim_lease_deadline.ok_or_else(|| {
+                    ApplyProofError::Verification(
+                        "in-flight ready queue row requires claim_lease_deadline".into(),
+                    )
+                })?;
+                let claim_lease_deadline = parse_lease_deadline(claim_lease_deadline)?;
+                Ok(Self::Active {
+                    claimed_by_session_token,
+                    claim_fence_seq,
+                    claim_lease_deadline,
+                })
+            }
+            ReadyQueueState::Applied => {
+                if raw_claimed_by_session_token.is_some() || raw_claim_lease_deadline.is_some() {
+                    return Ok(Self::Forbidden);
+                }
+                let claim_fence_seq = raw_claim_fence_seq.ok_or_else(|| {
+                    ApplyProofError::Verification(
+                        "applied ready queue row requires claim_fence_seq".into(),
+                    )
+                })?;
+                Ok(Self::Applied {
+                    claim_fence_seq: parse_fence_seq(claim_fence_seq)?,
+                })
+            }
+        }
+    }
+}
+
+fn reject_ready_queue_claim_evidence<T>(state: ReadyQueueState) -> Result<T, ApplyProofError> {
+    Err(ApplyProofError::Verification(format!(
+        "{state} ready queue row must not carry active claim fields"
+    )))
 }
 
 fn parse_optional_fence_seq(value: Option<i64>) -> Result<Option<FenceSeq>, ApplyProofError> {
@@ -850,16 +930,17 @@ impl Serialize for ReadyQueueRow {
     where
         S: serde::Serializer,
     {
-        let state = self.state().to_string();
-        RawReadyQueueRow {
-            queue_id: self.queue_id.as_str(),
-            artifact_digest: self.artifact_digest.as_str(),
-            subtask_id: self.subtask_id.as_str(),
-            state: &state,
-            claimed_by_session_token: self.claimed_by_session_token(),
-            claim_fence_seq: self.claim_fence_seq(),
-        }
-        .serialize(serializer)
+        let state = self.state();
+        let claimed_by_session_token = self.claimed_by_session_token();
+        let claim_fence_seq = self.claim_fence_seq();
+        let mut row = serializer.serialize_struct("ReadyQueueRow", 6)?;
+        row.serialize_field("queue_id", self.queue_id.as_str())?;
+        row.serialize_field("artifact_digest", self.artifact_digest.as_str())?;
+        row.serialize_field("subtask_id", self.subtask_id.as_str())?;
+        row.serialize_field("state", &state)?;
+        row.serialize_field("claimed_by_session_token", &claimed_by_session_token)?;
+        row.serialize_field("claim_fence_seq", &claim_fence_seq)?;
+        row.end()
     }
 }
 
@@ -1227,10 +1308,9 @@ impl Serialize for ProofBlockerMessage {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct LandingAuthorization {
     schema_version: &'static str,
-    accepted: bool,
     queue_id: QueueId,
     artifact_digest: ArtifactDigest,
     review_id: ReviewId,
@@ -1242,6 +1322,32 @@ struct LandingAuthorization {
     seal_digest: ArtifactDigest,
     head_commit: String,
     target_ref: String,
+}
+
+impl Serialize for LandingAuthorization {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut record = serializer.serialize_struct("LandingAuthorization", 13)?;
+        record.serialize_field("schema_version", self.schema_version)?;
+        record.serialize_field("accepted", &true)?;
+        record.serialize_field("queue_id", &self.queue_id)?;
+        record.serialize_field("artifact_digest", &self.artifact_digest)?;
+        record.serialize_field("review_id", &self.review_id)?;
+        record.serialize_field("findings_digest", &self.findings_digest)?;
+        record.serialize_field("claim_fence_seq", &self.claim_fence_seq)?;
+        record.serialize_field("verifier", &self.verifier)?;
+        record.serialize_field("verdict_digest", &self.verdict_digest)?;
+        record.serialize_field(
+            "apply_verification_seal_digest",
+            &self.apply_verification_seal_digest,
+        )?;
+        record.serialize_field("seal_digest", &self.seal_digest)?;
+        record.serialize_field("head_commit", &self.head_commit)?;
+        record.serialize_field("target_ref", &self.target_ref)?;
+        record.end()
+    }
 }
 
 pub fn apply_proof_contract() -> Value {
@@ -1940,7 +2046,6 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             .unwrap_or_else(|| req.mainline_ref.clone());
         let auth = LandingAuthorization {
             schema_version: "codex_hook_landing_authorization.v1",
-            accepted: true,
             queue_id: queue_id.clone(),
             artifact_digest: artifact_digest.clone(),
             review_id: review_id.clone(),
@@ -2292,6 +2397,18 @@ where
         .map_err(|error| ApplyProofError::Verification(format!("invalid {field}: {error}")))
 }
 
+fn parse_review_state(raw_state: String) -> Result<ReviewState, ApplyProofError> {
+    ReviewState::from_str(&raw_state).map_err(|err| {
+        ApplyProofError::Verification(format!("invalid review state in proof row: {err}"))
+    })
+}
+
+fn parse_ready_queue_state(raw_state: String) -> Result<ReadyQueueState, ApplyProofError> {
+    ReadyQueueState::from_str(&raw_state).map_err(|error| {
+        ApplyProofError::Verification(format!("ready queue row has invalid state: {error}"))
+    })
+}
+
 fn parse_timestamp_ms(value: i64, field: &str) -> Result<TimestampMs, ApplyProofError> {
     TimestampMs::parse(value)
         .map_err(|error| ApplyProofError::Verification(format!("invalid {field}: {error}")))
@@ -2351,15 +2468,33 @@ fn load_review(conn: &Connection, review_id: &str) -> Result<ReviewRow, ApplyPro
         "SELECT review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id, verdict, findings_digest, state FROM reviews WHERE review_id = ?1",
         params![review_id],
         |row| {
+            let state = parse_review_state(row.get(7)?).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            let decision_evidence = ReviewProofDecisionEvidence::from_raw_for_state(
+                state,
+                row.get(5)?,
+                row.get(6)?,
+            )
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
             ReviewRow::from_db_parts(
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
+                state,
+                decision_evidence,
             )
             .map_err(|err| rusqlite::Error::FromSqlConversionFailure(
                 0,
@@ -2376,14 +2511,32 @@ fn load_queue(conn: &Connection, queue_id: &str) -> Result<ReadyQueueRow, ApplyP
         "SELECT queue_id, artifact_digest, subtask_id, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline FROM ready_queue WHERE queue_id = ?1",
         params![queue_id],
         |row| {
+            let state = parse_ready_queue_state(row.get(3)?).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+            let claim_evidence = ReadyQueueProofClaimEvidence::from_raw_for_state(
+                state,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            )
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
             ReadyQueueRow::from_db_parts(
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
+                state,
+                claim_evidence,
             )
             .map_err(|err| rusqlite::Error::FromSqlConversionFailure(
                 0,
@@ -2487,7 +2640,7 @@ fn load_session(conn: &Connection, token: &str) -> Result<SessionRow, ApplyProof
         "SELECT session_token, agent_principal_id, agent_instance_id, role, state FROM sessions WHERE session_token = ?1",
         params![token],
         |row| {
-            session_from_row_parts(
+            session_from_raw_row_parts(
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
@@ -2504,20 +2657,40 @@ fn load_session(conn: &Connection, token: &str) -> Result<SessionRow, ApplyProof
     .map_err(Into::into)
 }
 
-fn session_from_row_parts(
+fn session_from_raw_row_parts(
     session_token: String,
     agent_principal_id: String,
     agent_instance_id: String,
-    role: String,
-    state: String,
+    raw_role: String,
+    raw_state: String,
 ) -> Result<SessionRow, ApplyProofError> {
-    Ok(SessionRow {
-        session_token: parse_proof_field(session_token, "session_token")?,
-        agent_principal_id: parse_proof_field(agent_principal_id, "agent_principal_id")?,
-        agent_instance_id: parse_proof_field(agent_instance_id, "agent_instance_id")?,
-        role: parse_proof_enum(role, "role")?,
-        state: parse_proof_enum(state, "state")?,
-    })
+    let role = parse_proof_enum(raw_role, "role")?;
+    let state = parse_proof_enum(raw_state, "state")?;
+    SessionRow::from_db_parts(
+        session_token,
+        agent_principal_id,
+        agent_instance_id,
+        role,
+        state,
+    )
+}
+
+impl SessionRow {
+    fn from_db_parts(
+        session_token: String,
+        agent_principal_id: String,
+        agent_instance_id: String,
+        role: SessionRole,
+        state: SessionState,
+    ) -> Result<Self, ApplyProofError> {
+        Ok(SessionRow {
+            session_token: parse_proof_field(session_token, "session_token")?,
+            agent_principal_id: parse_proof_field(agent_principal_id, "agent_principal_id")?,
+            agent_instance_id: parse_proof_field(agent_instance_id, "agent_instance_id")?,
+            role,
+            state,
+        })
+    }
 }
 
 fn load_runtime_attestation(
@@ -3426,19 +3599,46 @@ mod tests {
     }
 
     fn review_row(
-        state: &str,
-        verdict: Option<String>,
-        findings_digest: Option<String>,
+        raw_state: &str,
+        raw_verdict: Option<String>,
+        raw_findings_digest: Option<String>,
     ) -> Result<ReviewRow, ApplyProofError> {
+        let state = parse_review_state(raw_state.to_owned())?;
+        let decision_evidence = ReviewProofDecisionEvidence::from_raw_for_state(
+            state,
+            raw_verdict,
+            raw_findings_digest,
+        )?;
         ReviewRow::from_db_parts(
             "review-1".into(),
             "subtask-1".into(),
             "blake3:artifact".into(),
             "reviewer-session-1".into(),
             "review-subtask-1".into(),
-            verdict,
-            findings_digest,
-            state.into(),
+            state,
+            decision_evidence,
+        )
+    }
+
+    fn ready_queue_row(
+        raw_state: &str,
+        raw_claimed_by_session_token: Option<String>,
+        raw_claim_fence_seq: Option<i64>,
+        raw_claim_lease_deadline: Option<i64>,
+    ) -> Result<ReadyQueueRow, ApplyProofError> {
+        let state = parse_ready_queue_state(raw_state.to_owned())?;
+        let claim_evidence = ReadyQueueProofClaimEvidence::from_raw_for_state(
+            state,
+            raw_claimed_by_session_token,
+            raw_claim_fence_seq,
+            raw_claim_lease_deadline,
+        )?;
+        ReadyQueueRow::from_db_parts(
+            "queue-1".into(),
+            "blake3:artifact".into(),
+            "subtask-1".into(),
+            state,
+            claim_evidence,
         )
     }
 
@@ -3845,16 +4045,8 @@ mod tests {
 
     #[test]
     fn ready_queue_proof_row_requires_fence_for_applied_state() {
-        let err = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "applied".into(),
-            None,
-            None,
-            None,
-        )
-        .expect_err("applied ready queue proof rows require a fence");
+        let err = ready_queue_row("applied", None, None, None)
+            .expect_err("applied ready queue proof rows require a fence");
 
         assert!(
             err.to_string()
@@ -3865,16 +4057,8 @@ mod tests {
 
     #[test]
     fn ready_queue_proof_row_rejects_active_claimant_for_applied_state() {
-        let err = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "applied".into(),
-            Some("session-1".into()),
-            Some(7),
-            None,
-        )
-        .expect_err("applied ready queue proof rows must not carry active claimants");
+        let err = ready_queue_row("applied", Some("session-1".into()), Some(7), None)
+            .expect_err("applied ready queue proof rows must not carry active claimants");
 
         assert!(
             err.to_string()
@@ -3885,16 +4069,8 @@ mod tests {
 
     #[test]
     fn ready_queue_proof_row_preserves_queued_rows_without_fabricated_fence() {
-        let row = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "queued".into(),
-            None,
-            None,
-            None,
-        )
-        .expect("queued queue rows remain observable proof blockers");
+        let row = ready_queue_row("queued", None, None, None)
+            .expect("queued queue rows remain observable proof blockers");
         let value = serde_json::to_value(&row).expect("ready queue row should serialize");
 
         assert_eq!(row.state(), ReadyQueueState::Queued);
@@ -3904,16 +4080,8 @@ mod tests {
 
     #[test]
     fn ready_queue_proof_row_requires_complete_active_claim_for_in_flight_state() {
-        let missing_lease = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "in_flight".into(),
-            Some("session-1".into()),
-            Some(7),
-            None,
-        )
-        .expect_err("in-flight proof rows require a lease deadline");
+        let missing_lease = ready_queue_row("in_flight", Some("session-1".into()), Some(7), None)
+            .expect_err("in-flight proof rows require a lease deadline");
 
         assert!(
             missing_lease
@@ -3922,16 +4090,8 @@ mod tests {
             "unexpected error: {missing_lease}"
         );
 
-        let row = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "in_flight".into(),
-            Some("session-1".into()),
-            Some(7),
-            Some(10_000),
-        )
-        .expect("complete in-flight queue row should be representable");
+        let row = ready_queue_row("in_flight", Some("session-1".into()), Some(7), Some(10_000))
+            .expect("complete in-flight queue row should be representable");
         let value = serde_json::to_value(&row).expect("ready queue row should serialize");
 
         assert_eq!(row.state(), ReadyQueueState::InFlight);
@@ -3944,16 +4104,9 @@ mod tests {
 
     #[test]
     fn ready_queue_proof_row_rejects_invalid_typed_claim_fields() {
-        let invalid_session = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "in_flight".into(),
-            Some("session 1".into()),
-            Some(7),
-            Some(10_000),
-        )
-        .expect_err("in-flight queue row should require typed session token");
+        let invalid_session =
+            ready_queue_row("in_flight", Some("session 1".into()), Some(7), Some(10_000))
+                .expect_err("in-flight queue row should require typed session token");
         assert!(
             invalid_session
                 .to_string()
@@ -3961,16 +4114,8 @@ mod tests {
             "unexpected error: {invalid_session}"
         );
 
-        let invalid_fence = ReadyQueueRow::from_db_parts(
-            "queue-1".into(),
-            "blake3:artifact".into(),
-            "subtask-1".into(),
-            "applied".into(),
-            None,
-            Some(0),
-            None,
-        )
-        .expect_err("applied queue row should require a valid fence sequence");
+        let invalid_fence = ready_queue_row("applied", None, Some(0), None)
+            .expect_err("applied queue row should require a valid fence sequence");
         assert!(
             invalid_fence
                 .to_string()
@@ -4025,16 +4170,8 @@ mod tests {
     #[test]
     fn ready_queue_proof_row_rejects_active_claim_fields_for_terminal_states() {
         for state in ["queued", "superseded", "cancelled"] {
-            let err = ReadyQueueRow::from_db_parts(
-                "queue-1".into(),
-                "blake3:artifact".into(),
-                "subtask-1".into(),
-                state.into(),
-                Some("session-1".into()),
-                Some(7),
-                Some(10_000),
-            )
-            .expect_err("non-in-flight proof rows must not carry active claim fields");
+            let err = ready_queue_row(state, Some("session-1".into()), Some(7), Some(10_000))
+                .expect_err("non-in-flight proof rows must not carry active claim fields");
 
             assert!(
                 err.to_string()
@@ -4177,7 +4314,7 @@ mod tests {
             "unexpected error: {invalid_started_at}"
         );
 
-        let invalid_role = session_from_row_parts(
+        let invalid_role = session_from_raw_row_parts(
             "session-1".into(),
             "agent-1".into(),
             "instance-1".into(),
@@ -4190,7 +4327,7 @@ mod tests {
             "unexpected error: {invalid_role}"
         );
 
-        let invalid_agent_instance = session_from_row_parts(
+        let invalid_agent_instance = session_from_raw_row_parts(
             "session-1".into(),
             "agent-1".into(),
             "instance 1".into(),

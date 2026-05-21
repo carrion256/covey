@@ -28,9 +28,15 @@ const REQUIRED_ISSUES_COLUMNS: &[&str] = &["id", "title", "status", "priority", 
 struct SourceIssue {
     id: String,
     title: String,
-    status: String,
+    status: SourceIssueStatus,
     priority: i64,
     issue_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceIssueStatus {
+    Open,
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,10 +351,13 @@ fn assess_source_issue(
         });
     }
 
-    if !issue.status.eq_ignore_ascii_case("open") {
-        return SourceIssueEligibility::Skip(ImportBdV1SkipReason::InvalidRow {
-            detail: format!("unsupported status {}", issue.status),
-        });
+    match &issue.status {
+        SourceIssueStatus::Open => {}
+        SourceIssueStatus::Unsupported(status) => {
+            return SourceIssueEligibility::Skip(ImportBdV1SkipReason::InvalidRow {
+                detail: format!("unsupported status {status}"),
+            });
+        }
     }
 
     if !is_importable_issue_type(&issue.issue_type) {
@@ -374,6 +383,16 @@ fn is_importable_issue_type(issue_type: &str) -> bool {
     issue_type.eq_ignore_ascii_case("task")
         || issue_type.eq_ignore_ascii_case("feature")
         || issue_type.eq_ignore_ascii_case("epic")
+}
+
+impl SourceIssueStatus {
+    fn parse(value: String) -> Self {
+        if value.eq_ignore_ascii_case("open") {
+            Self::Open
+        } else {
+            Self::Unsupported(value)
+        }
+    }
 }
 
 fn load_source_snapshot(path: &str) -> Result<SourceSnapshot> {
@@ -461,7 +480,7 @@ fn load_source_issues(source_conn: &Connection, path: &str) -> Result<Vec<Source
         Ok(SourceIssue {
             id: row.get(0)?,
             title: row.get(1)?,
-            status: row.get(2)?,
+            status: SourceIssueStatus::parse(row.get(2)?),
             priority: row.get(3)?,
             issue_type: row.get(4)?,
         })
@@ -584,8 +603,12 @@ fn resolve_import_bd_v1_destination<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_import_bd_v1_destination;
+    use super::{
+        SourceDependency, SourceIssue, SourceIssueEligibility, SourceIssueStatus, SourceLabel,
+        SourceSnapshot, assess_source_issue, parse_import_bd_v1_destination,
+    };
     use crate::error::CoveyError;
+    use crate::model::ImportBdV1SkipReason;
 
     #[test]
     fn import_destination_requires_exactly_one_selector() {
@@ -596,6 +619,28 @@ mod tests {
         assert!(matches!(
             parse_import_bd_v1_destination(None, None),
             Err(CoveyError::InvalidPath { path }) if path == "bd import destination selector"
+        ));
+    }
+
+    #[test]
+    fn source_issue_status_is_typed_for_import_eligibility() {
+        let source = SourceSnapshot {
+            issues: Vec::new(),
+            dependencies: Vec::<SourceDependency>::new(),
+            labels: Vec::<SourceLabel>::new(),
+        };
+        let issue = SourceIssue {
+            id: "BD-1".to_owned(),
+            title: "closed work".to_owned(),
+            status: SourceIssueStatus::parse("closed".to_owned()),
+            priority: 1,
+            issue_type: "task".to_owned(),
+        };
+
+        assert!(matches!(
+            assess_source_issue(&issue, &source),
+            SourceIssueEligibility::Skip(ImportBdV1SkipReason::InvalidRow { detail })
+                if detail == "unsupported status closed"
         ));
     }
 }

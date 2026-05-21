@@ -11,7 +11,7 @@ use strum::{Display, EnumString};
 
 use super::{
     CoveyTypeValidationError, IdempotencyKey, MetaTaskId, ObjectType, OpenSpecChangeId,
-    OpenSpecDigest, SessionToken, SourceIssueId, SubtaskId, TimestampMs,
+    OpenSpecDigest, PromptText, SessionToken, SourceIssueId, SubtaskId, SubtaskTitle, TimestampMs,
 };
 
 /// Request to import eligible bd issues from a beads database into Covey as work subtasks.
@@ -26,7 +26,7 @@ pub struct ImportBdV1Req {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImportBdV1Destination {
     ExistingMetaTask { meta_task_id: MetaTaskId },
-    NewMetaTask { prompt_text: String },
+    NewMetaTask { prompt_text: PromptText },
 }
 
 /// Filesystem path to a source beads database.
@@ -83,7 +83,8 @@ impl ImportBdV1Req {
             beads_db_path: BeadsDbPath::parse(beads_db_path.into())
                 .expect("import bd request beads_db_path must be valid"),
             destination: ImportBdV1Destination::NewMetaTask {
-                prompt_text: prompt_text.into(),
+                prompt_text: PromptText::parse(prompt_text.into())
+                    .expect("import bd request prompt_text must be valid"),
             },
             idempotency_key: IdempotencyKey::parse(idempotency_key.into())
                 .expect("import bd request idempotency_key must be valid"),
@@ -140,7 +141,9 @@ impl ImportBdV1Destination {
             (Some(meta_task_id), None) => Ok(Self::ExistingMetaTask {
                 meta_task_id: MetaTaskId::parse(meta_task_id)?,
             }),
-            (None, Some(prompt_text)) => Ok(Self::NewMetaTask { prompt_text }),
+            (None, Some(prompt_text)) => Ok(Self::NewMetaTask {
+                prompt_text: PromptText::parse(prompt_text)?,
+            }),
             _ => Err(CoveyTypeValidationError::new(
                 "bd_import_destination",
                 "requires exactly one destination selector",
@@ -158,7 +161,7 @@ impl ImportBdV1Destination {
     fn prompt_text(&self) -> Option<&str> {
         match self {
             Self::ExistingMetaTask { .. } => None,
-            Self::NewMetaTask { prompt_text } => Some(prompt_text),
+            Self::NewMetaTask { prompt_text } => Some(prompt_text.as_str()),
         }
     }
 }
@@ -1252,17 +1255,20 @@ pub struct ImportOpenSpecItemResult {
 enum ImportOpenSpecItemObject {
     MetaTask {
         object_id: MetaTaskId,
-        title: String,
+        title: PromptText,
     },
     Subtask {
         object_id: SubtaskId,
         openspec_task_id: OpenSpecTaskId,
-        title: String,
-        task_type: Option<String>,
+        title: SubtaskTitle,
+        task_type: Option<OpenSpecItemTaskType>,
         task_digest: OpenSpecDigest,
         source_path: OpenSpecPath,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenSpecItemTaskType(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawImportOpenSpecItemResult {
@@ -1291,7 +1297,7 @@ impl ImportOpenSpecItemResult {
             action,
             object: ImportOpenSpecItemObject::MetaTask {
                 object_id: MetaTaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
-                title: title.into(),
+                title: PromptText::parse(title.into()).map_err(|err| err.to_string())?,
             },
         })
     }
@@ -1312,8 +1318,8 @@ impl ImportOpenSpecItemResult {
             object: ImportOpenSpecItemObject::Subtask {
                 object_id: SubtaskId::parse(object_id.into()).map_err(|err| err.to_string())?,
                 openspec_task_id: OpenSpecTaskId::parse(openspec_task_id.into())?,
-                title: title.into(),
-                task_type,
+                title: SubtaskTitle::parse(title.into()).map_err(|err| err.to_string())?,
+                task_type: task_type.map(OpenSpecItemTaskType::parse).transpose()?,
                 task_digest: OpenSpecDigest::parse(task_digest.into())
                     .map_err(|err| err.to_string())?,
                 source_path: OpenSpecPath::parse(source_path.into())?,
@@ -1354,8 +1360,8 @@ impl ImportOpenSpecItemResult {
     #[must_use]
     pub fn title(&self) -> &str {
         match &self.object {
-            ImportOpenSpecItemObject::MetaTask { title, .. } => title,
-            ImportOpenSpecItemObject::Subtask { title, .. } => title,
+            ImportOpenSpecItemObject::MetaTask { title, .. } => title.as_str(),
+            ImportOpenSpecItemObject::Subtask { title, .. } => title.as_str(),
         }
     }
 
@@ -1364,7 +1370,9 @@ impl ImportOpenSpecItemResult {
     pub fn task_type(&self) -> Option<&str> {
         match &self.object {
             ImportOpenSpecItemObject::MetaTask { .. } => None,
-            ImportOpenSpecItemObject::Subtask { task_type, .. } => task_type.as_deref(),
+            ImportOpenSpecItemObject::Subtask { task_type, .. } => {
+                task_type.as_ref().map(OpenSpecItemTaskType::as_str)
+            }
         }
     }
 
@@ -1412,7 +1420,7 @@ impl ImportOpenSpecItemObject {
                     .ok_or_else(|| "metatask OpenSpec import items require title".to_owned())?;
                 Ok(Self::MetaTask {
                     object_id: MetaTaskId::parse(object_id).map_err(|err| err.to_string())?,
-                    title,
+                    title: PromptText::parse(title).map_err(|err| err.to_string())?,
                 })
             }
             ObjectType::Subtask => {
@@ -1430,8 +1438,8 @@ impl ImportOpenSpecItemObject {
                 Ok(Self::Subtask {
                     object_id: SubtaskId::parse(object_id).map_err(|err| err.to_string())?,
                     openspec_task_id: OpenSpecTaskId::parse(openspec_task_id)?,
-                    title,
-                    task_type,
+                    title: SubtaskTitle::parse(title).map_err(|err| err.to_string())?,
+                    task_type: task_type.map(OpenSpecItemTaskType::parse).transpose()?,
                     task_digest: OpenSpecDigest::parse(task_digest)
                         .map_err(|err| err.to_string())?,
                     source_path: OpenSpecPath::parse(source_path)?,
@@ -1465,6 +1473,27 @@ impl ImportOpenSpecItemObject {
     }
 }
 
+impl OpenSpecItemTaskType {
+    fn parse(value: String) -> Result<Self, String> {
+        if value.trim().is_empty() {
+            return Err("OpenSpec import item task_type must not be empty".to_owned());
+        }
+        if value.trim() != value {
+            return Err("OpenSpec import item task_type must be normalized".to_owned());
+        }
+        if value.chars().any(char::is_control) {
+            return Err(
+                "OpenSpec import item task_type must not contain control characters".to_owned(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Serialize for ImportOpenSpecItemResult {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1472,7 +1501,7 @@ impl Serialize for ImportOpenSpecItemResult {
     {
         let (openspec_task_id, title, task_type, task_digest, source_path) = match &self.object {
             ImportOpenSpecItemObject::MetaTask { title, .. } => {
-                (None, Some(title.clone()), None, None, None)
+                (None, Some(title.to_string()), None, None, None)
             }
             ImportOpenSpecItemObject::Subtask {
                 openspec_task_id,
@@ -1483,8 +1512,10 @@ impl Serialize for ImportOpenSpecItemResult {
                 ..
             } => (
                 Some(openspec_task_id.to_string()),
-                Some(title.clone()),
-                task_type.clone(),
+                Some(title.to_string()),
+                task_type
+                    .as_ref()
+                    .map(|task_type| task_type.as_str().to_owned()),
                 Some(task_digest.to_string()),
                 Some(source_path.to_string()),
             ),

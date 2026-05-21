@@ -33,9 +33,8 @@ pub struct Session {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionLifecycle {
-    Active {
-        active_subtask_id: Option<SubtaskId>,
-    },
+    ActiveIdle,
+    ActiveWithSubtask { active_subtask_id: SubtaskId },
     Stale,
     Exited,
 }
@@ -141,7 +140,10 @@ impl SessionLifecycle {
         active_subtask_id: Option<SubtaskId>,
     ) -> Result<Self, String> {
         match state {
-            SessionState::Active => Ok(Self::Active { active_subtask_id }),
+            SessionState::Active => Ok(match active_subtask_id {
+                Some(active_subtask_id) => Self::ActiveWithSubtask { active_subtask_id },
+                None => Self::ActiveIdle,
+            }),
             SessionState::Stale => {
                 if active_subtask_id.is_some() {
                     Err("stale session must not include active_subtask_id".to_owned())
@@ -161,7 +163,7 @@ impl SessionLifecycle {
 
     const fn state(&self) -> SessionState {
         match self {
-            Self::Active { .. } => SessionState::Active,
+            Self::ActiveIdle | Self::ActiveWithSubtask { .. } => SessionState::Active,
             Self::Stale => SessionState::Stale,
             Self::Exited => SessionState::Exited,
         }
@@ -169,7 +171,8 @@ impl SessionLifecycle {
 
     const fn active_subtask_id(&self) -> Option<&SubtaskId> {
         match self {
-            Self::Active { active_subtask_id } => active_subtask_id.as_ref(),
+            Self::ActiveIdle => None,
+            Self::ActiveWithSubtask { active_subtask_id } => Some(active_subtask_id),
             Self::Stale | Self::Exited => None,
         }
     }

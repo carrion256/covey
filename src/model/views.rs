@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroUsize};
 
 use derive_new::new;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError, ser::SerializeStruct,
+};
 use strum::Display;
 
 use super::{
@@ -281,8 +283,18 @@ impl SubtaskViewTimestamps {
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatus {
-    session: Session,
-    active_subtask: Option<SubtaskView>,
+    state: SessionStatusState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionStatusState {
+    WithoutActiveSubtask {
+        session: Session,
+    },
+    WithActiveSubtask {
+        session: Session,
+        active_subtask: SubtaskView,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,15 +304,39 @@ struct RawSessionStatus {
 }
 
 impl SessionStatus {
-    /// Builds a session status view whose optional active subtask matches the session lifecycle.
+    /// Builds a session status view for a session with no active subtask.
     ///
     /// # Errors
     ///
-    /// Returns an error when the active subtask view is missing, stale, or
-    /// attached to a session without an active subtask.
-    pub fn new(session: Session, active_subtask: Option<SubtaskView>) -> Result<Self, String> {
-        match (session.active_subtask_id(), active_subtask.as_ref()) {
-            (Some(expected), Some(subtask)) if &subtask.subtask_id == expected => {}
+    /// Returns an error when the session lifecycle carries an active subtask id.
+    pub fn without_active_subtask(session: Session) -> Result<Self, String> {
+        Self::from_parts(session, None)
+    }
+
+    /// Builds a session status view for a session with a matching active subtask.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the active subtask view is stale, or when the
+    /// session does not carry a matching active subtask id.
+    pub fn with_active_subtask(
+        session: Session,
+        active_subtask: SubtaskView,
+    ) -> Result<Self, String> {
+        Self::from_parts(session, Some(active_subtask))
+    }
+
+    pub(crate) fn from_parts(
+        session: Session,
+        active_subtask: Option<SubtaskView>,
+    ) -> Result<Self, String> {
+        let state = match (session.active_subtask_id(), active_subtask) {
+            (Some(expected), Some(active_subtask)) if &active_subtask.subtask_id == expected => {
+                SessionStatusState::WithActiveSubtask {
+                    session,
+                    active_subtask,
+                }
+            }
             (Some(_), Some(_)) => {
                 return Err("session status active_subtask must match session state".to_owned());
             }
@@ -310,24 +346,27 @@ impl SessionStatus {
             (None, Some(_)) => {
                 return Err("session status must not include active_subtask".to_owned());
             }
-            (None, None) => {}
-        }
-        Ok(Self {
-            session,
-            active_subtask,
-        })
+            (None, None) => SessionStatusState::WithoutActiveSubtask { session },
+        };
+        Ok(Self { state })
     }
 
     /// Returns the session row.
     #[must_use]
     pub const fn session(&self) -> &Session {
-        &self.session
+        match &self.state {
+            SessionStatusState::WithoutActiveSubtask { session }
+            | SessionStatusState::WithActiveSubtask { session, .. } => session,
+        }
     }
 
     /// Returns the active subtask view, when the session has one.
     #[must_use]
     pub const fn active_subtask(&self) -> Option<&SubtaskView> {
-        self.active_subtask.as_ref()
+        match &self.state {
+            SessionStatusState::WithoutActiveSubtask { .. } => None,
+            SessionStatusState::WithActiveSubtask { active_subtask, .. } => Some(active_subtask),
+        }
     }
 }
 
@@ -354,8 +393,8 @@ impl<'de> Deserialize<'de> for SessionStatus {
 impl From<&SessionStatus> for RawSessionStatus {
     fn from(status: &SessionStatus) -> Self {
         Self {
-            session: status.session.clone(),
-            active_subtask: status.active_subtask.clone(),
+            session: status.session().clone(),
+            active_subtask: status.active_subtask().cloned(),
         }
     }
 }
@@ -364,7 +403,7 @@ impl TryFrom<RawSessionStatus> for SessionStatus {
     type Error = String;
 
     fn try_from(raw: RawSessionStatus) -> Result<Self, Self::Error> {
-        Self::new(raw.session, raw.active_subtask)
+        Self::from_parts(raw.session, raw.active_subtask)
     }
 }
 
@@ -1057,7 +1096,7 @@ pub struct ReadyQueueMetrics {
 enum QueueMetricBucket {
     Empty,
     NonEmpty {
-        count: usize,
+        count: NonZeroUsize,
         oldest_age_ms: QueueMetricAgeMs,
     },
 }
@@ -1133,7 +1172,8 @@ impl QueueMetricBucket {
                 "empty {label} ready-queue metrics must not include oldest age"
             )),
             (count, Some(oldest_age_ms)) => Ok(Self::NonEmpty {
-                count,
+                count: NonZeroUsize::new(count)
+                    .expect("non-empty queue metric bucket count should be non-zero"),
                 oldest_age_ms: QueueMetricAgeMs::parse(label, oldest_age_ms)?,
             }),
             (_, None) => Err(format!(
@@ -1145,7 +1185,7 @@ impl QueueMetricBucket {
     const fn count(&self) -> usize {
         match self {
             Self::Empty => 0,
-            Self::NonEmpty { count, .. } => *count,
+            Self::NonEmpty { count, .. } => count.get(),
         }
     }
 
@@ -1219,20 +1259,6 @@ enum LandingAuthorizationState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LandingAuthorizationAccepted {
-    queue_id: QueueId,
-    artifact_digest: ArtifactDigest,
-    review_id: ReviewId,
-    findings_digest: FindingsDigest,
-    claim_fence_seq: FenceSeq,
-    verifier: VerifierId,
-    verdict_digest: ArtifactDigest,
-    seal_digest: ArtifactDigest,
-    recorded_by_session: SessionToken,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RawLandingAuthorizationStatus {
-    accepted: bool,
     queue_id: QueueId,
     artifact_digest: ArtifactDigest,
     review_id: ReviewId,
@@ -1345,7 +1371,19 @@ impl Serialize for LandingAuthorizationStatus {
     where
         S: Serializer,
     {
-        RawLandingAuthorizationStatus::from(self).serialize(serializer)
+        let accepted = self.accepted_fields();
+        let mut status = serializer.serialize_struct("LandingAuthorizationStatus", 10)?;
+        status.serialize_field("accepted", &true)?;
+        status.serialize_field("queue_id", &accepted.queue_id)?;
+        status.serialize_field("artifact_digest", &accepted.artifact_digest)?;
+        status.serialize_field("review_id", &accepted.review_id)?;
+        status.serialize_field("findings_digest", &accepted.findings_digest)?;
+        status.serialize_field("claim_fence_seq", &accepted.claim_fence_seq)?;
+        status.serialize_field("verifier", &accepted.verifier)?;
+        status.serialize_field("verdict_digest", &accepted.verdict_digest)?;
+        status.serialize_field("seal_digest", &accepted.seal_digest)?;
+        status.serialize_field("recorded_by_session", &accepted.recorded_by_session)?;
+        status.end()
     }
 }
 
@@ -1354,48 +1392,199 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
     where
         D: Deserializer<'de>,
     {
-        RawLandingAuthorizationStatus::deserialize(deserializer)?
-            .try_into()
-            .map_err(DeError::custom)
-    }
-}
-
-impl From<&LandingAuthorizationStatus> for RawLandingAuthorizationStatus {
-    fn from(status: &LandingAuthorizationStatus) -> Self {
-        let accepted = status.accepted_fields();
-        Self {
-            accepted: true,
-            queue_id: accepted.queue_id.clone(),
-            artifact_digest: accepted.artifact_digest.clone(),
-            review_id: accepted.review_id.clone(),
-            findings_digest: accepted.findings_digest.clone(),
-            claim_fence_seq: accepted.claim_fence_seq,
-            verifier: accepted.verifier.clone(),
-            verdict_digest: accepted.verdict_digest.clone(),
-            seal_digest: accepted.seal_digest.clone(),
-            recorded_by_session: accepted.recorded_by_session.clone(),
+        enum Field {
+            Accepted,
+            QueueId,
+            ArtifactDigest,
+            ReviewId,
+            FindingsDigest,
+            ClaimFenceSeq,
+            Verifier,
+            VerdictDigest,
+            SealDigest,
+            RecordedBySession,
         }
-    }
-}
 
-impl TryFrom<RawLandingAuthorizationStatus> for LandingAuthorizationStatus {
-    type Error = String;
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
 
-    fn try_from(raw: RawLandingAuthorizationStatus) -> Result<Self, Self::Error> {
-        if !raw.accepted {
-            return Err("landing authorization status is only emitted for accepted checks".into());
+                impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a landing authorization status field")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "accepted" => Ok(Field::Accepted),
+                            "queue_id" => Ok(Field::QueueId),
+                            "artifact_digest" => Ok(Field::ArtifactDigest),
+                            "review_id" => Ok(Field::ReviewId),
+                            "findings_digest" => Ok(Field::FindingsDigest),
+                            "claim_fence_seq" => Ok(Field::ClaimFenceSeq),
+                            "verifier" => Ok(Field::Verifier),
+                            "verdict_digest" => Ok(Field::VerdictDigest),
+                            "seal_digest" => Ok(Field::SealDigest),
+                            "recorded_by_session" => Ok(Field::RecordedBySession),
+                            _ => Err(serde::de::Error::unknown_field(
+                                value,
+                                LANDING_AUTHORIZATION_STATUS_FIELDS,
+                            )),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
         }
-        Ok(Self::accepted(
-            raw.queue_id,
-            raw.artifact_digest,
-            raw.review_id,
-            raw.findings_digest,
-            raw.claim_fence_seq,
-            raw.verifier,
-            raw.verdict_digest,
-            raw.seal_digest,
-            raw.recorded_by_session,
-        ))
+
+        struct StatusVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StatusVisitor {
+            type Value = LandingAuthorizationStatus;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an accepted landing authorization status")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut accepted: Option<bool> = None;
+                let mut queue_id: Option<QueueId> = None;
+                let mut artifact_digest: Option<ArtifactDigest> = None;
+                let mut review_id: Option<ReviewId> = None;
+                let mut findings_digest: Option<FindingsDigest> = None;
+                let mut claim_fence_seq: Option<FenceSeq> = None;
+                let mut verifier: Option<VerifierId> = None;
+                let mut verdict_digest: Option<ArtifactDigest> = None;
+                let mut seal_digest: Option<ArtifactDigest> = None;
+                let mut recorded_by_session: Option<SessionToken> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Accepted => {
+                            if accepted.is_some() {
+                                return Err(serde::de::Error::duplicate_field("accepted"));
+                            }
+                            accepted = Some(map.next_value()?);
+                        }
+                        Field::QueueId => {
+                            if queue_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field("queue_id"));
+                            }
+                            queue_id = Some(map.next_value()?);
+                        }
+                        Field::ArtifactDigest => {
+                            if artifact_digest.is_some() {
+                                return Err(serde::de::Error::duplicate_field("artifact_digest"));
+                            }
+                            artifact_digest = Some(map.next_value()?);
+                        }
+                        Field::ReviewId => {
+                            if review_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field("review_id"));
+                            }
+                            review_id = Some(map.next_value()?);
+                        }
+                        Field::FindingsDigest => {
+                            if findings_digest.is_some() {
+                                return Err(serde::de::Error::duplicate_field("findings_digest"));
+                            }
+                            findings_digest = Some(map.next_value()?);
+                        }
+                        Field::ClaimFenceSeq => {
+                            if claim_fence_seq.is_some() {
+                                return Err(serde::de::Error::duplicate_field("claim_fence_seq"));
+                            }
+                            claim_fence_seq = Some(map.next_value()?);
+                        }
+                        Field::Verifier => {
+                            if verifier.is_some() {
+                                return Err(serde::de::Error::duplicate_field("verifier"));
+                            }
+                            verifier = Some(map.next_value()?);
+                        }
+                        Field::VerdictDigest => {
+                            if verdict_digest.is_some() {
+                                return Err(serde::de::Error::duplicate_field("verdict_digest"));
+                            }
+                            verdict_digest = Some(map.next_value()?);
+                        }
+                        Field::SealDigest => {
+                            if seal_digest.is_some() {
+                                return Err(serde::de::Error::duplicate_field("seal_digest"));
+                            }
+                            seal_digest = Some(map.next_value()?);
+                        }
+                        Field::RecordedBySession => {
+                            if recorded_by_session.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "recorded_by_session",
+                                ));
+                            }
+                            recorded_by_session = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let accepted =
+                    accepted.ok_or_else(|| serde::de::Error::missing_field("accepted"))?;
+                if !accepted {
+                    return Err(serde::de::Error::custom(
+                        "landing authorization status is only emitted for accepted checks",
+                    ));
+                }
+
+                Ok(LandingAuthorizationStatus::accepted(
+                    queue_id.ok_or_else(|| serde::de::Error::missing_field("queue_id"))?,
+                    artifact_digest
+                        .ok_or_else(|| serde::de::Error::missing_field("artifact_digest"))?,
+                    review_id.ok_or_else(|| serde::de::Error::missing_field("review_id"))?,
+                    findings_digest
+                        .ok_or_else(|| serde::de::Error::missing_field("findings_digest"))?,
+                    claim_fence_seq
+                        .ok_or_else(|| serde::de::Error::missing_field("claim_fence_seq"))?,
+                    verifier.ok_or_else(|| serde::de::Error::missing_field("verifier"))?,
+                    verdict_digest
+                        .ok_or_else(|| serde::de::Error::missing_field("verdict_digest"))?,
+                    seal_digest.ok_or_else(|| serde::de::Error::missing_field("seal_digest"))?,
+                    recorded_by_session
+                        .ok_or_else(|| serde::de::Error::missing_field("recorded_by_session"))?,
+                ))
+            }
+        }
+
+        const LANDING_AUTHORIZATION_STATUS_FIELDS: &[&str] = &[
+            "accepted",
+            "queue_id",
+            "artifact_digest",
+            "review_id",
+            "findings_digest",
+            "claim_fence_seq",
+            "verifier",
+            "verdict_digest",
+            "seal_digest",
+            "recorded_by_session",
+        ];
+
+        deserializer.deserialize_struct(
+            "LandingAuthorizationStatus",
+            LANDING_AUTHORIZATION_STATUS_FIELDS,
+            StatusVisitor,
+        )
     }
 }
 
@@ -1542,17 +1731,6 @@ enum RepoopsAuthorityClaimLifecycle {
         active_ownership_token: SessionToken,
     },
     Open,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RawRepoopsAuthorityClaimFact {
-    claim_id: ClaimId,
-    status: RepoopsAuthorityClaimStatus,
-    owner: String,
-    scope_in: Vec<String>,
-    scope_out: Vec<String>,
-    has_required_contract_fields: bool,
-    active_ownership_token: Option<String>,
 }
 
 /// Claim lifecycle status exposed to mutAI repoops authority.
@@ -1719,16 +1897,18 @@ impl Serialize for RepoopsAuthorityClaimFact {
     where
         S: Serializer,
     {
-        RawRepoopsAuthorityClaimFact {
-            claim_id: self.claim_id.clone(),
-            status: self.status(),
-            owner: self.owner.to_string(),
-            scope_in: self.scope_in.iter().map(ToString::to_string).collect(),
-            scope_out: self.scope_out.iter().map(ToString::to_string).collect(),
-            has_required_contract_fields: self.has_required_contract_fields,
-            active_ownership_token: self.active_ownership_token().map(str::to_owned),
-        }
-        .serialize(serializer)
+        let mut claim = serializer.serialize_struct("RepoopsAuthorityClaimFact", 7)?;
+        claim.serialize_field("claim_id", &self.claim_id)?;
+        claim.serialize_field("status", &self.status())?;
+        claim.serialize_field("owner", self.owner())?;
+        claim.serialize_field("scope_in", &self.scope_in())?;
+        claim.serialize_field("scope_out", &self.scope_out())?;
+        claim.serialize_field(
+            "has_required_contract_fields",
+            &self.has_required_contract_fields,
+        )?;
+        claim.serialize_field("active_ownership_token", &self.active_ownership_token())?;
+        claim.end()
     }
 }
 
@@ -1737,19 +1917,174 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityClaimFact {
     where
         D: Deserializer<'de>,
     {
-        let raw = RawRepoopsAuthorityClaimFact::deserialize(deserializer)?;
-        let lifecycle =
-            RepoopsAuthorityClaimLifecycle::try_from_parts(raw.status, raw.active_ownership_token)
+        enum Field {
+            ClaimId,
+            Status,
+            Owner,
+            ScopeIn,
+            ScopeOut,
+            HasRequiredContractFields,
+            ActiveOwnershipToken,
+        }
+
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a repoops authority claim fact field")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "claim_id" => Ok(Field::ClaimId),
+                            "status" => Ok(Field::Status),
+                            "owner" => Ok(Field::Owner),
+                            "scope_in" => Ok(Field::ScopeIn),
+                            "scope_out" => Ok(Field::ScopeOut),
+                            "has_required_contract_fields" => Ok(Field::HasRequiredContractFields),
+                            "active_ownership_token" => Ok(Field::ActiveOwnershipToken),
+                            _ => Err(serde::de::Error::unknown_field(
+                                value,
+                                REPOOPS_AUTHORITY_CLAIM_FIELDS,
+                            )),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct ClaimFactVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ClaimFactVisitor {
+            type Value = RepoopsAuthorityClaimFact;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a repoops authority claim fact")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut claim_id: Option<ClaimId> = None;
+                let mut status: Option<RepoopsAuthorityClaimStatus> = None;
+                let mut owner: Option<String> = None;
+                let mut scope_in: Option<Vec<String>> = None;
+                let mut scope_out: Option<Vec<String>> = None;
+                let mut has_required_contract_fields: Option<bool> = None;
+                let mut active_ownership_token: Option<Option<String>> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::ClaimId => {
+                            if claim_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field("claim_id"));
+                            }
+                            claim_id = Some(map.next_value()?);
+                        }
+                        Field::Status => {
+                            if status.is_some() {
+                                return Err(serde::de::Error::duplicate_field("status"));
+                            }
+                            status = Some(map.next_value()?);
+                        }
+                        Field::Owner => {
+                            if owner.is_some() {
+                                return Err(serde::de::Error::duplicate_field("owner"));
+                            }
+                            owner = Some(map.next_value()?);
+                        }
+                        Field::ScopeIn => {
+                            if scope_in.is_some() {
+                                return Err(serde::de::Error::duplicate_field("scope_in"));
+                            }
+                            scope_in = Some(map.next_value()?);
+                        }
+                        Field::ScopeOut => {
+                            if scope_out.is_some() {
+                                return Err(serde::de::Error::duplicate_field("scope_out"));
+                            }
+                            scope_out = Some(map.next_value()?);
+                        }
+                        Field::HasRequiredContractFields => {
+                            if has_required_contract_fields.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "has_required_contract_fields",
+                                ));
+                            }
+                            has_required_contract_fields = Some(map.next_value()?);
+                        }
+                        Field::ActiveOwnershipToken => {
+                            if active_ownership_token.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "active_ownership_token",
+                                ));
+                            }
+                            active_ownership_token = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let claim_id =
+                    claim_id.ok_or_else(|| serde::de::Error::missing_field("claim_id"))?;
+                let status = status.ok_or_else(|| serde::de::Error::missing_field("status"))?;
+                let owner = owner.ok_or_else(|| serde::de::Error::missing_field("owner"))?;
+                let scope_in =
+                    scope_in.ok_or_else(|| serde::de::Error::missing_field("scope_in"))?;
+                let scope_out =
+                    scope_out.ok_or_else(|| serde::de::Error::missing_field("scope_out"))?;
+                let has_required_contract_fields =
+                    has_required_contract_fields.ok_or_else(|| {
+                        serde::de::Error::missing_field("has_required_contract_fields")
+                    })?;
+                let lifecycle = RepoopsAuthorityClaimLifecycle::try_from_parts(
+                    status,
+                    active_ownership_token.unwrap_or(None),
+                )
                 .map_err(serde::de::Error::custom)?;
-        Self::from_parts(
-            raw.claim_id,
-            raw.owner,
-            raw.scope_in,
-            raw.scope_out,
-            raw.has_required_contract_fields,
-            lifecycle,
+
+                RepoopsAuthorityClaimFact::from_parts(
+                    claim_id,
+                    owner,
+                    scope_in,
+                    scope_out,
+                    has_required_contract_fields,
+                    lifecycle,
+                )
+                .map_err(serde::de::Error::custom)
+            }
+        }
+
+        const REPOOPS_AUTHORITY_CLAIM_FIELDS: &[&str] = &[
+            "claim_id",
+            "status",
+            "owner",
+            "scope_in",
+            "scope_out",
+            "has_required_contract_fields",
+            "active_ownership_token",
+        ];
+
+        deserializer.deserialize_struct(
+            "RepoopsAuthorityClaimFact",
+            REPOOPS_AUTHORITY_CLAIM_FIELDS,
+            ClaimFactVisitor,
         )
-        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1845,6 +2180,9 @@ impl TryFrom<String> for RepoopsScopePattern {
         }
         if value.trim() != value {
             return Err("patterns must be normalized".to_owned());
+        }
+        if value.chars().any(char::is_control) {
+            return Err("patterns must not contain control characters".to_owned());
         }
         Ok(Self(value))
     }
@@ -2103,7 +2441,7 @@ impl RepoopsLockPath {
 
 impl RepoopsLockOwner {
     fn parse(owner: String) -> Result<Self, String> {
-        validate_repoops_project_path("repoops lock owner", &owner)?;
+        validate_repoops_token_ref("repoops lock owner", &owner)?;
         Ok(Self(owner))
     }
 
@@ -2307,6 +2645,30 @@ fn validate_repoops_project_path(label: &str, value: &str) -> Result<(), String>
     if value.trim() != value {
         return Err(format!("{label} must be normalized"));
     }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label} must not contain control characters"));
+    }
+    Ok(())
+}
+
+fn validate_repoops_token_ref(label: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if value.trim() != value {
+        return Err(format!("{label} must be normalized"));
+    }
+    if value.len() > 256 {
+        return Err(format!("{label} exceeds 256 bytes"));
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(format!(
+            "{label} must not contain whitespace or control characters"
+        ));
+    }
     Ok(())
 }
 
@@ -2315,7 +2677,10 @@ fn validate_repoops_repo_path_prefix(prefix: &str) -> Result<(), String> {
     if prefix.starts_with('/') || prefix.starts_with('\\') {
         return Err("git_context.repo_path_prefix must be repo-relative".to_owned());
     }
-    for part in prefix.replace('\\', "/").split('/') {
+    if prefix.contains('\\') {
+        return Err("git_context.repo_path_prefix must be normalized".to_owned());
+    }
+    for part in prefix.split('/') {
         if matches!(part, "" | "." | "..") {
             return Err("git_context.repo_path_prefix must be normalized".to_owned());
         }
@@ -2478,12 +2843,7 @@ impl RepoopsAuthoritySnapshotSchemaVersion {
 impl RepoopsAuthorityFactSource {
     fn parse(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
-        if value.trim().is_empty() {
-            return Err("repoops authority snapshot fact_sources must be non-empty".into());
-        }
-        if value.trim() != value {
-            return Err("repoops authority snapshot fact_sources must be normalized".into());
-        }
+        validate_repoops_token_ref("repoops authority snapshot fact_sources", &value)?;
         Ok(Self(value))
     }
 
@@ -2494,12 +2854,16 @@ impl RepoopsAuthorityFactSource {
 
 impl RepoopsAuthorityFactSources {
     fn parse(values: Vec<String>) -> Result<Self, String> {
-        Ok(Self(
-            values
-                .into_iter()
-                .map(RepoopsAuthorityFactSource::parse)
-                .collect::<Result<Vec<_>, _>>()?,
-        ))
+        let mut seen = HashSet::with_capacity(values.len());
+        let mut parsed = Vec::with_capacity(values.len());
+        for value in values {
+            let source = RepoopsAuthorityFactSource::parse(value)?;
+            if !seen.insert(source.as_str().to_owned()) {
+                return Err("repoops authority snapshot fact_sources must be unique".into());
+            }
+            parsed.push(source);
+        }
+        Ok(Self(parsed))
     }
 
     fn as_refs(&self) -> Vec<&str> {
@@ -2517,20 +2881,16 @@ impl RepoopsAuthorityFactSources {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RawRepoopsAuthoritySnapshot {
     schema_version: String,
     agent_id: String,
-    claim_id: Option<ClaimId>,
-    ownership_token: Option<String>,
-    override_token: Option<String>,
     policy: RepoopsAuthorityPolicyFact,
-    claim: Option<RepoopsAuthorityClaimFact>,
     scope: RepoopsAuthorityScopeFact,
     locks: Vec<RepoopsAuthorityLockFact>,
     git_context: Option<RepoopsAuthorityGitContextFact>,
-    constraint_reason: Option<String>,
     fact_sources: Vec<String>,
+    subject: RepoopsAuthoritySnapshotSubject,
 }
 
 impl RepoopsAuthoritySnapshotCommon {
@@ -2698,6 +3058,40 @@ impl RepoopsAuthoritySnapshot {
 }
 
 impl RepoopsAuthoritySnapshotSubject {
+    const fn claim_id(&self) -> Option<&ClaimId> {
+        match self {
+            Self::ClaimBound { claim_id, .. } => Some(claim_id),
+            Self::Constrained { .. } => None,
+        }
+    }
+
+    fn ownership_token(&self) -> Option<&str> {
+        match self {
+            Self::ClaimBound {
+                ownership_token, ..
+            } => Some(ownership_token.as_str()),
+            Self::Constrained { .. } => None,
+        }
+    }
+
+    const fn override_token(&self) -> Option<&str> {
+        None
+    }
+
+    const fn claim(&self) -> Option<&RepoopsAuthorityClaimFact> {
+        match self {
+            Self::ClaimBound { claim, .. } => Some(claim),
+            Self::Constrained { .. } => None,
+        }
+    }
+
+    fn constraint_reason(&self) -> Option<&str> {
+        match self {
+            Self::ClaimBound { .. } => None,
+            Self::Constrained { constraint_reason } => Some(constraint_reason.as_str()),
+        }
+    }
+
     fn try_from_parts(
         claim_id: Option<ClaimId>,
         ownership_token: Option<String>,
@@ -2732,6 +3126,245 @@ impl RepoopsAuthoritySnapshotSubject {
     }
 }
 
+impl Serialize for RawRepoopsAuthoritySnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut snapshot = serializer.serialize_struct("RepoopsAuthoritySnapshot", 12)?;
+        snapshot.serialize_field("schema_version", &self.schema_version)?;
+        snapshot.serialize_field("agent_id", &self.agent_id)?;
+        snapshot.serialize_field("claim_id", &self.subject.claim_id())?;
+        snapshot.serialize_field("ownership_token", &self.subject.ownership_token())?;
+        snapshot.serialize_field("override_token", &self.subject.override_token())?;
+        snapshot.serialize_field("policy", &self.policy)?;
+        snapshot.serialize_field("claim", &self.subject.claim())?;
+        snapshot.serialize_field("scope", &self.scope)?;
+        snapshot.serialize_field("locks", &self.locks)?;
+        snapshot.serialize_field("git_context", &self.git_context)?;
+        snapshot.serialize_field("constraint_reason", &self.subject.constraint_reason())?;
+        snapshot.serialize_field("fact_sources", &self.fact_sources)?;
+        snapshot.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RawRepoopsAuthoritySnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        enum Field {
+            SchemaVersion,
+            AgentId,
+            ClaimId,
+            OwnershipToken,
+            OverrideToken,
+            Policy,
+            Claim,
+            Scope,
+            Locks,
+            GitContext,
+            ConstraintReason,
+            FactSources,
+        }
+
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a repoops authority snapshot field")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "schema_version" => Ok(Field::SchemaVersion),
+                            "agent_id" => Ok(Field::AgentId),
+                            "claim_id" => Ok(Field::ClaimId),
+                            "ownership_token" => Ok(Field::OwnershipToken),
+                            "override_token" => Ok(Field::OverrideToken),
+                            "policy" => Ok(Field::Policy),
+                            "claim" => Ok(Field::Claim),
+                            "scope" => Ok(Field::Scope),
+                            "locks" => Ok(Field::Locks),
+                            "git_context" => Ok(Field::GitContext),
+                            "constraint_reason" => Ok(Field::ConstraintReason),
+                            "fact_sources" => Ok(Field::FactSources),
+                            _ => Err(serde::de::Error::unknown_field(
+                                value,
+                                REPOOPS_AUTHORITY_SNAPSHOT_FIELDS,
+                            )),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct SnapshotVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SnapshotVisitor {
+            type Value = RawRepoopsAuthoritySnapshot;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a repoops authority snapshot")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut schema_version: Option<String> = None;
+                let mut agent_id: Option<String> = None;
+                let mut claim_id: Option<Option<ClaimId>> = None;
+                let mut ownership_token: Option<Option<String>> = None;
+                let mut override_token: Option<Option<String>> = None;
+                let mut policy: Option<RepoopsAuthorityPolicyFact> = None;
+                let mut claim: Option<Option<RepoopsAuthorityClaimFact>> = None;
+                let mut scope: Option<RepoopsAuthorityScopeFact> = None;
+                let mut locks: Option<Vec<RepoopsAuthorityLockFact>> = None;
+                let mut git_context: Option<Option<RepoopsAuthorityGitContextFact>> = None;
+                let mut constraint_reason: Option<Option<String>> = None;
+                let mut fact_sources: Option<Vec<String>> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::SchemaVersion => {
+                            if schema_version.is_some() {
+                                return Err(serde::de::Error::duplicate_field("schema_version"));
+                            }
+                            schema_version = Some(map.next_value()?);
+                        }
+                        Field::AgentId => {
+                            if agent_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field("agent_id"));
+                            }
+                            agent_id = Some(map.next_value()?);
+                        }
+                        Field::ClaimId => {
+                            if claim_id.is_some() {
+                                return Err(serde::de::Error::duplicate_field("claim_id"));
+                            }
+                            claim_id = Some(map.next_value()?);
+                        }
+                        Field::OwnershipToken => {
+                            if ownership_token.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ownership_token"));
+                            }
+                            ownership_token = Some(map.next_value()?);
+                        }
+                        Field::OverrideToken => {
+                            if override_token.is_some() {
+                                return Err(serde::de::Error::duplicate_field("override_token"));
+                            }
+                            override_token = Some(map.next_value()?);
+                        }
+                        Field::Policy => {
+                            if policy.is_some() {
+                                return Err(serde::de::Error::duplicate_field("policy"));
+                            }
+                            policy = Some(map.next_value()?);
+                        }
+                        Field::Claim => {
+                            if claim.is_some() {
+                                return Err(serde::de::Error::duplicate_field("claim"));
+                            }
+                            claim = Some(map.next_value()?);
+                        }
+                        Field::Scope => {
+                            if scope.is_some() {
+                                return Err(serde::de::Error::duplicate_field("scope"));
+                            }
+                            scope = Some(map.next_value()?);
+                        }
+                        Field::Locks => {
+                            if locks.is_some() {
+                                return Err(serde::de::Error::duplicate_field("locks"));
+                            }
+                            locks = Some(map.next_value()?);
+                        }
+                        Field::GitContext => {
+                            if git_context.is_some() {
+                                return Err(serde::de::Error::duplicate_field("git_context"));
+                            }
+                            git_context = Some(map.next_value()?);
+                        }
+                        Field::ConstraintReason => {
+                            if constraint_reason.is_some() {
+                                return Err(serde::de::Error::duplicate_field("constraint_reason"));
+                            }
+                            constraint_reason = Some(map.next_value()?);
+                        }
+                        Field::FactSources => {
+                            if fact_sources.is_some() {
+                                return Err(serde::de::Error::duplicate_field("fact_sources"));
+                            }
+                            fact_sources = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let subject = RepoopsAuthoritySnapshotSubject::try_from_parts(
+                    claim_id.unwrap_or(None),
+                    ownership_token.unwrap_or(None),
+                    override_token.unwrap_or(None),
+                    claim.unwrap_or(None),
+                    constraint_reason.unwrap_or(None),
+                )
+                .map_err(serde::de::Error::custom)?;
+
+                Ok(RawRepoopsAuthoritySnapshot {
+                    schema_version: schema_version
+                        .ok_or_else(|| serde::de::Error::missing_field("schema_version"))?,
+                    agent_id: agent_id
+                        .ok_or_else(|| serde::de::Error::missing_field("agent_id"))?,
+                    policy: policy.ok_or_else(|| serde::de::Error::missing_field("policy"))?,
+                    scope: scope.ok_or_else(|| serde::de::Error::missing_field("scope"))?,
+                    locks: locks.ok_or_else(|| serde::de::Error::missing_field("locks"))?,
+                    git_context: git_context.unwrap_or(None),
+                    fact_sources: fact_sources
+                        .ok_or_else(|| serde::de::Error::missing_field("fact_sources"))?,
+                    subject,
+                })
+            }
+        }
+
+        const REPOOPS_AUTHORITY_SNAPSHOT_FIELDS: &[&str] = &[
+            "schema_version",
+            "agent_id",
+            "claim_id",
+            "ownership_token",
+            "override_token",
+            "policy",
+            "claim",
+            "scope",
+            "locks",
+            "git_context",
+            "constraint_reason",
+            "fact_sources",
+        ];
+
+        deserializer.deserialize_struct(
+            "RepoopsAuthoritySnapshot",
+            REPOOPS_AUTHORITY_SNAPSHOT_FIELDS,
+            SnapshotVisitor,
+        )
+    }
+}
+
 impl Serialize for RepoopsAuthoritySnapshot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -2740,16 +3373,12 @@ impl Serialize for RepoopsAuthoritySnapshot {
         RawRepoopsAuthoritySnapshot {
             schema_version: self.schema_version().to_owned(),
             agent_id: self.agent_id().to_owned(),
-            claim_id: self.claim_id().cloned(),
-            ownership_token: self.ownership_token().map(str::to_owned),
-            override_token: self.override_token().map(str::to_owned),
             policy: self.policy().clone(),
-            claim: self.claim().cloned(),
             scope: self.scope().clone(),
             locks: self.locks.clone(),
             git_context: self.git_context().cloned(),
-            constraint_reason: self.constraint_reason().map(str::to_owned),
             fact_sources: self.fact_sources.as_strings(),
+            subject: self.subject.clone(),
         }
         .serialize(serializer)
     }
@@ -2771,14 +3400,7 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshot {
             raw.fact_sources,
         )
         .map_err(serde::de::Error::custom)?;
-        let subject = RepoopsAuthoritySnapshotSubject::try_from_parts(
-            raw.claim_id,
-            raw.ownership_token,
-            raw.override_token,
-            raw.claim,
-            raw.constraint_reason,
-        )
-        .map_err(serde::de::Error::custom)?;
+        let subject = raw.subject;
         validate_repoops_authority_locks(
             common.agent_id.as_str(),
             subject.claim_owner_ref(),

@@ -3,6 +3,8 @@
 //! These structs preserve JSON-compatible wire shapes while parsing fields with
 //! domain invariants into validated newtypes at the API boundary.
 
+use std::collections::HashSet;
+
 use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -1420,12 +1422,23 @@ impl<'de> Deserialize<'de> for OverlapQueryReq {
 }
 
 /// Query for the Covey lifecycle facts needed by mutAI repoops preflight.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoopsAuthoritySnapshotReq {
     pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub paths: Vec<RepoopsPath>,
+    paths: NonEmptyRepoopsPaths,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NonEmptyRepoopsPaths(Vec<RepoopsPath>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawRepoopsAuthoritySnapshotReq {
+    session_token: String,
+    claim_id: String,
+    fence_seq: i64,
+    paths: Vec<String>,
 }
 
 impl RepoopsAuthoritySnapshotReq {
@@ -1434,7 +1447,9 @@ impl RepoopsAuthoritySnapshotReq {
     /// # Errors
     ///
     /// Returns an error when the session token, claim id, or fence sequence is
-    /// invalid, or when any path is empty or traverses outside the repository.
+    /// invalid, when no path is supplied, when a path is duplicated after
+    /// normalization, or when any path is empty or traverses outside the
+    /// repository.
     pub fn try_from_raw_parts(
         session_token: impl Into<String>,
         claim_id: impl Into<String>,
@@ -1445,11 +1460,83 @@ impl RepoopsAuthoritySnapshotReq {
             session_token: SessionToken::parse(session_token.into())?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
-            paths: paths
-                .into_iter()
-                .map(RepoopsPath::parse)
-                .collect::<Result<Vec<_>, _>>()?,
+            paths: NonEmptyRepoopsPaths::try_from_raw(paths)?,
         })
+    }
+
+    /// Returns the non-empty, normalized mutation paths for the snapshot request.
+    #[must_use]
+    pub fn paths(&self) -> &[RepoopsPath] {
+        self.paths.as_slice()
+    }
+}
+
+impl NonEmptyRepoopsPaths {
+    fn try_from_raw(paths: Vec<String>) -> Result<Self, CoveyTypeValidationError> {
+        if paths.is_empty() {
+            return Err(CoveyTypeValidationError::new(
+                "paths",
+                "must include at least one path",
+            ));
+        }
+        let paths = paths
+            .into_iter()
+            .map(RepoopsPath::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::try_from_paths(paths)
+    }
+
+    fn try_from_paths(paths: Vec<RepoopsPath>) -> Result<Self, CoveyTypeValidationError> {
+        if paths.is_empty() {
+            return Err(CoveyTypeValidationError::new(
+                "paths",
+                "must include at least one path",
+            ));
+        }
+        let mut seen = HashSet::with_capacity(paths.len());
+        for path in &paths {
+            if !seen.insert(path.as_str().to_owned()) {
+                return Err(CoveyTypeValidationError::new(
+                    "paths",
+                    "must not contain duplicate paths",
+                ));
+            }
+        }
+        Ok(Self(paths))
+    }
+
+    fn as_slice(&self) -> &[RepoopsPath] {
+        &self.0
+    }
+
+    fn as_strings(&self) -> Vec<String> {
+        self.0.iter().map(ToString::to_string).collect()
+    }
+}
+
+impl Serialize for RepoopsAuthoritySnapshotReq {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawRepoopsAuthoritySnapshotReq {
+            session_token: self.session_token.to_string(),
+            claim_id: self.claim_id.to_string(),
+            fence_seq: self.fence_seq.get(),
+            paths: self.paths.as_strings(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshotReq {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawRepoopsAuthoritySnapshotReq::deserialize(deserializer)?;
+        Self::try_from_raw_parts(raw.session_token, raw.claim_id, raw.fence_seq, raw.paths)
+            .map_err(serde::de::Error::custom)
     }
 }
 

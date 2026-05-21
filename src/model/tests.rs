@@ -12,15 +12,16 @@ use super::{
     OverlapQueryReq, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem,
     ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
     RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthoritySnapshotReq,
-    RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
-    ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
-    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
-    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
-    StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
-    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
-    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq,
-    WorkSubtask, bd_import_v1_subtask_id, make_id, parse_generated_members,
+    RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
+    RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, RequestReservationReq,
+    RequestReviewReq, Reservation, ReservationId, ReservationOverlapConflictPayload,
+    ReservationScope, ReservationState, ResolveConflictReq, Review, ReviewSubtask, ReviewTarget,
+    ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole, SessionState, SessionStatus,
+    SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq, StuckSubtask,
+    SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority,
+    SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
+    TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id,
+    make_id, parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
@@ -2205,8 +2206,8 @@ fn repoops_authority_snapshot_request_rejects_invalid_typed_fields() {
         vec!["./src/lib.rs".to_owned(), "docs\\guide.md".to_owned()],
     )
     .expect("valid repoops snapshot request");
-    assert_eq!(req.paths[0], "src/lib.rs");
-    assert_eq!(req.paths[1], "docs/guide.md");
+    assert_eq!(req.paths()[0], "src/lib.rs");
+    assert_eq!(req.paths()[1], "docs/guide.md");
     let value = serde_json::to_value(&req).expect("repoops snapshot request serializes");
     assert_eq!(value["paths"][0], "src/lib.rs");
     assert_eq!(value["paths"][1], "docs/guide.md");
@@ -2241,6 +2242,24 @@ fn repoops_authority_snapshot_request_rejects_invalid_typed_fields() {
     serde_json::from_value::<RepoopsAuthoritySnapshotReq>(invalid_fence)
         .expect_err("repoops snapshot request should reject invalid fence sequences");
 
+    let empty_paths = serde_json::json!({
+        "session_token": "session-1",
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "paths": []
+    });
+    serde_json::from_value::<RepoopsAuthoritySnapshotReq>(empty_paths)
+        .expect_err("repoops snapshot request should require at least one path");
+
+    let duplicate_paths = serde_json::json!({
+        "session_token": "session-1",
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "paths": ["./src/lib.rs", "src/lib.rs"]
+    });
+    serde_json::from_value::<RepoopsAuthoritySnapshotReq>(duplicate_paths)
+        .expect_err("repoops snapshot request should reject duplicate normalized paths");
+
     let invalid_empty_path = serde_json::json!({
         "session_token": "session-1",
         "claim_id": "claim-1",
@@ -2258,6 +2277,80 @@ fn repoops_authority_snapshot_request_rejects_invalid_typed_fields() {
     });
     serde_json::from_value::<RepoopsAuthoritySnapshotReq>(invalid_escape_path)
         .expect_err("repoops snapshot request should reject escaping paths");
+}
+
+#[test]
+fn repoops_authority_claim_fact_rejects_invalid_lifecycle_shapes() {
+    let claim = RepoopsAuthorityClaimFact::in_progress(
+        ClaimId::parse("claim-1").expect("valid claim id"),
+        "agent-1",
+        vec!["src/**".to_owned()],
+        Vec::new(),
+        true,
+        SessionToken::parse("session-1").expect("valid session token"),
+    )
+    .expect("valid in-progress repoops claim fact");
+    let value = serde_json::to_value(&claim).expect("repoops claim fact serializes");
+    assert_eq!(value["status"], "in_progress");
+    assert_eq!(value["active_ownership_token"], "session-1");
+    let decoded: RepoopsAuthorityClaimFact =
+        serde_json::from_value(value).expect("repoops claim fact deserializes");
+    assert_eq!(decoded.active_ownership_token(), Some("session-1"));
+
+    let missing_token = json!({
+        "claim_id": "claim-1",
+        "status": "in_progress",
+        "owner": "agent-1",
+        "scope_in": ["src/**"],
+        "scope_out": [],
+        "has_required_contract_fields": true,
+        "active_ownership_token": null
+    });
+    let missing_token_err = serde_json::from_value::<RepoopsAuthorityClaimFact>(missing_token)
+        .expect_err("in-progress repoops claim facts require active ownership token");
+    assert!(
+        missing_token_err
+            .to_string()
+            .contains("in-progress repoops claim facts require active_ownership_token"),
+        "unexpected error: {missing_token_err}"
+    );
+
+    let open_with_token = json!({
+        "claim_id": "claim-1",
+        "status": "open",
+        "owner": "agent-1",
+        "scope_in": ["src/**"],
+        "scope_out": [],
+        "has_required_contract_fields": true,
+        "active_ownership_token": "session-1"
+    });
+    let open_with_token_err = serde_json::from_value::<RepoopsAuthorityClaimFact>(open_with_token)
+        .expect_err("open repoops claim facts must not carry active ownership token");
+    assert!(
+        open_with_token_err
+            .to_string()
+            .contains("open repoops claim facts must not include active_ownership_token"),
+        "unexpected error: {open_with_token_err}"
+    );
+}
+
+#[test]
+fn repoops_authority_scope_facts_reject_invalid_patterns() {
+    let fact =
+        RepoopsAuthorityScopeFact::new(vec!["src/**".to_owned()], vec!["target/**".to_owned()])
+            .expect("valid repoops scope fact");
+    assert_eq!(fact.scope_in(), ["src/**"]);
+    assert_eq!(fact.scope_out(), ["target/**"]);
+
+    RepoopsAuthorityScopeFact::new(vec!["src/\n**".to_owned()], Vec::new())
+        .expect_err("repoops scope patterns should reject control characters");
+
+    let control_scope = json!({
+        "in": ["src/**"],
+        "out": ["target/\n**"]
+    });
+    serde_json::from_value::<RepoopsAuthorityScopeFact>(control_scope)
+        .expect_err("repoops scope serde should reject control characters");
 }
 
 #[test]
@@ -2296,6 +2389,24 @@ fn repoops_authority_lock_facts_reject_invalid_typed_fields() {
     serde_json::from_value::<RepoopsAuthorityLockFact>(absolute_path)
         .expect_err("repoops lock fact should reject absolute paths");
 
+    let control_path = json!({
+        "path": "src/foo\nbar.rs",
+        "owner": "session-1",
+        "claim_id": "claim-1",
+        "status": "owned"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(control_path)
+        .expect_err("repoops lock fact should reject control characters in paths");
+
+    let windows_separator_path = json!({
+        "path": "src\\lib.rs",
+        "owner": "session-1",
+        "claim_id": "claim-1",
+        "status": "owned"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(windows_separator_path)
+        .expect_err("repoops lock fact should reject unnormalized path separators");
+
     let padded_owner = json!({
         "path": "src/lib.rs",
         "owner": " session-1",
@@ -2304,6 +2415,24 @@ fn repoops_authority_lock_facts_reject_invalid_typed_fields() {
     });
     serde_json::from_value::<RepoopsAuthorityLockFact>(padded_owner)
         .expect_err("repoops lock fact should reject padded owners");
+
+    let internal_whitespace_owner = json!({
+        "path": "src/lib.rs",
+        "owner": "session 1",
+        "claim_id": "claim-1",
+        "status": "foreign_owner"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(internal_whitespace_owner)
+        .expect_err("repoops lock fact should reject whitespace inside owner refs");
+
+    let control_owner = json!({
+        "path": "src/lib.rs",
+        "owner": "session\n1",
+        "claim_id": "claim-1",
+        "status": "foreign_owner"
+    });
+    serde_json::from_value::<RepoopsAuthorityLockFact>(control_owner)
+        .expect_err("repoops lock fact should reject control characters in owner refs");
 }
 
 #[test]
@@ -2356,6 +2485,15 @@ fn repoops_authority_git_context_rejects_invalid_typed_fields() {
     serde_json::from_value::<RepoopsAuthorityGitContextFact>(padded_project_path)
         .expect_err("git context fact should reject padded project paths");
 
+    let control_project_path = json!({
+        "policy_project_path": "/data/projects/mutai\n",
+        "execution_project_path": "/data/projects/mutai-worktree",
+        "repo_path_prefix": null,
+        "ownership_token_required": true
+    });
+    serde_json::from_value::<RepoopsAuthorityGitContextFact>(control_project_path)
+        .expect_err("git context fact should reject control characters in project paths");
+
     let escaping_prefix = json!({
         "policy_project_path": "/data/projects/mutai",
         "execution_project_path": "/data/projects/mutai-worktree",
@@ -2364,6 +2502,24 @@ fn repoops_authority_git_context_rejects_invalid_typed_fields() {
     });
     serde_json::from_value::<RepoopsAuthorityGitContextFact>(escaping_prefix)
         .expect_err("git context fact should reject escaping prefixes");
+
+    let backslash_prefix = json!({
+        "policy_project_path": "/data/projects/mutai",
+        "execution_project_path": "/data/projects/mutai-worktree",
+        "repo_path_prefix": "authority\\src",
+        "ownership_token_required": true
+    });
+    serde_json::from_value::<RepoopsAuthorityGitContextFact>(backslash_prefix)
+        .expect_err("git context fact should reject unnormalized prefixes");
+
+    let control_prefix = json!({
+        "policy_project_path": "/data/projects/mutai",
+        "execution_project_path": "/data/projects/mutai-worktree",
+        "repo_path_prefix": "authority/src\n",
+        "ownership_token_required": true
+    });
+    serde_json::from_value::<RepoopsAuthorityGitContextFact>(control_prefix)
+        .expect_err("git context fact should reject control characters in prefixes");
 }
 
 #[test]
@@ -2943,6 +3099,16 @@ fn import_bd_v1_request_requires_exactly_one_destination_selector() {
     assert_eq!(created_json["meta_task_id"], serde_json::Value::Null);
     assert_eq!(created_json["prompt_text"], "new work");
 
+    let blank_prompt = json!({
+        "session_token": "session-1",
+        "beads_db_path": "beads.db",
+        "meta_task_id": null,
+        "prompt_text": " ",
+        "idempotency_key": "idem-blank-prompt"
+    });
+    serde_json::from_value::<ImportBdV1Req>(blank_prompt)
+        .expect_err("bd import request should reject blank new meta-task prompts");
+
     let both = json!({
         "session_token": "session-1",
         "beads_db_path": "beads.db",
@@ -3365,6 +3531,20 @@ fn ready_queue_metrics_reject_count_age_mismatches() {
     assert_eq!(metrics.oldest_queued_age_ms(), Some(12));
     assert_eq!(metrics.in_flight_count(), 0);
     assert_eq!(metrics.oldest_in_flight_age_ms(), None);
+
+    let active_metrics = ReadyQueueMetrics::new(1, 2, Some(12), Some(4))
+        .expect("coherent non-empty buckets should construct");
+    let active_metrics_json =
+        serde_json::to_value(&active_metrics).expect("metrics should serialize");
+    assert_eq!(
+        active_metrics_json,
+        serde_json::json!({
+            "queued_count": 1,
+            "in_flight_count": 2,
+            "oldest_queued_age_ms": 12,
+            "oldest_in_flight_age_ms": 4
+        })
+    );
 }
 
 #[test]
@@ -4739,6 +4919,36 @@ fn openspec_import_item_rejects_object_kind_mismatches() {
     ImportOpenSpecItemResult::subtask(
         "subtask-1",
         "1.1",
+        " Implement item",
+        Some("implementation".to_owned()),
+        "blake3:task",
+        "openspec/changes/change-1/tasks.md",
+        ImportOpenSpecAction::Created,
+    )
+    .expect_err("subtask constructor should reject padded titles");
+    ImportOpenSpecItemResult::subtask(
+        "subtask-1",
+        "1.1",
+        "Implement item",
+        Some(" implementation".to_owned()),
+        "blake3:task",
+        "openspec/changes/change-1/tasks.md",
+        ImportOpenSpecAction::Created,
+    )
+    .expect_err("subtask constructor should reject padded task types");
+    ImportOpenSpecItemResult::subtask(
+        "subtask-1",
+        "1.1",
+        "Implement item",
+        Some("implementation\nreview".to_owned()),
+        "blake3:task",
+        "openspec/changes/change-1/tasks.md",
+        ImportOpenSpecAction::Created,
+    )
+    .expect_err("subtask constructor should reject control characters in task types");
+    ImportOpenSpecItemResult::subtask(
+        "subtask-1",
+        "1.1",
         "Implement item",
         Some("implementation".to_owned()),
         "sha256:task",
@@ -4768,6 +4978,10 @@ fn openspec_import_item_rejects_object_kind_mismatches() {
     );
     ImportOpenSpecItemResult::meta_task("meta 1", "Change prompt", ImportOpenSpecAction::Created)
         .expect_err("metatask constructor should reject invalid Covey ids");
+
+    let blank_meta_title = r#"{"object_type":"meta_task","object_id":"meta-1","openspec_task_id":null,"title":" ","task_type":null,"task_digest":null,"source_path":null,"action":"created"}"#;
+    serde_json::from_str::<ImportOpenSpecItemResult>(blank_meta_title)
+        .expect_err("metatask import items should reject blank prompt titles");
 
     let metatask_with_task_fields = r#"{"object_type":"meta_task","object_id":"meta-1","openspec_task_id":"1.1","title":"Change prompt","task_type":null,"task_digest":null,"source_path":null,"action":"created"}"#;
     let meta_err = serde_json::from_str::<ImportOpenSpecItemResult>(metatask_with_task_fields)

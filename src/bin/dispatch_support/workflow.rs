@@ -213,12 +213,10 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
         ReviewCommand::Decide(args) => {
             let review_id = args.review_id.clone();
             let claim_id = args.claim_id.clone();
-            let verdict = args
-                .verdict
-                .to_possible_value()
-                .expect("label")
-                .get_name()
-                .to_owned();
+            let verdict = match args.verdict {
+                ReviewVerdictArg::Approve => ReviewDecisionAckVerdict::Approve,
+                ReviewVerdictArg::ChangesRequested => ReviewDecisionAckVerdict::ChangesRequested,
+            };
             let req = DecideReviewReq::try_from_raw_parts(
                 args.session_token,
                 args.review_id,

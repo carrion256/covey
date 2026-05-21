@@ -366,7 +366,14 @@ pub(crate) struct ReviewDecisionAck {
     pub(crate) review_id: String,
     pub(crate) claim_id: String,
     pub(crate) fence_seq: i64,
-    pub(crate) verdict: String,
+    pub(crate) verdict: ReviewDecisionAckVerdict,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReviewDecisionAckVerdict {
+    Approve,
+    ChangesRequested,
 }
 
 #[derive(Serialize)]

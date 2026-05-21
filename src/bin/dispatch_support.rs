@@ -22,13 +22,14 @@ use uuid::Uuid;
 use crate::{
     cli::{
         ArtifactCommand, ClaimCommand, Commands, ConflictCommand, EventsCommand, ImportCommand,
-        MaintCommand, MetaCommand, QueueCommand, ReservationCommand, ReviewCommand, SessionCommand,
-        SubtaskCommand,
+        MaintCommand, MetaCommand, QueueCommand, ReservationCommand, ReviewCommand,
+        ReviewVerdictArg, SessionCommand, SubtaskCommand,
     },
     render_support::{
         ArtifactPublishAck, ClaimFenceAck, ConflictResolutionAck, ImportBdV1Ack, ImportOpenSpecAck,
         MetaTaskAck, MetaTaskRef, QueueClaimAck, QueueOpAck, QueueRef, Rendered, ReservationAck,
-        ReservationRef, ReviewDecisionAck, ReviewRef, SessionTokenAck, SubtaskRef,
+        ReservationRef, ReviewDecisionAck, ReviewDecisionAckVerdict, ReviewRef, SessionTokenAck,
+        SubtaskRef,
     },
 };
 
