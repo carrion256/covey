@@ -680,6 +680,14 @@ mod tests {
             ensure_subtask_transition(
                 SubtaskKind::Work,
                 SubtaskState::ReviewPending,
+                SubtaskState::ChangesRequested,
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_subtask_transition(
+                SubtaskKind::Work,
+                SubtaskState::ReviewPending,
                 SubtaskState::Blocked,
             )
             .is_ok()
@@ -714,6 +722,12 @@ mod tests {
             SubtaskState::Claimed,
         )
         .expect_err("changes-requested artifacts require a new evidence item");
+        let blocked_retry_err = ensure_subtask_transition(
+            SubtaskKind::Work,
+            SubtaskState::Blocked,
+            SubtaskState::Claimed,
+        )
+        .expect_err("blocked artifacts require a new evidence item");
 
         assert_eq!(
             work_err,
@@ -735,6 +749,14 @@ mod tests {
             retry_err,
             CoveyError::IllegalTransition {
                 from: StateValue::Subtask(SubtaskState::ChangesRequested),
+                to: StateValue::Subtask(SubtaskState::Claimed),
+                object: ObjectType::Subtask,
+            }
+        );
+        assert_eq!(
+            blocked_retry_err,
+            CoveyError::IllegalTransition {
+                from: StateValue::Subtask(SubtaskState::Blocked),
                 to: StateValue::Subtask(SubtaskState::Claimed),
                 object: ObjectType::Subtask,
             }

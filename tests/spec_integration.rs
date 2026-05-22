@@ -2518,6 +2518,14 @@ fn claim_next_skips_changes_requested_work() {
     let rig = Rig::new();
     let covey = rig.covey();
     let subtask_id = seed_changes_requested_work_subtask(&rig);
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let followup_subtask_id: String = conn
+        .query_row(
+            "SELECT followup_subtask_id FROM review_followup_subtasks WHERE source_subtask_id = ?1",
+            params![subtask_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("follow-up subtask id");
     let worker = register(
         &covey,
         "worker-next-skips-changes-requested",
@@ -2537,8 +2545,12 @@ fn claim_next_skips_changes_requested_work() {
         )
         .expect("next claim result");
 
-    assert!(next.is_none());
-    assert_eq!(count_subtask_claim_events(&covey), before_events);
+    let claim = next.expect("follow-up work should be claimable");
+    assert_eq!(claim.subtask_id, followup_subtask_id);
+    assert_ne!(claim.subtask_id, subtask_id);
+    assert_eq!(count_subtask_claim_events(&covey), before_events + 1);
+    let followup_subtask =
+        covey::SubtaskId::parse(followup_subtask_id).expect("valid follow-up id");
     assert_eq!(
         covey
             .subtask_status(&subtask_id)
@@ -2553,7 +2565,7 @@ fn claim_next_skips_changes_requested_work() {
             .expect("worker status")
             .session()
             .active_subtask_id(),
-        None
+        Some(&followup_subtask)
     );
 }
 

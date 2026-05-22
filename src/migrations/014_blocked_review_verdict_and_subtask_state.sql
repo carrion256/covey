@@ -18,6 +18,7 @@ CREATE TABLE subtasks_new (
     CHECK (state IN ('available', 'blocked', 'claimed', 'in_progress', 'artifact_published',
                      'review_pending', 'changes_requested', 'approved', 'decided',
                      'ready_for_apply', 'applied', 'abandoned')),
+    CHECK (state NOT IN ('blocked', 'changes_requested') OR (kind = 'work' AND artifact_digest IS NOT NULL)),
     CHECK (
         (kind = 'review' AND review_target_subtask_id IS NOT NULL AND review_target_artifact_digest IS NOT NULL)
         OR

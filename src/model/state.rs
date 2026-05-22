@@ -155,6 +155,36 @@ pub enum ReviewVerdict {
     Blocked,
 }
 
+/// Failed review decisions that always require follow-up work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FailedReviewVerdict {
+    ChangesRequested,
+    Blocked,
+}
+
+impl TryFrom<ReviewVerdict> for FailedReviewVerdict {
+    type Error = ReviewVerdict;
+
+    fn try_from(value: ReviewVerdict) -> Result<Self, Self::Error> {
+        match value {
+            ReviewVerdict::Approve => Err(value),
+            ReviewVerdict::ChangesRequested => Ok(Self::ChangesRequested),
+            ReviewVerdict::Blocked => Ok(Self::Blocked),
+        }
+    }
+}
+
+impl From<FailedReviewVerdict> for ReviewVerdict {
+    fn from(value: FailedReviewVerdict) -> Self {
+        match value {
+            FailedReviewVerdict::ChangesRequested => Self::ChangesRequested,
+            FailedReviewVerdict::Blocked => Self::Blocked,
+        }
+    }
+}
+
 /// Review row lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
 #[serde(rename_all = "snake_case")]

@@ -134,12 +134,11 @@ impl From<CoveyError> for ReportableError {
             InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
             InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
             MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
-            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotActionable,
-            ReviewNotFound, RuntimeAttestationMissing, SeparationOfDutiesViolation,
-            SerializationError, SessionAlreadyActive, SessionAlreadyHasActiveSubtask,
-            SessionNotActive, SessionNotFound, StaleFenceToken, StaleReviewArtifact,
-            SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
-            WrongRole,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
+            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
+            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
+            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
+            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match error {
@@ -197,7 +196,6 @@ impl From<CoveyError> for ReportableError {
             | ClaimNotHeld { .. }
             | LeaseExpired { .. }
             | ReviewKindMismatch
-            | ReviewNotActionable { .. }
             | ReviewAlreadyOpen { .. }
             | StaleReviewArtifact { .. }
             | MetaTaskUnavailable { .. }
@@ -369,6 +367,7 @@ pub(crate) struct ReviewDecisionAck {
     pub(crate) claim_id: String,
     pub(crate) fence_seq: i64,
     pub(crate) verdict: ReviewDecisionAckVerdict,
+    pub(crate) followup_subtask_id: Option<String>,
 }
 
 #[derive(Serialize)]

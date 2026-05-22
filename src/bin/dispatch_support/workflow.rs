@@ -228,7 +228,7 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("decide-review")),
             )?;
-            store.decide_review(req)?;
+            let result = store.decide_review(req)?;
             Ok(Rendered::summary(
                 ReviewDecisionAck {
                     operation: "decide",
@@ -236,26 +236,9 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
                     claim_id,
                     fence_seq: args.fence_seq,
                     verdict,
+                    followup_subtask_id: result.followup_subtask_id().map(ToString::to_string),
                 },
                 format!("review decided {}", review_id),
-            ))
-        }
-        ReviewCommand::FollowUp(args) => {
-            let subtask_id =
-                store.create_review_follow_up(CreateReviewFollowUpReq::try_from_raw_parts(
-                    args.session_token,
-                    args.review_id,
-                    args.subtask_id,
-                    args.title,
-                    args.priority,
-                    args.idempotency_key
-                        .unwrap_or_else(|| new_idempotency_key("create-review-follow-up")),
-                )?)?;
-            Ok(Rendered::summary(
-                SubtaskRef {
-                    subtask_id: subtask_id.clone(),
-                },
-                format!("subtask {}", subtask_id),
             ))
         }
     }

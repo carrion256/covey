@@ -29,8 +29,6 @@ pub(crate) enum ArtifactCommand {
 pub(crate) enum ReviewCommand {
     Request(RequestReviewArgs),
     Decide(DecideReviewArgs),
-    #[command(name = "follow-up")]
-    FollowUp(CreateReviewFollowUpArgs),
 }
 #[derive(Args, Debug)]
 pub(crate) struct CreateSubtaskArgs {
@@ -206,21 +204,6 @@ pub(crate) struct DecideReviewArgs {
     pub(crate) idempotency_key: Option<String>,
 }
 
-#[derive(Args, Debug)]
-pub(crate) struct CreateReviewFollowUpArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
-    #[arg(long)]
-    pub(crate) review_id: String,
-    #[arg(long)]
-    pub(crate) title: String,
-    #[arg(long, default_value_t = 100)]
-    pub(crate) priority: i64,
-    #[arg(long)]
-    pub(crate) subtask_id: Option<String>,
-    #[arg(long)]
-    pub(crate) idempotency_key: Option<String>,
-}
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub(crate) enum SubtaskKindArg {

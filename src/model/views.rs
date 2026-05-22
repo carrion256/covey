@@ -7,10 +7,11 @@ use serde::{
 use strum::Display;
 
 use super::{
-    AgentPrincipalId, Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask,
-    MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget,
-    ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
-    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
+    AgentPrincipalId, Artifact, ArtifactDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq,
+    FindingsDigest, MetaTask, MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review,
+    ReviewId, ReviewTarget, ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind,
+    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs,
+    VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -258,12 +259,48 @@ fn invalid_subtask_view(reason: &str) -> rusqlite::Error {
 }
 
 /// Result returned after a review verdict is recorded.
-#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewDecisionResult {
-    pub review_id: ReviewId,
-    pub verdict: ReviewVerdict,
-    pub followup_subtask_id: Option<SubtaskId>,
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ReviewDecisionResult {
+    Approved {
+        review_id: ReviewId,
+    },
+    Failed {
+        review_id: ReviewId,
+        verdict: FailedReviewVerdict,
+        followup_subtask_id: SubtaskId,
+    },
+}
+
+impl ReviewDecisionResult {
+    #[must_use]
+    pub const fn review_id(&self) -> &ReviewId {
+        match self {
+            Self::Approved { review_id } | Self::Failed { review_id, .. } => review_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn verdict(&self) -> ReviewVerdict {
+        match self {
+            Self::Approved { .. } => ReviewVerdict::Approve,
+            Self::Failed { verdict, .. } => match verdict {
+                FailedReviewVerdict::ChangesRequested => ReviewVerdict::ChangesRequested,
+                FailedReviewVerdict::Blocked => ReviewVerdict::Blocked,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn followup_subtask_id(&self) -> Option<&SubtaskId> {
+        match self {
+            Self::Approved { .. } => None,
+            Self::Failed {
+                followup_subtask_id,
+                ..
+            } => Some(followup_subtask_id),
+        }
+    }
 }
 
 impl SubtaskViewTimestamps {

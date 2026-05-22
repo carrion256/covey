@@ -264,7 +264,7 @@ fn hash_request<T: Serialize>(request: &T) -> Result<String> {
 pub(crate) fn ordered_claim_candidates(
     tx: &Transaction<'_>,
     kind: SubtaskKind,
-    candidate_states: &[SubtaskState],
+    candidate_state: SubtaskState,
     meta_task_id: Option<&str>,
     now: i64,
 ) -> Result<Vec<String>> {
@@ -276,19 +276,19 @@ pub(crate) fn ordered_claim_candidates(
                 FROM subtasks s
                 JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
                 WHERE s.kind = ?1
-                  AND s.state IN (?2, ?3)
-                  AND m.state NOT IN (?4, ?5)
-                  AND (?7 IS NULL OR s.meta_task_id = ?7)
+                  AND s.state = ?2
+                  AND m.state NOT IN (?3, ?4)
+                  AND (?6 IS NULL OR s.meta_task_id = ?6)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM subtask_dependencies d
                       JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
                       WHERE d.subtask_id = s.subtask_id
-                        AND dep.state NOT IN (?8, ?9, ?10, ?11)
+                        AND dep.state NOT IN (?7, ?8, ?9, ?10)
                   )
                 ORDER BY
                     MAX(
-                        s.priority - MIN(MAX(?6 - s.created_at, 0) / 30000, s.priority),
+                        s.priority - MIN(MAX(?5 - s.created_at, 0) / 30000, s.priority),
                         0
                     ) ASC,
                     s.priority ASC,
@@ -298,8 +298,7 @@ pub(crate) fn ordered_claim_candidates(
             let rows = stmt.query_map(
                 params![
                     kind.to_string(),
-                    candidate_states[0].to_string(),
-                    candidate_states[1].to_string(),
+                    candidate_state.to_string(),
                     MetaTaskState::Completed.to_string(),
                     MetaTaskState::Cancelled.to_string(),
                     now,
@@ -329,7 +328,7 @@ pub(crate) fn ordered_claim_candidates(
             let rows = stmt.query_map(
                 params![
                     kind.to_string(),
-                    candidate_states[0].to_string(),
+                    candidate_state.to_string(),
                     MetaTaskState::Completed.to_string(),
                     MetaTaskState::Cancelled.to_string(),
                     meta_task_id

@@ -76,14 +76,9 @@ impl Covey {
                             active_subtask_id,
                         });
                     }
-                    let (kind, candidate_states) = match session.role {
-                        SessionRole::Executor => (
-                            SubtaskKind::Work,
-                            vec![SubtaskState::Available, SubtaskState::Available],
-                        ),
-                        SessionRole::Reviewer => {
-                            (SubtaskKind::Review, vec![SubtaskState::Available])
-                        }
+                    let (kind, candidate_state) = match session.role {
+                        SessionRole::Executor => (SubtaskKind::Work, SubtaskState::Available),
+                        SessionRole::Reviewer => (SubtaskKind::Review, SubtaskState::Available),
                         other => {
                             return Err(CoveyError::WrongRole {
                                 expected: vec![SessionRole::Executor, SessionRole::Reviewer],
@@ -95,7 +90,7 @@ impl Covey {
                     let candidates = ordered_claim_candidates(
                         tx,
                         kind,
-                        &candidate_states,
+                        candidate_state,
                         req.meta_task_id.as_deref(),
                         now,
                     )?;

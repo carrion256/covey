@@ -623,6 +623,29 @@ fn subtask_lifecycle_accepts_artifact_published_with_artifact() {
 }
 
 #[test]
+fn blocked_work_lifecycle_preserves_failed_artifact() {
+    let artifact_digest = ArtifactDigest::parse("blake3:blocked-artifact").expect("valid digest");
+    let row = work_subtask_row(SubtaskState::Blocked, None, Some(artifact_digest.clone()));
+
+    let domain = Subtask::try_from(row).expect("blocked work row with evidence must be valid");
+
+    assert_eq!(domain.lifecycle().state(), SubtaskState::Blocked);
+    assert_eq!(domain.lifecycle().artifact_digest(), Some(&artifact_digest));
+}
+
+#[test]
+fn blocked_work_lifecycle_requires_failed_artifact() {
+    let err = try_work_subtask_row(SubtaskState::Blocked, None, None)
+        .expect_err("blocked work without failed artifact evidence must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("blocked subtask is missing artifact digest"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn subtask_row_rejects_non_monotonic_timestamps() {
     let err = SubtaskRow::try_from_parts(
         SubtaskId::parse("subtask-1").expect("valid subtask id"),

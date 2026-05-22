@@ -1334,7 +1334,7 @@ pub struct ReviewTarget {
 pub enum SubtaskLifecycle {
     Available,
     Blocked {
-        artifact_digest: Option<ArtifactDigest>,
+        artifact_digest: ArtifactDigest,
     },
     Claimed {
         active_claim_id: ClaimId,
@@ -1393,7 +1393,12 @@ impl SubtaskLifecycle {
                         "blocked subtask cannot carry active claim state",
                     ));
                 }
-                Ok(Self::Blocked { artifact_digest })
+                Ok(Self::Blocked {
+                    artifact_digest: require_subtask_artifact(
+                        artifact_digest,
+                        "blocked subtask is missing artifact digest",
+                    )?,
+                })
             }
             SubtaskState::Claimed => {
                 let Some(active_claim_id) = active_claim_id else {
@@ -1560,13 +1565,11 @@ impl SubtaskLifecycle {
             | Self::Applied {
                 artifact_digest, ..
             } => Some(artifact_digest),
-            Self::Blocked { artifact_digest } | Self::Abandoned { artifact_digest } => {
-                artifact_digest.as_ref()
+            Self::Blocked { artifact_digest } => Some(artifact_digest),
+            Self::Abandoned { artifact_digest } => artifact_digest.as_ref(),
+            Self::Available | Self::Claimed { .. } | Self::InProgress { .. } | Self::Decided => {
+                None
             }
-            Self::Available
-            | Self::Claimed { .. }
-            | Self::InProgress { .. }
-            | Self::Decided => None,
         }
     }
 

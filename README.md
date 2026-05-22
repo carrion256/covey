@@ -75,11 +75,15 @@ These guarantees are enforced through database constraints plus transactional ch
 
 ## State Machines
 
-The important workflow is:
+The approval workflow is:
 
 `available -> claimed -> in_progress -> artifact_published -> review_pending -> approved -> ready_for_apply -> applied`
 
-Work can also cycle through `changes_requested` after review and return to `in_progress` with a new artifact. Terminal work states are `applied` and `abandoned`.
+Failed review verdicts move the reviewed work subtask to immutable evidence
+states: `changes_requested` or `blocked`. Covey creates a new `available` work
+subtask linked to the review findings for follow-up execution instead of
+reclaiming the failed subtask. Terminal work states are `applied` and
+`abandoned`.
 
 Claims are simpler:
 

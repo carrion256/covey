@@ -980,7 +980,7 @@ fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
             &review_fence,
         ],
     ));
-    success_data(&run_db(
+    let decision = success_data(&run_db(
         &db,
         &[
             "review",
@@ -999,13 +999,22 @@ fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
             "blake3:unblock-instructions",
         ],
     ));
+    let followup_id = decision["followup_subtask_id"]
+        .as_str()
+        .expect("blocked review returns follow-up subtask")
+        .to_owned();
+    assert_eq!(decision["review_id"], review_id);
+    assert_eq!(decision["verdict"], "blocked");
 
     let blocked_status = success_data(&run_db(
         &db,
         &["subtask", "status", "--subtask-id", "work_blocked"],
     ));
     assert_eq!(blocked_status["subtask"]["state"], "blocked");
-    assert_eq!(blocked_status["subtask"]["artifact_digest"], Value::Null);
+    assert_eq!(
+        blocked_status["subtask"]["artifact_digest"],
+        "blake3:blocking-artifact"
+    );
     assert_eq!(blocked_status["reviews"][0]["verdict"], "blocked");
     assert_eq!(
         blocked_status["reviews"][0]["findings_digest"],
@@ -1014,31 +1023,22 @@ fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
 
     let followup = success_data(&run_db(
         &db,
-        &[
-            "review",
-            "follow-up",
-            "--session-token",
-            &orch,
-            "--review-id",
-            &review_id,
-            "--title",
-            "apply reviewer unblock instructions",
-            "--priority",
-            "1",
-            "--subtask-id",
-            "work_followup_from_findings",
-        ],
+        &["subtask", "status", "--subtask-id", &followup_id],
     ));
-    assert_eq!(followup["subtask_id"], "work_followup_from_findings");
+    assert_eq!(followup["subtask"]["state"], "available");
+    assert_eq!(followup["subtask"]["artifact_digest"], Value::Null);
+    assert_eq!(followup["subtask"]["priority"], 1);
     let conn = Connection::open(&db).expect("open covey db");
-    let linked_findings: String = conn
+    let linked: (String, String, String) = conn
         .query_row(
-            "SELECT findings_digest FROM review_followup_subtasks WHERE review_id = ?1 AND followup_subtask_id = ?2",
-            params![review_id, "work_followup_from_findings"],
-            |row| row.get(0),
+            "SELECT source_subtask_id, source_artifact_digest, findings_digest FROM review_followup_subtasks WHERE review_id = ?1 AND followup_subtask_id = ?2",
+            params![review_id.as_str(), followup_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("review follow-up link");
-    assert_eq!(linked_findings, "blake3:unblock-instructions");
+    assert_eq!(linked.0, "work_blocked");
+    assert_eq!(linked.1, "blake3:blocking-artifact");
+    assert_eq!(linked.2, "blake3:unblock-instructions");
 
     let next_claim = success_data(&run_db(
         &db,
@@ -1051,7 +1051,7 @@ fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
             "30000",
         ],
     ));
-    assert_eq!(next_claim["subtask_id"], "work_followup_from_findings");
+    assert_eq!(next_claim["subtask_id"], followup_id);
 }
 
 #[test]
