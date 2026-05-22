@@ -403,7 +403,6 @@ pub(crate) fn ensure_subtask_transition(
         SubtaskKind::Work => matches!(
             (from, to),
             (SubtaskState::Available, SubtaskState::Claimed)
-                | (SubtaskState::ChangesRequested, SubtaskState::Claimed)
                 | (SubtaskState::Claimed, SubtaskState::InProgress)
                 | (SubtaskState::InProgress, SubtaskState::ArtifactPublished)
                 | (
@@ -413,6 +412,7 @@ pub(crate) fn ensure_subtask_transition(
                 | (SubtaskState::ReviewPending, SubtaskState::ArtifactPublished)
                 | (SubtaskState::ArtifactPublished, SubtaskState::ReviewPending)
                 | (SubtaskState::ReviewPending, SubtaskState::ChangesRequested)
+                | (SubtaskState::ReviewPending, SubtaskState::Blocked)
                 | (SubtaskState::ReviewPending, SubtaskState::Approved)
                 | (SubtaskState::Approved, SubtaskState::ReadyForApply)
                 | (SubtaskState::ReadyForApply, SubtaskState::Applied)
@@ -678,6 +678,14 @@ mod tests {
         );
         assert!(
             ensure_subtask_transition(
+                SubtaskKind::Work,
+                SubtaskState::ReviewPending,
+                SubtaskState::Blocked,
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_subtask_transition(
                 SubtaskKind::Review,
                 SubtaskState::InProgress,
                 SubtaskState::Decided,
@@ -700,6 +708,12 @@ mod tests {
             SubtaskState::InProgress,
         )
         .expect_err("review subtasks must be claimed before starting");
+        let retry_err = ensure_subtask_transition(
+            SubtaskKind::Work,
+            SubtaskState::ChangesRequested,
+            SubtaskState::Claimed,
+        )
+        .expect_err("changes-requested artifacts require a new evidence item");
 
         assert_eq!(
             work_err,
@@ -714,6 +728,14 @@ mod tests {
             CoveyError::IllegalTransition {
                 from: StateValue::Subtask(SubtaskState::Available),
                 to: StateValue::Subtask(SubtaskState::InProgress),
+                object: ObjectType::Subtask,
+            }
+        );
+        assert_eq!(
+            retry_err,
+            CoveyError::IllegalTransition {
+                from: StateValue::Subtask(SubtaskState::ChangesRequested),
+                to: StateValue::Subtask(SubtaskState::Claimed),
                 object: ObjectType::Subtask,
             }
         );

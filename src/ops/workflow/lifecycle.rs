@@ -79,7 +79,7 @@ impl Covey {
                     let (kind, candidate_states) = match session.role {
                         SessionRole::Executor => (
                             SubtaskKind::Work,
-                            vec![SubtaskState::Available, SubtaskState::ChangesRequested],
+                            vec![SubtaskState::Available, SubtaskState::Available],
                         ),
                         SessionRole::Reviewer => {
                             (SubtaskKind::Review, vec![SubtaskState::Available])

@@ -216,6 +216,7 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
             let verdict = match args.verdict {
                 ReviewVerdictArg::Approve => ReviewDecisionAckVerdict::Approve,
                 ReviewVerdictArg::ChangesRequested => ReviewDecisionAckVerdict::ChangesRequested,
+                ReviewVerdictArg::Blocked => ReviewDecisionAckVerdict::Blocked,
             };
             let req = DecideReviewReq::try_from_raw_parts(
                 args.session_token,
@@ -237,6 +238,24 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
                     verdict,
                 },
                 format!("review decided {}", review_id),
+            ))
+        }
+        ReviewCommand::FollowUp(args) => {
+            let subtask_id =
+                store.create_review_follow_up(CreateReviewFollowUpReq::try_from_raw_parts(
+                    args.session_token,
+                    args.review_id,
+                    args.subtask_id,
+                    args.title,
+                    args.priority,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("create-review-follow-up")),
+                )?)?;
+            Ok(Rendered::summary(
+                SubtaskRef {
+                    subtask_id: subtask_id.clone(),
+                },
+                format!("subtask {}", subtask_id),
             ))
         }
     }

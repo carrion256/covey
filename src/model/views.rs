@@ -8,9 +8,9 @@ use strum::Display;
 
 use super::{
     AgentPrincipalId, Artifact, ArtifactDigest, Claim, ClaimId, FenceSeq, FindingsDigest, MetaTask,
-    MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget, Session,
-    SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow,
-    SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
+    MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget,
+    ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
+    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -255,6 +255,15 @@ fn invalid_subtask_view(reason: &str) -> rusqlite::Error {
             reason.to_owned(),
         )),
     )
+}
+
+/// Result returned after a review verdict is recorded.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewDecisionResult {
+    pub review_id: ReviewId,
+    pub verdict: ReviewVerdict,
+    pub followup_subtask_id: Option<SubtaskId>,
 }
 
 impl SubtaskViewTimestamps {

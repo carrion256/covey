@@ -2008,7 +2008,7 @@ fn claim_subtask_claims_known_available_work_subtask() {
 }
 
 #[test]
-fn claim_subtask_claims_changes_requested_work_subtask() {
+fn claim_subtask_rejects_changes_requested_work_subtask() {
     let rig = Rig::new();
     let covey = rig.covey();
     let subtask_id = seed_changes_requested_work_subtask(&rig);
@@ -2020,8 +2020,8 @@ fn claim_subtask_claims_changes_requested_work_subtask() {
     );
     let before_events = count_subtask_claim_events(&covey);
 
-    let claim = covey
-        .claim_subtask(
+    assert!(matches!(
+        covey.claim_subtask(
             ClaimSubtaskReq::try_from_raw_parts(
                 worker.clone(),
                 covey::SubtaskId::parse(subtask_id.clone()).expect("valid subtask id"),
@@ -2029,27 +2029,20 @@ fn claim_subtask_claims_changes_requested_work_subtask() {
                 id_key("claim-subtask-changes-requested"),
             )
             .expect("valid claim-subtask request"),
-        )
-        .expect("claim changes requested subtask");
-
-    assert_eq!(claim.subtask_id, subtask_id);
-    assert_eq!(count_subtask_claim_events(&covey), before_events + 1);
-    assert_eq!(
-        covey
-            .subtask_status(&claim.subtask_id)
-            .expect("subtask status")
-            .subtask()
-            .state(),
-        SubtaskState::Claimed
-    );
+        ),
+        Err(CoveyError::IllegalTransition { from, to, object })
+            if from == SubtaskState::ChangesRequested.into()
+                && to == SubtaskState::Claimed.into()
+                && object == ObjectType::Subtask
+    ));
+    assert_eq!(count_subtask_claim_events(&covey), before_events);
     assert_eq!(
         covey
             .session_status(&worker)
             .expect("session status")
             .session()
-            .active_subtask_id()
-            .map(|subtask_id| subtask_id.as_str()),
-        Some(claim.subtask_id.as_str())
+            .active_subtask_id(),
+        None
     );
 }
 
@@ -2521,89 +2514,46 @@ fn claim_subtask_rejects_illegal_state_without_appending_event() {
 }
 
 #[test]
-fn claim_subtask_matches_claim_next_for_changes_requested_work() {
-    let targeted_rig = Rig::new();
-    let targeted_covey = targeted_rig.covey();
-    let targeted_subtask_id = seed_changes_requested_work_subtask(&targeted_rig);
-    let targeted_worker = register(
-        &targeted_covey,
-        "worker-targeted-equivalence",
-        "worker-targeted-equivalence",
+fn claim_next_skips_changes_requested_work() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let subtask_id = seed_changes_requested_work_subtask(&rig);
+    let worker = register(
+        &covey,
+        "worker-next-skips-changes-requested",
+        "worker-next-skips-changes-requested",
         SessionRole::Executor,
     );
-    let targeted_before_events = count_subtask_claim_events(&targeted_covey);
+    let before_events = count_subtask_claim_events(&covey);
 
-    let next_rig = Rig::new();
-    let next_covey = next_rig.covey();
-    let next_subtask_id = seed_changes_requested_work_subtask(&next_rig);
-    let next_worker = register(
-        &next_covey,
-        "worker-next-equivalence",
-        "worker-next-equivalence",
-        SessionRole::Executor,
-    );
-    let next_before_events = count_subtask_claim_events(&next_covey);
-
-    let targeted = targeted_covey
-        .claim_subtask(
-            ClaimSubtaskReq::try_from_raw_parts(
-                targeted_worker.clone(),
-                covey::SubtaskId::parse(targeted_subtask_id.clone()).expect("valid subtask id"),
-                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-                id_key("claim-subtask-equivalence"),
-            )
-            .expect("valid claim-subtask request"),
-        )
-        .expect("targeted changes requested claim");
-    let next = next_covey
+    let next = covey
         .claim_next_subtask(
             ClaimNextReq::try_from_raw_parts(
-                next_worker.clone(),
+                worker.clone(),
                 covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
-                id_key("claim-next-equivalence"),
+                id_key("claim-next-skips-changes-requested"),
             )
             .expect("valid claim-next request"),
         )
-        .expect("next claim result")
-        .expect("next claim payload");
+        .expect("next claim result");
 
-    assert_eq!(targeted.subtask_id, targeted_subtask_id);
-    assert_eq!(next.subtask_id, next_subtask_id);
-    assert_eq!(targeted.fence_seq, next.fence_seq);
-    assert_eq!(targeted.lease_deadline, next.lease_deadline);
+    assert!(next.is_none());
+    assert_eq!(count_subtask_claim_events(&covey), before_events);
     assert_eq!(
-        count_subtask_claim_events(&targeted_covey),
-        targeted_before_events + 1
-    );
-    assert_eq!(
-        count_subtask_claim_events(&next_covey),
-        next_before_events + 1
-    );
-    assert_eq!(
-        targeted_covey
-            .subtask_status(&targeted_subtask_id)
-            .expect("targeted status")
+        covey
+            .subtask_status(&subtask_id)
+            .expect("status")
             .subtask()
             .state(),
-        next_covey
-            .subtask_status(&next_subtask_id)
-            .expect("next status")
-            .subtask()
-            .state()
+        SubtaskState::ChangesRequested
     );
     assert_eq!(
-        targeted_covey
-            .session_status(&targeted_worker)
-            .expect("targeted worker status")
+        covey
+            .session_status(&worker)
+            .expect("worker status")
             .session()
-            .active_subtask_id()
-            .cloned(),
-        next_covey
-            .session_status(&next_worker)
-            .expect("next worker status")
-            .session()
-            .active_subtask_id()
-            .cloned()
+            .active_subtask_id(),
+        None
     );
 }
 

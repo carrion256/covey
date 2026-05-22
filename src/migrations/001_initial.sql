@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS subtasks (
     updated_at INTEGER NOT NULL,
     CHECK (kind IN ('work', 'review')),
     CHECK (priority BETWEEN 0 AND 1000),
-    CHECK (state IN ('available', 'claimed', 'in_progress', 'artifact_published',
+    CHECK (state IN ('available', 'blocked', 'claimed', 'in_progress', 'artifact_published',
                      'review_pending', 'changes_requested', 'approved', 'decided',
                      'ready_for_apply', 'applied', 'abandoned')),
     CHECK ((kind = 'review') = (review_target_subtask_id IS NOT NULL))
@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     CHECK (state IN ('requested', 'in_progress', 'decided', 'superseded')),
+    CHECK (verdict IS NULL OR verdict IN ('approve', 'changes_requested', 'blocked')),
     CHECK ((state = 'decided') = (verdict IS NOT NULL))
 );
 

@@ -1,6 +1,6 @@
 use crate::model::{
     ArtifactDigest, ClaimId, ClaimState, CoveyTypeValidationError, MetaTaskState, ObjectType,
-    QueueId, SessionRole, SessionState, SessionToken, StateValue, SubtaskId,
+    QueueId, ReviewVerdict, SessionRole, SessionState, SessionToken, StateValue, SubtaskId,
 };
 use thiserror::Error;
 
@@ -199,11 +199,12 @@ impl PartialEq for CoveyError {
             InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
             InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
             MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
-            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
-            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
-            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
-            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotActionable,
+            ReviewNotFound, RuntimeAttestationMissing, SeparationOfDutiesViolation,
+            SerializationError, SessionAlreadyActive, SessionAlreadyHasActiveSubtask,
+            SessionNotActive, SessionNotFound, StaleFenceToken, StaleReviewArtifact,
+            SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
+            WrongRole,
         };
 
         match (self, other) {
@@ -218,6 +219,16 @@ impl PartialEq for CoveyError {
             | (ConflictNotFound, ConflictNotFound)
             | (FenceTokenMismatch, FenceTokenMismatch)
             | (ReviewKindMismatch, ReviewKindMismatch) => true,
+            (
+                ReviewNotActionable {
+                    review_id: left_review_id,
+                    verdict: left_verdict,
+                },
+                ReviewNotActionable {
+                    review_id: right_review_id,
+                    verdict: right_verdict,
+                },
+            ) => left_review_id == right_review_id && left_verdict == right_verdict,
             (
                 IllegalTransition {
                     from: left_from,

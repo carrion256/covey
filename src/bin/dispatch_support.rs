@@ -10,12 +10,13 @@ mod workflow;
 use clap::ValueEnum;
 use covey::{
     AbandonSubtaskReq, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, Covey,
-    CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq,
-    ImportBdV1Req, ImportOpenSpecReq, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
-    PublishArtifactReq, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, SettlementTarget, StartSubtaskReq,
-    SubmitMetaTaskReq, SubtaskKind, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    CreateReviewFollowUpReq, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
+    ExitSessionReq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq, MarkAppliedReq,
+    MarkInFlightReq, OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
+    ResolveConflictReq, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind,
+    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use uuid::Uuid;
 

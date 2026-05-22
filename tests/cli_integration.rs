@@ -769,6 +769,292 @@ fn workflow_commands_emit_json() {
 }
 
 #[test]
+fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
+    let tmp = TempDir::new().expect("temp dir");
+    let db = tmp.path().join("covey.sqlite");
+    let orch = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "blocked-orch",
+            "--agent-instance-id",
+            "blocked-orch-1",
+            "--role",
+            "orchestrator",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("orch token")
+        .to_owned();
+    let exec = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "blocked-worker",
+            "--agent-instance-id",
+            "blocked-worker-1",
+            "--role",
+            "executor",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("exec token")
+        .to_owned();
+    let reviewer = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "blocked-reviewer",
+            "--agent-instance-id",
+            "blocked-reviewer-1",
+            "--role",
+            "reviewer",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("reviewer token")
+        .to_owned();
+    attest_session(&db, &exec, "blocked-worker");
+    attest_session(&db, &reviewer, "blocked-reviewer");
+
+    let meta_task_id = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "blocked review workflow",
+        ],
+    ))["meta_task_id"]
+        .as_str()
+        .expect("meta id")
+        .to_owned();
+
+    for (subtask_id, title, priority) in [
+        ("work_blocked", "first blocked artifact", "1"),
+        ("work_next", "next independent task", "2"),
+    ] {
+        success_data(&run_db(
+            &db,
+            &[
+                "subtask",
+                "create",
+                "--session-token",
+                &orch,
+                "--meta-task-id",
+                &meta_task_id,
+                "--title",
+                title,
+                "--kind",
+                "work",
+                "--priority",
+                priority,
+                "--subtask-id",
+                subtask_id,
+            ],
+        ));
+    }
+
+    let claim = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "claim",
+            "--session-token",
+            &exec,
+            "--subtask-id",
+            "work_blocked",
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_owned();
+    let fence_seq = claim["fence_seq"].as_i64().expect("fence").to_string();
+    success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "start",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+        ],
+    ));
+    success_data(&run_db(
+        &db,
+        &[
+            "artifact",
+            "publish",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+            "--artifact-digest",
+            "blake3:blocking-artifact",
+            "--artifact-kind",
+            "patch-bundle",
+            "--base-rev",
+            "base",
+            "--manifest-path",
+            "blocked.json",
+            "--changed-paths-digest",
+            "blake3:blocking-paths",
+        ],
+    ));
+    let review_id = success_data(&run_db(
+        &db,
+        &[
+            "review",
+            "request",
+            "--session-token",
+            &exec,
+            "--subtask-id",
+            "work_blocked",
+            "--artifact-digest",
+            "blake3:blocking-artifact",
+            "--review-subtask-id",
+            "review_blocking_artifact",
+        ],
+    ))["review_id"]
+        .as_str()
+        .expect("review id")
+        .to_owned();
+    success_data(&run_db(
+        &db,
+        &[
+            "claim",
+            "release",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+        ],
+    ));
+
+    let review_claim = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "claim",
+            "--session-token",
+            &reviewer,
+            "--subtask-id",
+            "review_blocking_artifact",
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    let review_claim_id = review_claim["claim_id"]
+        .as_str()
+        .expect("review claim id")
+        .to_owned();
+    let review_fence = review_claim["fence_seq"]
+        .as_i64()
+        .expect("review fence")
+        .to_string();
+    success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "start",
+            "--session-token",
+            &reviewer,
+            "--claim-id",
+            &review_claim_id,
+            "--fence-seq",
+            &review_fence,
+        ],
+    ));
+    success_data(&run_db(
+        &db,
+        &[
+            "review",
+            "decide",
+            "--session-token",
+            &reviewer,
+            "--review-id",
+            &review_id,
+            "--claim-id",
+            &review_claim_id,
+            "--fence-seq",
+            &review_fence,
+            "--verdict",
+            "blocked",
+            "--findings-digest",
+            "blake3:unblock-instructions",
+        ],
+    ));
+
+    let blocked_status = success_data(&run_db(
+        &db,
+        &["subtask", "status", "--subtask-id", "work_blocked"],
+    ));
+    assert_eq!(blocked_status["subtask"]["state"], "blocked");
+    assert_eq!(blocked_status["subtask"]["artifact_digest"], Value::Null);
+    assert_eq!(blocked_status["reviews"][0]["verdict"], "blocked");
+    assert_eq!(
+        blocked_status["reviews"][0]["findings_digest"],
+        "blake3:unblock-instructions"
+    );
+
+    let followup = success_data(&run_db(
+        &db,
+        &[
+            "review",
+            "follow-up",
+            "--session-token",
+            &orch,
+            "--review-id",
+            &review_id,
+            "--title",
+            "apply reviewer unblock instructions",
+            "--priority",
+            "1",
+            "--subtask-id",
+            "work_followup_from_findings",
+        ],
+    ));
+    assert_eq!(followup["subtask_id"], "work_followup_from_findings");
+    let conn = Connection::open(&db).expect("open covey db");
+    let linked_findings: String = conn
+        .query_row(
+            "SELECT findings_digest FROM review_followup_subtasks WHERE review_id = ?1 AND followup_subtask_id = ?2",
+            params![review_id, "work_followup_from_findings"],
+            |row| row.get(0),
+        )
+        .expect("review follow-up link");
+    assert_eq!(linked_findings, "blake3:unblock-instructions");
+
+    let next_claim = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "claim-next",
+            "--session-token",
+            &exec,
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    assert_eq!(next_claim["subtask_id"], "work_followup_from_findings");
+}
+
+#[test]
 fn repoops_authority_snapshot_returns_claim_scope_and_lock_facts() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");

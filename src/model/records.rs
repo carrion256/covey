@@ -1333,7 +1333,9 @@ pub struct ReviewTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubtaskLifecycle {
     Available,
-    Blocked,
+    Blocked {
+        artifact_digest: Option<ArtifactDigest>,
+    },
     Claimed {
         active_claim_id: ClaimId,
     },
@@ -1386,12 +1388,12 @@ impl SubtaskLifecycle {
                 Ok(Self::Available)
             }
             SubtaskState::Blocked => {
-                if active_claim_id.is_some() || artifact_digest.is_some() {
+                if active_claim_id.is_some() {
                     return Err(invalid_subtask_row(
-                        "blocked subtask cannot carry claim or artifact state",
+                        "blocked subtask cannot carry active claim state",
                     ));
                 }
-                Ok(Self::Blocked)
+                Ok(Self::Blocked { artifact_digest })
             }
             SubtaskState::Claimed => {
                 let Some(active_claim_id) = active_claim_id else {
@@ -1495,7 +1497,7 @@ impl SubtaskLifecycle {
     pub const fn state(&self) -> SubtaskState {
         match self {
             Self::Available => SubtaskState::Available,
-            Self::Blocked => SubtaskState::Blocked,
+            Self::Blocked { .. } => SubtaskState::Blocked,
             Self::Claimed { .. } => SubtaskState::Claimed,
             Self::InProgress { .. } => SubtaskState::InProgress,
             Self::ArtifactPublished { .. } => SubtaskState::ArtifactPublished,
@@ -1533,7 +1535,7 @@ impl SubtaskLifecycle {
             | Self::Applied {
                 active_claim_id, ..
             } => active_claim_id.as_ref(),
-            Self::Available | Self::Blocked | Self::Decided | Self::Abandoned { .. } => None,
+            Self::Available | Self::Blocked { .. } | Self::Decided | Self::Abandoned { .. } => None,
         }
     }
 
@@ -1558,9 +1560,10 @@ impl SubtaskLifecycle {
             | Self::Applied {
                 artifact_digest, ..
             } => Some(artifact_digest),
-            Self::Abandoned { artifact_digest } => artifact_digest.as_ref(),
+            Self::Blocked { artifact_digest } | Self::Abandoned { artifact_digest } => {
+                artifact_digest.as_ref()
+            }
             Self::Available
-            | Self::Blocked
             | Self::Claimed { .. }
             | Self::InProgress { .. }
             | Self::Decided => None,

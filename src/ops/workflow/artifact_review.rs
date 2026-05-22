@@ -8,8 +8,9 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimState, DecideReviewReq, EventType, ObjectType, PublishArtifactReq, ReviewState,
-        ReviewVerdict, SessionRole, SubtaskId, SubtaskKind, SubtaskState,
+        ClaimState, CreateReviewFollowUpReq, CreateSubtaskRequest, DecideReviewReq, EventType,
+        ObjectType, PublishArtifactReq, ReviewState, ReviewVerdict, SessionRole, SubtaskId,
+        SubtaskKind, SubtaskState,
     },
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
@@ -408,17 +409,32 @@ impl Covey {
                     let work_state = match req.verdict {
                         ReviewVerdict::Approve => SubtaskState::Approved,
                         ReviewVerdict::ChangesRequested => SubtaskState::ChangesRequested,
+                        ReviewVerdict::Blocked => SubtaskState::Blocked,
                     };
-                    let _ = tx.execute(
-                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
-                        params![
-                            review.subtask_id(),
-                            work_state.to_string(),
-                            now,
-                            review.artifact_digest(),
-                            work_subtask.state().to_string()
-                        ],
-                    )?;
+                    ensure_subtask_transition(work_subtask.kind(), work_subtask.state(), work_state)?;
+                    let _ = if work_state == SubtaskState::Blocked {
+                        tx.execute(
+                            "UPDATE subtasks SET state = ?2, artifact_digest = NULL, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
+                            params![
+                                review.subtask_id(),
+                                work_state.to_string(),
+                                now,
+                                review.artifact_digest(),
+                                work_subtask.state().to_string()
+                            ],
+                        )?
+                    } else {
+                        tx.execute(
+                            "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
+                            params![
+                                review.subtask_id(),
+                                work_state.to_string(),
+                                now,
+                                review.artifact_digest(),
+                                work_subtask.state().to_string()
+                            ],
+                        )?
+                    };
 
                     append_session_event(
                         tx,
@@ -442,6 +458,90 @@ impl Covey {
                 vec![
                     format!("review:{}", req.review_id),
                     format!("claim:{}", req.claim_id),
+                ]
+            },
+        );
+        result
+    }
+
+    /// Creates follow-up work linked to immutable reviewer findings evidence.
+    pub fn create_review_follow_up(&self, req: CreateReviewFollowUpReq) -> Result<String> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                req.session_token.as_str(),
+                "create_review_follow_up",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    crate::validators::require_role(
+                        tx,
+                        req.session_token.as_str(),
+                        &[SessionRole::Orchestrator],
+                    )?;
+                    let review = load_review_tx(tx, req.review_id.as_str())?;
+                    let Some(verdict) = review.verdict() else {
+                        return Err(CoveyError::IllegalTransition {
+                            from: review.state().into(),
+                            to: ReviewState::Decided.into(),
+                            object: ObjectType::Review,
+                        });
+                    };
+                    if verdict == ReviewVerdict::Approve {
+                        return Err(CoveyError::ReviewNotActionable {
+                            review_id: req.review_id.to_string(),
+                            verdict,
+                        });
+                    }
+                    let findings_digest =
+                        review
+                            .findings_digest()
+                            .ok_or(CoveyError::IllegalTransition {
+                                from: review.state().into(),
+                                to: ReviewState::Decided.into(),
+                                object: ObjectType::Review,
+                            })?;
+                    let reviewed_subtask = load_subtask_tx(tx, review.subtask_id())?;
+                    ensure_meta_task_is_schedulable(tx, &reviewed_subtask.meta_task_id)?;
+                    let create_req = CreateSubtaskRequest {
+                        session_token: req.session_token.clone(),
+                        meta_task_id: reviewed_subtask.meta_task_id.clone(),
+                        subtask_id: req.subtask_id.clone(),
+                        title: req.title.clone(),
+                        priority: req.priority,
+                        idempotency_key: req.idempotency_key.clone(),
+                    };
+                    let followup_subtask_id = super::create_subtask_tx(tx, &create_req, now)?;
+                    tx.execute(
+                        r#"
+                        INSERT INTO review_followup_subtasks (
+                            review_id, findings_digest, followup_subtask_id,
+                            created_by_session, created_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5)
+                        "#,
+                        params![
+                            req.review_id.as_str(),
+                            findings_digest,
+                            followup_subtask_id.as_str(),
+                            req.session_token.as_str(),
+                            now
+                        ],
+                    )?;
+                    Ok(followup_subtask_id)
+                },
+            )
+        });
+        self.log_operation(
+            "create_review_follow_up",
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |subtask_id| {
+                vec![
+                    format!("review:{}", req.review_id),
+                    format!("subtask:{subtask_id}"),
                 ]
             },
         );

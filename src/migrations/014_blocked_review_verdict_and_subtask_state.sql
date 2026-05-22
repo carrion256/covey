@@ -1,35 +1,5 @@
 PRAGMA foreign_keys = OFF;
 
-CREATE TABLE sessions_new (
-    session_token TEXT PRIMARY KEY,
-    agent_principal_id TEXT NOT NULL,
-    agent_instance_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    state TEXT NOT NULL,
-    active_subtask_id TEXT REFERENCES subtasks(subtask_id),
-    last_heartbeat_at INTEGER NOT NULL,
-    last_heartbeat_tick INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    CHECK (role IN ('executor', 'orchestrator', 'apply_gate', 'reviewer')),
-    CHECK (state IN ('active', 'stale', 'exited'))
-);
-INSERT INTO sessions_new (
-    session_token, agent_principal_id, agent_instance_id, role, state,
-    active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at
-)
-SELECT
-    session_token, agent_principal_id, agent_instance_id, role, state,
-    active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at
-FROM sessions;
-DROP TABLE sessions;
-ALTER TABLE sessions_new RENAME TO sessions;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_one_active_per_principal
-ON sessions(agent_principal_id)
-WHERE state = 'active';
-CREATE INDEX IF NOT EXISTS idx_sessions_state_heartbeat_tick
-ON sessions(state, last_heartbeat_tick);
-
 CREATE TABLE subtasks_new (
     subtask_id TEXT PRIMARY KEY,
     meta_task_id TEXT NOT NULL REFERENCES meta_tasks(meta_task_id),
@@ -68,5 +38,37 @@ DROP TABLE subtasks;
 ALTER TABLE subtasks_new RENAME TO subtasks;
 CREATE INDEX IF NOT EXISTS idx_subtasks_meta_task_priority
 ON subtasks(meta_task_id, priority, created_at);
+
+CREATE TABLE reviews_new (
+    review_id TEXT PRIMARY KEY,
+    subtask_id TEXT NOT NULL REFERENCES subtasks(subtask_id),
+    artifact_digest TEXT NOT NULL REFERENCES artifacts(artifact_digest),
+    reviewer_session TEXT NOT NULL REFERENCES sessions(session_token),
+    review_subtask_id TEXT REFERENCES subtasks(subtask_id),
+    verdict TEXT,
+    findings_digest TEXT,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (state IN ('requested', 'in_progress', 'decided', 'superseded')),
+    CHECK (verdict IS NULL OR verdict IN ('approve', 'changes_requested', 'blocked')),
+    CHECK ((state = 'decided') = (verdict IS NOT NULL))
+);
+INSERT INTO reviews_new (
+    review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id,
+    verdict, findings_digest, state, created_at, updated_at
+)
+SELECT
+    review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id,
+    verdict, findings_digest, state, created_at, updated_at
+FROM reviews;
+DROP TABLE reviews;
+ALTER TABLE reviews_new RENAME TO reviews;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_one_open_round_per_artifact
+ON reviews(subtask_id, artifact_digest)
+WHERE state IN ('requested', 'in_progress');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_one_row_per_review_subtask
+ON reviews(review_subtask_id)
+WHERE review_subtask_id IS NOT NULL;
 
 PRAGMA foreign_keys = ON;

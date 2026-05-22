@@ -152,6 +152,7 @@ pub enum ArtifactKind {
 pub enum ReviewVerdict {
     Approve,
     ChangesRequested,
+    Blocked,
 }
 
 /// Review row lifecycle states.
