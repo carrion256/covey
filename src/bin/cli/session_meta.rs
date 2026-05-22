@@ -4,6 +4,7 @@ use covey::SessionRole;
 #[derive(Subcommand, Debug)]
 pub(crate) enum SessionCommand {
     Register(RegisterSessionArgs),
+    ActiveForPrincipal(ActiveSessionForPrincipalArgs),
     Attest(RecordRuntimeAttestationArgs),
     Heartbeat(HeartbeatArgs),
     Exit(ExitSessionArgs),
@@ -26,6 +27,14 @@ pub(crate) struct RegisterSessionArgs {
     pub(crate) role: SessionRoleArg,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ActiveSessionForPrincipalArgs {
+    #[arg(long)]
+    pub(crate) agent_principal_id: String,
+    #[arg(long)]
+    pub(crate) role: SessionRoleArg,
 }
 
 #[derive(Args, Debug)]

@@ -197,6 +197,53 @@ fn session_register_accepts_apply_gate_role_alias() {
 }
 
 #[test]
+fn session_active_for_principal_returns_active_session_for_role() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let registered = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "agent-active",
+            "--agent-instance-id",
+            "run-active",
+            "--role",
+            "executor",
+        ],
+    ));
+
+    let active = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "active-for-principal",
+            "--agent-principal-id",
+            "agent-active",
+            "--role",
+            "executor",
+        ],
+    ));
+    assert_eq!(active["session_token"], registered["session_token"]);
+    assert_eq!(active["agent_principal_id"], "agent-active");
+    assert_eq!(active["role"], "executor");
+
+    let mismatch = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "active-for-principal",
+            "--agent-principal-id",
+            "agent-active",
+            "--role",
+            "reviewer",
+        ],
+    ));
+    assert_eq!(mismatch, Value::Null);
+}
+
+#[test]
 fn session_attest_records_runtime_identity_json() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");

@@ -18,6 +18,22 @@ pub(super) fn dispatch_session(store: &Covey, command: SessionCommand) -> covey:
                 ),
             ))
         }
+        SessionCommand::ActiveForPrincipal(args) => {
+            let role = args.role.into();
+            let handle = store.active_session_for_principal(&args.agent_principal_id, role)?;
+            Ok(Rendered::summary(
+                &handle,
+                handle
+                    .as_ref()
+                    .map(|session| {
+                        format!(
+                            "active session {} role={} principal={}",
+                            session.session_token, session.role, session.agent_principal_id
+                        )
+                    })
+                    .unwrap_or_else(|| "no active session for principal and role".to_owned()),
+            ))
+        }
         SessionCommand::Attest(args) => {
             let session_token_for_error = args.session_token.clone();
             let attestation = store.record_runtime_attestation(

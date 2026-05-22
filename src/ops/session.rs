@@ -1,6 +1,6 @@
-use std::time::Instant;
+use std::{str::FromStr, time::Instant};
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{
     Covey,
@@ -309,6 +309,68 @@ impl Covey {
             started_at,
             &result,
             |status| vec![format!("session:{}", status.session().session_token)],
+        );
+        result
+    }
+
+    /// Returns the currently active session for a principal and role, when one exists.
+    pub fn active_session_for_principal(
+        &self,
+        agent_principal_id: &str,
+        role: crate::model::SessionRole,
+    ) -> Result<Option<crate::model::SessionHandle>> {
+        ensure_length("agent_principal_id", agent_principal_id, MAX_AGENT_ID_LEN)?;
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| {
+            tx.query_row(
+                r#"
+                SELECT session_token, agent_principal_id, agent_instance_id, role
+                FROM sessions
+                WHERE agent_principal_id = ?1 AND role = ?2 AND state = ?3
+                "#,
+                params![
+                    agent_principal_id,
+                    role.to_string(),
+                    SessionState::Active.to_string()
+                ],
+                |row| {
+                    crate::model::SessionHandle::try_from_raw_parts(
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        crate::model::SessionRole::from_str(&row.get::<_, String>(3)?).map_err(
+                            |err| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    3,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(err),
+                                )
+                            },
+                        )?,
+                    )
+                    .map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        });
+        self.log_operation(
+            "active_session_for_principal",
+            agent_principal_id,
+            started_at,
+            &result,
+            |handle| {
+                handle
+                    .as_ref()
+                    .map(|session| vec![format!("session:{}", session.session_token)])
+                    .unwrap_or_default()
+            },
         );
         result
     }

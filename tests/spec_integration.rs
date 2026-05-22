@@ -539,6 +539,17 @@ fn session_lifecycle_and_stale_reap_follow_spec() {
         duplicate,
         Err(CoveyError::SessionAlreadyActive { agent_principal_id }) if agent_principal_id == "principal_a"
     ));
+    let active = covey
+        .active_session_for_principal("principal_a", SessionRole::Executor)
+        .expect("active session lookup")
+        .expect("active executor session");
+    assert_eq!(active.session_token(), sess_a);
+    assert_eq!(
+        covey
+            .active_session_for_principal("principal_a", SessionRole::Reviewer)
+            .expect("active session lookup with role mismatch"),
+        None
+    );
 
     let missing = send_heartbeat(&covey, "missing");
     assert!(matches!(missing, Err(CoveyError::SessionNotFound)));
