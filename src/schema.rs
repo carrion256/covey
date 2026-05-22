@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use rusqlite_migration::{M, Migrations};
 use serde::Serialize;
 
@@ -44,9 +44,43 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
         .copied()
         .map(M::up)
         .collect();
-    Migrations::new(migrations)
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let migration_result = Migrations::new(migrations)
         .to_latest(conn)
-        .map_err(CoveyError::from)
+        .map_err(CoveyError::from);
+    let restore_result = conn
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(CoveyError::from);
+    migration_result?;
+    restore_result?;
+    ensure_foreign_key_integrity(conn)
+}
+
+fn ensure_foreign_key_integrity(conn: &Connection) -> Result<()> {
+    let violation = conn
+        .query_row(
+            "SELECT \"table\", rowid, parent, fkid FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((table, rowid, parent, fkid)) = violation {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            Some(format!(
+                "foreign key violation after migrations: table {table} rowid {rowid} references missing parent {parent} via foreign key {fkid}"
+            )),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub(crate) fn advance_lease_clock(tx: &Transaction<'_>, wall_now_ms: i64) -> Result<i64> {
