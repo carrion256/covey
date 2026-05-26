@@ -17,7 +17,8 @@ use crate::{
         review_verdict_name, subtask_state_name,
     },
     queries::{
-        collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
+        collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
+        load_subtask_tx,
     },
     schema::advance_lease_clock,
     store::{
@@ -727,9 +728,15 @@ impl Covey {
                         .to_owned(),
                 })?;
 
+            let artifact = load_artifact_tx(tx, req.artifact_digest.as_str())?;
+
             Ok(LandingAuthorizationStatus::accepted(
                 req.queue_id,
                 req.artifact_digest,
+                artifact.artifact_kind,
+                artifact.base_rev,
+                artifact.manifest_path,
+                artifact.changed_paths_digest,
                 req.review_id,
                 req.findings_digest,
                 req.claim_fence_seq,

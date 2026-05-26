@@ -7,11 +7,11 @@ use serde::{
 use strum::Display;
 
 use super::{
-    AgentPrincipalId, Artifact, ArtifactDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq,
-    FindingsDigest, MetaTask, MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review,
-    ReviewId, ReviewTarget, ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind,
-    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs,
-    VerifierId,
+    AgentPrincipalId, Artifact, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
+    ChangedPathsDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask,
+    MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget,
+    ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
+    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -1307,6 +1307,10 @@ enum LandingAuthorizationState {
 struct LandingAuthorizationAccepted {
     queue_id: QueueId,
     artifact_digest: ArtifactDigest,
+    artifact_kind: ArtifactKind,
+    base_rev: BaseRev,
+    manifest_path: ArtifactManifestPath,
+    changed_paths_digest: ChangedPathsDigest,
     review_id: ReviewId,
     findings_digest: FindingsDigest,
     claim_fence_seq: FenceSeq,
@@ -1322,6 +1326,10 @@ impl LandingAuthorizationStatus {
     pub fn accepted(
         queue_id: QueueId,
         artifact_digest: ArtifactDigest,
+        artifact_kind: ArtifactKind,
+        base_rev: BaseRev,
+        manifest_path: ArtifactManifestPath,
+        changed_paths_digest: ChangedPathsDigest,
         review_id: ReviewId,
         findings_digest: FindingsDigest,
         claim_fence_seq: FenceSeq,
@@ -1334,6 +1342,10 @@ impl LandingAuthorizationStatus {
             status: LandingAuthorizationState::Accepted(LandingAuthorizationAccepted {
                 queue_id,
                 artifact_digest,
+                artifact_kind,
+                base_rev,
+                manifest_path,
+                changed_paths_digest,
                 review_id,
                 findings_digest,
                 claim_fence_seq,
@@ -1361,6 +1373,30 @@ impl LandingAuthorizationStatus {
     #[must_use]
     pub const fn artifact_digest(&self) -> &ArtifactDigest {
         &self.accepted_fields().artifact_digest
+    }
+
+    /// Returns the authorized artifact kind.
+    #[must_use]
+    pub const fn artifact_kind(&self) -> ArtifactKind {
+        self.accepted_fields().artifact_kind
+    }
+
+    /// Returns the artifact base revision context.
+    #[must_use]
+    pub const fn base_rev(&self) -> &BaseRev {
+        &self.accepted_fields().base_rev
+    }
+
+    /// Returns the local manifest path recorded for the artifact.
+    #[must_use]
+    pub const fn manifest_path(&self) -> &ArtifactManifestPath {
+        &self.accepted_fields().manifest_path
+    }
+
+    /// Returns the changed-paths digest recorded for the artifact.
+    #[must_use]
+    pub const fn changed_paths_digest(&self) -> &ChangedPathsDigest {
+        &self.accepted_fields().changed_paths_digest
     }
 
     /// Returns the review id bound to the authorization.
@@ -1418,10 +1454,14 @@ impl Serialize for LandingAuthorizationStatus {
         S: Serializer,
     {
         let accepted = self.accepted_fields();
-        let mut status = serializer.serialize_struct("LandingAuthorizationStatus", 10)?;
+        let mut status = serializer.serialize_struct("LandingAuthorizationStatus", 14)?;
         status.serialize_field("accepted", &true)?;
         status.serialize_field("queue_id", &accepted.queue_id)?;
         status.serialize_field("artifact_digest", &accepted.artifact_digest)?;
+        status.serialize_field("artifact_kind", &accepted.artifact_kind)?;
+        status.serialize_field("base_rev", &accepted.base_rev)?;
+        status.serialize_field("manifest_path", &accepted.manifest_path)?;
+        status.serialize_field("changed_paths_digest", &accepted.changed_paths_digest)?;
         status.serialize_field("review_id", &accepted.review_id)?;
         status.serialize_field("findings_digest", &accepted.findings_digest)?;
         status.serialize_field("claim_fence_seq", &accepted.claim_fence_seq)?;
@@ -1442,6 +1482,10 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
             Accepted,
             QueueId,
             ArtifactDigest,
+            ArtifactKind,
+            BaseRev,
+            ManifestPath,
+            ChangedPathsDigest,
             ReviewId,
             FindingsDigest,
             ClaimFenceSeq,
@@ -1476,6 +1520,10 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
                             "accepted" => Ok(Field::Accepted),
                             "queue_id" => Ok(Field::QueueId),
                             "artifact_digest" => Ok(Field::ArtifactDigest),
+                            "artifact_kind" => Ok(Field::ArtifactKind),
+                            "base_rev" => Ok(Field::BaseRev),
+                            "manifest_path" => Ok(Field::ManifestPath),
+                            "changed_paths_digest" => Ok(Field::ChangedPathsDigest),
                             "review_id" => Ok(Field::ReviewId),
                             "findings_digest" => Ok(Field::FindingsDigest),
                             "claim_fence_seq" => Ok(Field::ClaimFenceSeq),
@@ -1511,6 +1559,10 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
                 let mut accepted: Option<bool> = None;
                 let mut queue_id: Option<QueueId> = None;
                 let mut artifact_digest: Option<ArtifactDigest> = None;
+                let mut artifact_kind: Option<ArtifactKind> = None;
+                let mut base_rev: Option<BaseRev> = None;
+                let mut manifest_path: Option<ArtifactManifestPath> = None;
+                let mut changed_paths_digest: Option<ChangedPathsDigest> = None;
                 let mut review_id: Option<ReviewId> = None;
                 let mut findings_digest: Option<FindingsDigest> = None;
                 let mut claim_fence_seq: Option<FenceSeq> = None;
@@ -1538,6 +1590,32 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
                                 return Err(serde::de::Error::duplicate_field("artifact_digest"));
                             }
                             artifact_digest = Some(map.next_value()?);
+                        }
+                        Field::ArtifactKind => {
+                            if artifact_kind.is_some() {
+                                return Err(serde::de::Error::duplicate_field("artifact_kind"));
+                            }
+                            artifact_kind = Some(map.next_value()?);
+                        }
+                        Field::BaseRev => {
+                            if base_rev.is_some() {
+                                return Err(serde::de::Error::duplicate_field("base_rev"));
+                            }
+                            base_rev = Some(map.next_value()?);
+                        }
+                        Field::ManifestPath => {
+                            if manifest_path.is_some() {
+                                return Err(serde::de::Error::duplicate_field("manifest_path"));
+                            }
+                            manifest_path = Some(map.next_value()?);
+                        }
+                        Field::ChangedPathsDigest => {
+                            if changed_paths_digest.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "changed_paths_digest",
+                                ));
+                            }
+                            changed_paths_digest = Some(map.next_value()?);
                         }
                         Field::ReviewId => {
                             if review_id.is_some() {
@@ -1598,6 +1676,13 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
                     queue_id.ok_or_else(|| serde::de::Error::missing_field("queue_id"))?,
                     artifact_digest
                         .ok_or_else(|| serde::de::Error::missing_field("artifact_digest"))?,
+                    artifact_kind
+                        .ok_or_else(|| serde::de::Error::missing_field("artifact_kind"))?,
+                    base_rev.ok_or_else(|| serde::de::Error::missing_field("base_rev"))?,
+                    manifest_path
+                        .ok_or_else(|| serde::de::Error::missing_field("manifest_path"))?,
+                    changed_paths_digest
+                        .ok_or_else(|| serde::de::Error::missing_field("changed_paths_digest"))?,
                     review_id.ok_or_else(|| serde::de::Error::missing_field("review_id"))?,
                     findings_digest
                         .ok_or_else(|| serde::de::Error::missing_field("findings_digest"))?,
@@ -1617,6 +1702,10 @@ impl<'de> Deserialize<'de> for LandingAuthorizationStatus {
             "accepted",
             "queue_id",
             "artifact_digest",
+            "artifact_kind",
+            "base_rev",
+            "manifest_path",
+            "changed_paths_digest",
             "review_id",
             "findings_digest",
             "claim_fence_seq",

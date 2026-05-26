@@ -3840,6 +3840,10 @@ fn landing_authorization_status_preserves_accepted_flat_json() {
         "accepted": true,
         "queue_id": "queue-1",
         "artifact_digest": "blake3:artifact",
+        "artifact_kind": "patch_bundle",
+        "base_rev": "main",
+        "manifest_path": "manifest.json",
+        "changed_paths_digest": "blake3:paths",
         "review_id": "review-1",
         "findings_digest": "blake3:findings",
         "claim_fence_seq": 7,
@@ -3855,10 +3859,16 @@ fn landing_authorization_status_preserves_accepted_flat_json() {
 
     assert!(status.accepted_flag());
     assert_eq!(status.queue_id().as_str(), "queue-1");
+    assert_eq!(status.artifact_kind(), ArtifactKind::PatchBundle);
+    assert_eq!(status.base_rev().as_str(), "main");
+    assert_eq!(status.manifest_path().as_str(), "manifest.json");
+    assert_eq!(status.changed_paths_digest().as_str(), "blake3:paths");
     assert_eq!(status.claim_fence_seq(), 7);
     assert_eq!(status.recorded_by_session().as_str(), "session-1");
     assert_eq!(value["accepted"], true);
     assert_eq!(value["queue_id"], "queue-1");
+    assert_eq!(value["artifact_kind"], "patch_bundle");
+    assert_eq!(value["changed_paths_digest"], "blake3:paths");
 }
 
 #[test]
