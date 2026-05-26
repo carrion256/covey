@@ -1,6 +1,6 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
-use std::time::Instant;
+use std::{borrow::Cow, collections::HashMap, time::Instant};
 
 use crate::{
     Covey,
@@ -12,7 +12,7 @@ use crate::{
         RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation, ScopeClass, Session,
         SubtaskState,
     },
-    queries::{load_active_reservations_tx, load_subtask_tx},
+    queries::{load_repoops_relevant_reservations_tx, load_subtask_tx},
     validators::require_current_claim,
 };
 
@@ -34,14 +34,17 @@ impl Covey {
             let claim =
                 require_current_claim(tx, &req.session_token, &req.claim_id, req.fence_seq, now)?;
             let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
-            let reservations = load_active_reservations_tx(tx, now)?;
             let session = crate::queries::load_session_tx(tx, &req.session_token)?;
             let paths = normalize_requested_paths(req.paths());
-            let scope_in = scope_patterns_for_subtask(&reservations, &claim.subtask_id);
+            let reservations =
+                load_repoops_relevant_reservations_tx(tx, now, &claim.subtask_id, &paths)?;
+            let prepared_reservations = prepare_reservations(&reservations);
+            let scope_in = scope_patterns_for_subtask(&prepared_reservations, &claim.subtask_id);
             let scope = RepoopsAuthorityScopeFact::new(scope_in.clone(), Vec::new())
                 .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
-            let locks = lock_facts_for_paths(&paths, &reservations, &claim, &session)
-                .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
+            let locks =
+                lock_facts_for_prepared_paths(&paths, &prepared_reservations, &claim, &session)
+                    .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
             let caller_ownership_token = ownership_token_ref(&req.session_token);
             let active_ownership_token = ownership_token_ref(&claim.owner_session_token);
             let fact_sources = vec![
@@ -120,21 +123,32 @@ fn repoops_claim_status_for_subtask(state: SubtaskState) -> RepoopsAuthorityClai
 }
 
 fn ownership_token_ref(session_token: &str) -> crate::model::SessionToken {
-    crate::model::SessionToken::parse(format!(
-        "covey-session-token-blake3:{}",
-        blake3::hash(session_token.as_bytes())
-    ))
-    .expect("blake3-derived ownership token ref should be token-safe")
+    const PREFIX: &str = "covey-session-token-blake3:";
+    let digest = blake3::hash(session_token.as_bytes()).to_hex();
+    let mut token_ref = String::with_capacity(PREFIX.len() + digest.len());
+    token_ref.push_str(PREFIX);
+    token_ref.push_str(digest.as_str());
+    crate::model::SessionToken::parse(token_ref)
+        .expect("blake3-derived ownership token ref should be token-safe")
 }
 
 fn normalize_requested_paths(paths: &[crate::model::RepoopsPath]) -> Vec<String> {
+    if let [path] = paths {
+        return vec![path.as_str().to_owned()];
+    }
     let mut normalized = paths
         .iter()
         .map(|path| path.as_str().to_owned())
         .collect::<Vec<_>>();
-    normalized.sort();
-    normalized.dedup();
+    sort_dedup_strings(&mut normalized);
     normalized
+}
+
+fn sort_dedup_strings(values: &mut Vec<String>) {
+    if values.len() > 1 {
+        values.sort_unstable();
+        values.dedup();
+    }
 }
 
 fn normalize_repo_relative_path(raw: &str) -> Option<String> {
@@ -142,14 +156,21 @@ fn normalize_repo_relative_path(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let mut normalized = trimmed.replace('\\', "/");
+    if repo_relative_path_is_normalized(trimmed) {
+        return Some(trimmed.to_owned());
+    }
+    let mut normalized = if trimmed.as_bytes().contains(&b'\\') {
+        Cow::Owned(trimmed.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(trimmed)
+    };
     while let Some(rest) = normalized.strip_prefix("./") {
-        normalized = rest.to_owned();
+        normalized = Cow::Owned(rest.to_owned());
     }
     while let Some(rest) = normalized.strip_prefix('/') {
-        normalized = rest.to_owned();
+        normalized = Cow::Owned(rest.to_owned());
     }
-    let mut parts = Vec::new();
+    let mut parts = Vec::with_capacity(normalized.bytes().filter(|byte| *byte == b'/').count() + 1);
     for part in normalized.split('/') {
         match part {
             "" | "." => {}
@@ -164,47 +185,215 @@ fn normalize_repo_relative_path(raw: &str) -> Option<String> {
     }
 }
 
-fn scope_patterns_for_subtask(reservations: &[Reservation], subtask_id: &str) -> Vec<String> {
-    let mut patterns = reservations
-        .iter()
-        .filter(|reservation| reservation.owner_subtask_id == subtask_id)
-        .flat_map(scope_patterns_for_reservation)
-        .collect::<Vec<_>>();
-    patterns.sort();
-    patterns.dedup();
-    patterns
+fn repo_relative_path_is_normalized(path: &str) -> bool {
+    !path.as_bytes().contains(&b'\\')
+        && !path.starts_with('/')
+        && !path.starts_with("./")
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn scope_patterns_for_reservation(reservation: &Reservation) -> Vec<String> {
-    match reservation.scope_class() {
-        ScopeClass::RepoGlobal => vec!["**".to_owned()],
-        ScopeClass::ExactPath => normalize_repo_relative_path(reservation.scope_key())
-            .into_iter()
-            .collect(),
-        ScopeClass::Subtree => normalize_repo_relative_path(reservation.scope_key())
-            .map(|path| format!("{path}/**"))
-            .into_iter()
-            .collect(),
-        ScopeClass::GeneratedSet => reservation
-            .generated_members()
-            .iter()
-            .filter_map(|member| normalize_repo_relative_path(member))
-            .collect(),
+fn prepare_reservations(reservations: &[Reservation]) -> Vec<PreparedReservation<'_>> {
+    reservations
+        .iter()
+        .map(|reservation| PreparedReservation {
+            reservation,
+            scope: PreparedScope::from_reservation(reservation),
+        })
+        .collect()
+}
+
+struct PreparedReservation<'a> {
+    reservation: &'a Reservation,
+    scope: PreparedScope,
+}
+
+enum PreparedScope {
+    RepoGlobal,
+    ExactPath(Option<String>),
+    Subtree(Option<PreparedSubtreeScope>),
+    GeneratedSet(Vec<String>),
+}
+
+struct PreparedSubtreeScope {
+    base: String,
+    child_prefix: String,
+}
+
+struct PreparedReservationIndex<'p, 'r> {
+    repo_global: Vec<&'p PreparedReservation<'r>>,
+    exact_paths: HashMap<&'p str, Vec<&'p PreparedReservation<'r>>>,
+    subtrees: Vec<&'p PreparedReservation<'r>>,
+}
+
+impl PreparedScope {
+    fn from_reservation(reservation: &Reservation) -> Self {
+        match reservation.scope_class() {
+            ScopeClass::RepoGlobal => Self::RepoGlobal,
+            ScopeClass::ExactPath => {
+                Self::ExactPath(normalize_repo_relative_path(reservation.scope_key()))
+            }
+            ScopeClass::Subtree => Self::Subtree(
+                normalize_repo_relative_path(reservation.scope_key()).map(|base| {
+                    PreparedSubtreeScope {
+                        child_prefix: format!("{base}/"),
+                        base,
+                    }
+                }),
+            ),
+            ScopeClass::GeneratedSet => {
+                let mut members = reservation
+                    .generated_member_strs()
+                    .filter_map(normalize_repo_relative_path)
+                    .collect::<Vec<_>>();
+                sort_dedup_strings(&mut members);
+                Self::GeneratedSet(members)
+            }
+        }
+    }
+
+    fn append_scope_patterns(&self, patterns: &mut Vec<String>) {
+        match self {
+            Self::RepoGlobal => patterns.push("**".to_owned()),
+            Self::ExactPath(Some(path)) => patterns.push(path.clone()),
+            Self::ExactPath(None) => {}
+            Self::Subtree(Some(scope)) => patterns.push(format!("{}/**", scope.base)),
+            Self::Subtree(None) => {}
+            Self::GeneratedSet(members) => patterns.extend(members.iter().cloned()),
+        }
+    }
+
+    #[cfg(test)]
+    fn covers_path(&self, path: &str) -> bool {
+        match self {
+            Self::RepoGlobal => true,
+            Self::ExactPath(candidate) => candidate.as_deref() == Some(path),
+            Self::Subtree(scope) => scope.as_ref().is_some_and(|scope| scope.covers_path(path)),
+            Self::GeneratedSet(members) => members
+                .binary_search_by(|member| member.as_str().cmp(path))
+                .is_ok(),
+        }
+    }
+
+    fn subtree_scope(&self) -> Option<&PreparedSubtreeScope> {
+        match self {
+            Self::Subtree(Some(scope)) => Some(scope),
+            _ => None,
+        }
     }
 }
 
+impl PreparedSubtreeScope {
+    fn covers_path(&self, path: &str) -> bool {
+        path == self.base || path.starts_with(&self.child_prefix)
+    }
+}
+
+impl<'p, 'r> PreparedReservationIndex<'p, 'r> {
+    fn from_prepared(reservations: &'p [PreparedReservation<'r>]) -> Self {
+        let exact_path_capacity = reservations
+            .iter()
+            .map(|prepared| match &prepared.scope {
+                PreparedScope::ExactPath(Some(_)) => 1,
+                PreparedScope::GeneratedSet(members) => members.len(),
+                _ => 0,
+            })
+            .sum();
+        let mut index = Self {
+            repo_global: Vec::new(),
+            exact_paths: HashMap::with_capacity(exact_path_capacity),
+            subtrees: Vec::new(),
+        };
+        for prepared in reservations {
+            match &prepared.scope {
+                PreparedScope::RepoGlobal => index.repo_global.push(prepared),
+                PreparedScope::ExactPath(Some(path)) => {
+                    index.exact_paths.entry(path).or_default().push(prepared);
+                }
+                PreparedScope::ExactPath(None) => {}
+                PreparedScope::Subtree(Some(_)) => index.subtrees.push(prepared),
+                PreparedScope::Subtree(None) => {}
+                PreparedScope::GeneratedSet(members) => {
+                    for path in members {
+                        index
+                            .exact_paths
+                            .entry(path.as_str())
+                            .or_default()
+                            .push(prepared);
+                    }
+                }
+            }
+        }
+        index
+    }
+
+    fn matching_reservations(
+        &'p self,
+        path: &'p str,
+    ) -> impl Iterator<Item = &'p PreparedReservation<'r>> + 'p {
+        let exact = self
+            .exact_paths
+            .get(path)
+            .into_iter()
+            .flat_map(|reservations| reservations.iter().copied());
+        let subtrees = self.subtrees.iter().copied().filter(move |prepared| {
+            prepared
+                .scope
+                .subtree_scope()
+                .is_some_and(|scope| scope.covers_path(path))
+        });
+        self.repo_global
+            .iter()
+            .copied()
+            .chain(exact)
+            .chain(subtrees)
+    }
+}
+
+fn scope_patterns_for_subtask(
+    reservations: &[PreparedReservation<'_>],
+    subtask_id: &str,
+) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for prepared in reservations {
+        if prepared.reservation.owner_subtask_id == subtask_id {
+            prepared.scope.append_scope_patterns(&mut patterns);
+        }
+    }
+    sort_dedup_strings(&mut patterns);
+    patterns
+}
+
+#[cfg(test)]
+fn scope_patterns_for_reservation(reservation: &Reservation) -> Vec<String> {
+    let mut patterns = Vec::new();
+    PreparedScope::from_reservation(reservation).append_scope_patterns(&mut patterns);
+    patterns
+}
+
+#[cfg(test)]
 fn lock_facts_for_paths(
     paths: &[String],
     reservations: &[Reservation],
     claim: &Claim,
     session: &Session,
 ) -> std::result::Result<Vec<RepoopsAuthorityLockFact>, String> {
+    let prepared_reservations = prepare_reservations(reservations);
+    lock_facts_for_prepared_paths(paths, &prepared_reservations, claim, session)
+}
+
+fn lock_facts_for_prepared_paths(
+    paths: &[String],
+    reservations: &[PreparedReservation<'_>],
+    claim: &Claim,
+    session: &Session,
+) -> std::result::Result<Vec<RepoopsAuthorityLockFact>, String> {
     let mut locks = Vec::new();
+    let reservation_index = PreparedReservationIndex::from_prepared(reservations);
     for path in paths {
-        for reservation in reservations {
-            if !reservation_covers_path(reservation, path) {
-                continue;
-            }
+        for prepared in reservation_index.matching_reservations(path) {
+            let reservation = prepared.reservation;
             if reservation.owner_subtask_id == claim.subtask_id {
                 locks.push(RepoopsAuthorityLockFact::owned(
                     path.clone(),
@@ -220,14 +409,58 @@ fn lock_facts_for_paths(
             }
         }
     }
-    locks.sort_by(|left, right| {
-        (left.path(), left.owner(), left.claim_id()).cmp(&(
-            right.path(),
-            right.owner(),
-            right.claim_id(),
-        ))
-    });
-    locks.dedup();
+    if locks.len() > 1 {
+        locks.sort_unstable_by(|left, right| {
+            (left.path(), left.owner(), left.claim_id()).cmp(&(
+                right.path(),
+                right.owner(),
+                right.claim_id(),
+            ))
+        });
+        locks.dedup();
+    }
+    Ok(locks)
+}
+
+#[cfg(test)]
+fn lock_facts_for_prepared_paths_nested(
+    paths: &[String],
+    reservations: &[PreparedReservation<'_>],
+    claim: &Claim,
+    session: &Session,
+) -> std::result::Result<Vec<RepoopsAuthorityLockFact>, String> {
+    let mut locks = Vec::new();
+    for path in paths {
+        for prepared in reservations {
+            if !prepared.scope.covers_path(path) {
+                continue;
+            }
+            let reservation = prepared.reservation;
+            if reservation.owner_subtask_id == claim.subtask_id {
+                locks.push(RepoopsAuthorityLockFact::owned(
+                    path.clone(),
+                    session.agent_principal_id().to_owned(),
+                    repoops_claim_ref(claim.claim_id.as_str()),
+                )?);
+            } else {
+                locks.push(RepoopsAuthorityLockFact::foreign_owner(
+                    path.clone(),
+                    format!("subtask:{}", reservation.owner_subtask_id),
+                    repoops_claim_ref(format!("unknown:{}", reservation.owner_subtask_id)),
+                )?);
+            }
+        }
+    }
+    if locks.len() > 1 {
+        locks.sort_unstable_by(|left, right| {
+            (left.path(), left.owner(), left.claim_id()).cmp(&(
+                right.path(),
+                right.owner(),
+                right.claim_id(),
+            ))
+        });
+        locks.dedup();
+    }
     Ok(locks)
 }
 
@@ -235,27 +468,12 @@ fn repoops_claim_ref(value: impl Into<String>) -> RepoopsClaimRef {
     RepoopsClaimRef::parse(value).expect("repoops claim refs are derived from validated ids")
 }
 
-fn reservation_covers_path(reservation: &Reservation, path: &str) -> bool {
-    match reservation.scope_class() {
-        ScopeClass::RepoGlobal => true,
-        ScopeClass::ExactPath => {
-            normalize_repo_relative_path(reservation.scope_key()).as_deref() == Some(path)
-        }
-        ScopeClass::Subtree => normalize_repo_relative_path(reservation.scope_key())
-            .is_some_and(|base| path == base || path.starts_with(&format!("{base}/"))),
-        ScopeClass::GeneratedSet => reservation
-            .generated_members()
-            .iter()
-            .any(|member| normalize_repo_relative_path(member).as_deref() == Some(path)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{
-        ClaimId, ClaimState, FenceSeq, LeaseDeadlineMs, RepoopsAuthorityLockStatus, ReservationId,
-        ReservationState, SessionToken, SubtaskId, SubtaskState, TimestampMs,
+        ClaimId, ClaimState, FenceSeq, LeaseDeadlineMs, RepoopsAuthorityLockStatus, RepoopsPath,
+        ReservationId, ReservationState, SessionToken, SubtaskId, SubtaskState, TimestampMs,
     };
 
     fn reservation(
@@ -263,18 +481,57 @@ mod tests {
         scope_key: &str,
         owner_subtask_id: &str,
     ) -> Reservation {
+        reservation_with_members(scope_class, scope_key, owner_subtask_id, Vec::new())
+    }
+
+    fn reservation_with_members(
+        scope_class: ScopeClass,
+        scope_key: &str,
+        owner_subtask_id: &str,
+        generated_members: Vec<String>,
+    ) -> Reservation {
         Reservation::try_from_parts(
             ReservationId::parse("reservation-1").expect("valid reservation id"),
             SubtaskId::parse(owner_subtask_id).expect("valid subtask id"),
             scope_class,
             scope_key,
-            Vec::new(),
+            generated_members,
             LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
             ReservationState::Active,
             TimestampMs::parse(1).expect("valid timestamp"),
             TimestampMs::parse(1).expect("valid timestamp"),
         )
         .expect("valid reservation fixture")
+    }
+
+    fn claim_fixture() -> Claim {
+        Claim::try_from_parts(
+            ClaimId::parse("claim-1").expect("valid claim id"),
+            SubtaskId::parse("task-1").expect("valid subtask id"),
+            SessionToken::parse("session-1").expect("valid session token"),
+            FenceSeq::parse(7).expect("valid fence"),
+            LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
+            ClaimState::Held,
+            TimestampMs::parse(1).expect("valid timestamp"),
+            TimestampMs::parse(1).expect("valid timestamp"),
+        )
+        .expect("valid claim")
+    }
+
+    fn session_fixture() -> Session {
+        Session::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            "worker-1",
+            "worker-1-instance",
+            crate::model::SessionRole::Executor,
+            crate::model::SessionState::Active,
+            Some(SubtaskId::parse("task-1").expect("valid subtask id")),
+            TimestampMs::parse(1).expect("valid timestamp"),
+            1,
+            TimestampMs::parse(1).expect("valid timestamp"),
+            TimestampMs::parse(1).expect("valid timestamp"),
+        )
+        .expect("valid active session fixture")
     }
 
     #[test]
@@ -286,6 +543,60 @@ mod tests {
         assert_eq!(
             scope_patterns_for_reservation(&reservation(ScopeClass::RepoGlobal, "repo", "task-1")),
             vec!["**"]
+        );
+        assert_eq!(
+            scope_patterns_for_reservation(&reservation_with_members(
+                ScopeClass::GeneratedSet,
+                "generated",
+                "task-1",
+                vec!["./src/generated.rs".to_owned(), "src/other.rs".to_owned()]
+            )),
+            vec!["src/generated.rs".to_owned(), "src/other.rs".to_owned()]
+        );
+    }
+
+    #[test]
+    fn repo_relative_path_fast_path_matches_canonicalization_shape() {
+        assert!(repo_relative_path_is_normalized("src/lib.rs"));
+        assert_eq!(
+            normalize_repo_relative_path("src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+
+        for raw in ["./src/lib.rs", "/src/lib.rs", "src//lib.rs", "src/./lib.rs"] {
+            assert!(!repo_relative_path_is_normalized(raw));
+            assert_eq!(
+                normalize_repo_relative_path(raw).as_deref(),
+                Some("src/lib.rs")
+            );
+        }
+
+        assert!(!repo_relative_path_is_normalized("src/../lib.rs"));
+        assert_eq!(normalize_repo_relative_path("src/../lib.rs"), None);
+    }
+
+    #[test]
+    fn ownership_token_ref_preserves_blake3_token_shape() {
+        let expected = format!("covey-session-token-blake3:{}", blake3::hash(b"session-1"));
+        assert_eq!(ownership_token_ref("session-1").as_str(), expected);
+    }
+
+    #[test]
+    fn requested_path_single_fast_path_preserves_multi_path_dedup() {
+        let single = vec![RepoopsPath::parse("src/lib.rs").expect("valid repoops path")];
+        assert_eq!(
+            normalize_requested_paths(&single),
+            vec!["src/lib.rs".to_owned()]
+        );
+
+        let duplicate = vec![
+            RepoopsPath::parse("src/main.rs").expect("valid repoops path"),
+            RepoopsPath::parse("src/lib.rs").expect("valid repoops path"),
+            RepoopsPath::parse("src/main.rs").expect("valid repoops path"),
+        ];
+        assert_eq!(
+            normalize_requested_paths(&duplicate),
+            vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()]
         );
     }
 
@@ -332,6 +643,78 @@ mod tests {
                 .iter()
                 .any(|lock| lock.status() == RepoopsAuthorityLockStatus::ForeignOwner)
         );
+    }
+
+    #[test]
+    fn lock_facts_cover_prepared_subtree_and_generated_reservations() {
+        let claim = claim_fixture();
+        let session = session_fixture();
+        let reservations = vec![
+            reservation(ScopeClass::Subtree, "src", "task-1"),
+            reservation_with_members(
+                ScopeClass::GeneratedSet,
+                "generated",
+                "task-2",
+                vec!["./generated/out.rs".to_owned()],
+            ),
+        ];
+
+        let locks = lock_facts_for_paths(
+            &["src/lib.rs".to_owned(), "generated/out.rs".to_owned()],
+            &reservations,
+            &claim,
+            &session,
+        )
+        .expect("valid lock facts");
+
+        assert!(locks.iter().any(|lock| {
+            lock.path() == "src/lib.rs" && lock.status() == RepoopsAuthorityLockStatus::Owned
+        }));
+        assert!(locks.iter().any(|lock| {
+            lock.path() == "generated/out.rs"
+                && lock.status() == RepoopsAuthorityLockStatus::ForeignOwner
+        }));
+    }
+
+    #[test]
+    fn prepared_reservation_index_matches_nested_lock_facts() {
+        let claim = claim_fixture();
+        let session = session_fixture();
+        let reservations = vec![
+            reservation(ScopeClass::RepoGlobal, "repo", "task-3"),
+            reservation(ScopeClass::ExactPath, "./src/lib.rs", "task-1"),
+            reservation(ScopeClass::ExactPath, "src/lib.rs", "task-4"),
+            reservation(ScopeClass::Subtree, "src", "task-5"),
+            reservation_with_members(
+                ScopeClass::GeneratedSet,
+                "generated",
+                "task-1",
+                vec![
+                    "./generated/out.rs".to_owned(),
+                    "generated/other.rs".to_owned(),
+                ],
+            ),
+            reservation_with_members(
+                ScopeClass::GeneratedSet,
+                "generated",
+                "task-6",
+                vec!["generated/out.rs".to_owned(), "src/lib.rs".to_owned()],
+            ),
+        ];
+        let paths = vec![
+            "src/lib.rs".to_owned(),
+            "src/nested/mod.rs".to_owned(),
+            "generated/out.rs".to_owned(),
+            "unmatched/file.rs".to_owned(),
+        ];
+        let prepared = prepare_reservations(&reservations);
+
+        let indexed = lock_facts_for_prepared_paths(&paths, &prepared, &claim, &session)
+            .expect("indexed lock facts");
+        let nested = lock_facts_for_prepared_paths_nested(&paths, &prepared, &claim, &session)
+            .expect("nested lock facts");
+
+        assert_eq!(indexed, nested);
     }
 
     #[test]

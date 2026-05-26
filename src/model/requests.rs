@@ -1225,6 +1225,10 @@ impl RequestReservationReq {
     pub fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
     }
+
+    pub(crate) fn generated_member_strs(&self) -> impl Iterator<Item = &str> {
+        self.scope.generated_member_strs()
+    }
 }
 
 impl From<&RequestReservationReq> for RawRequestReservationReq {
@@ -1381,6 +1385,10 @@ impl OverlapQueryReq {
     pub fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
     }
+
+    pub(crate) fn generated_member_strs(&self) -> impl Iterator<Item = &str> {
+        self.scope.generated_member_strs()
+    }
 }
 
 impl From<&OverlapQueryReq> for RawOverlapQueryReq {
@@ -1493,9 +1501,9 @@ impl NonEmptyRepoopsPaths {
                 "must include at least one path",
             ));
         }
-        let mut seen = HashSet::with_capacity(paths.len());
+        let mut seen: HashSet<&str> = HashSet::with_capacity(paths.len());
         for path in &paths {
-            if !seen.insert(path.as_str().to_owned()) {
+            if !seen.insert(path.as_str()) {
                 return Err(CoveyTypeValidationError::new(
                     "paths",
                     "must not contain duplicate paths",

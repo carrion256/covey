@@ -2025,13 +2025,10 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
         );
     }
 
-    let seal_digest = ArtifactDigest::parse(format!(
-        "blake3:{}",
-        blake3_bytes(&canonical_json(&manifest))
-    ))
-    .map_err(|error| {
-        ApplyProofError::Verification(format!("generated seal_digest is invalid: {error}"))
-    })?;
+    let seal_digest = ArtifactDigest::parse(blake3_prefixed_bytes(&canonical_json(&manifest)))
+        .map_err(|error| {
+            ApplyProofError::Verification(format!("generated seal_digest is invalid: {error}"))
+        })?;
     insert_object(
         &mut manifest,
         "seal_digest",
@@ -2178,7 +2175,7 @@ pub fn verify_apply_proof_batch(args: ApplyProofBatchArgs) -> Result<u8, ApplyPr
         ("proof_count", Value::Number(results.len().into())),
         ("proofs", Value::Array(results)),
     ]);
-    let digest = format!("blake3:{}", blake3_bytes(&canonical_json(&aggregate)));
+    let digest = blake3_prefixed_bytes(&canonical_json(&aggregate));
     insert_object(&mut aggregate, "seal_digest", Value::String(digest.clone()));
     write_json_file(&output, &aggregate)?;
     println!(
@@ -2209,7 +2206,7 @@ pub fn emit_apply_proof_error(error: ApplyProofError, output: Option<&Path>) -> 
             ])]),
         ),
     ]);
-    let digest = format!("blake3:{}", blake3_bytes(&canonical_json(&manifest)));
+    let digest = blake3_prefixed_bytes(&canonical_json(&manifest));
     insert_object(&mut manifest, "seal_digest", Value::String(digest.clone()));
     if let Some(path) = output {
         let _ = write_json_file(path, &manifest);
@@ -2843,12 +2840,12 @@ fn verify_host_signed_runtime_claim(
     insert_object(
         &mut result,
         "payload_digest",
-        Value::String(format!("blake3:{}", blake3_bytes(&payload_bytes))),
+        Value::String(blake3_prefixed_bytes(&payload_bytes)),
     );
     insert_object(
         &mut result,
         "public_key_blake3",
-        Value::String(format!("blake3:{}", blake3_bytes(public_key.as_bytes()))),
+        Value::String(blake3_prefixed_bytes(public_key.as_bytes())),
     );
     Ok(result)
 }
@@ -3419,11 +3416,20 @@ fn blake3_file(path: &Path) -> Result<String, ApplyProofError> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+    Ok(blake3_prefixed_hash(hasher.finalize()))
 }
 
-fn blake3_bytes(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex().to_string()
+fn blake3_prefixed_bytes(bytes: &[u8]) -> String {
+    blake3_prefixed_hash(blake3::hash(bytes))
+}
+
+fn blake3_prefixed_hash(hash: blake3::Hash) -> String {
+    const PREFIX: &str = "blake3:";
+    let hex = hash.to_hex();
+    let mut digest = String::with_capacity(PREFIX.len() + hex.len());
+    digest.push_str(PREFIX);
+    digest.push_str(hex.as_str());
+    digest
 }
 
 fn write_json_file(path: &Path, value: &Value) -> Result<(), ApplyProofError> {

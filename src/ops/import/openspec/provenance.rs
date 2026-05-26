@@ -4,7 +4,7 @@ use crate::{
     error::Result,
     model::{
         EventType, ImportOpenSpecEvent, OpenSpecImportProvenance, OpenSpecImportProvenanceCommon,
-        TimestampMs,
+        TimestampMs, object_type_name,
     },
     store::append_session_event,
 };
@@ -118,7 +118,7 @@ pub(super) fn upsert_openspec_provenance_tx(
             updated_at = excluded.updated_at
         "#,
         params![
-            provenance.object_type().to_string(),
+            object_type_name(provenance.object_type()),
             provenance.object_id(),
             provenance.planning_format(),
             provenance.openspec_change_id(),

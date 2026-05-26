@@ -16,6 +16,42 @@ use crate::{
     validators::close_claim_and_detach,
 };
 
+#[inline]
+fn session_state_name(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Active => "active",
+        SessionState::Stale => "stale",
+        SessionState::Exited => "exited",
+    }
+}
+
+#[inline]
+fn subtask_state_name(state: SubtaskState) -> &'static str {
+    match state {
+        SubtaskState::Available => "available",
+        SubtaskState::Claimed => "claimed",
+        SubtaskState::InProgress => "in_progress",
+        SubtaskState::ArtifactPublished => "artifact_published",
+        SubtaskState::ReviewPending => "review_pending",
+        SubtaskState::Approved => "approved",
+        SubtaskState::ChangesRequested => "changes_requested",
+        SubtaskState::Blocked => "blocked",
+        SubtaskState::Decided => "decided",
+        SubtaskState::ReadyForApply => "ready_for_apply",
+        SubtaskState::Applied => "applied",
+        SubtaskState::Abandoned => "abandoned",
+    }
+}
+
+#[inline]
+fn reservation_state_name(state: ReservationState) -> &'static str {
+    match state {
+        ReservationState::Active => "active",
+        ReservationState::Released => "released",
+        ReservationState::Expired => "expired",
+    }
+}
+
 impl Covey {
     /// Marks sessions stale when their heartbeat age exceeds the provided threshold.
     pub fn reap_stale_sessions(&self, stale_threshold_ms: i64) -> Result<ReapResult> {
@@ -26,9 +62,9 @@ impl Covey {
             let stale_sessions = tx.execute(
                 "UPDATE sessions SET state = ?1, updated_at = ?2 WHERE state = ?3 AND last_heartbeat_tick <= ?4",
                 params![
-                    SessionState::Stale.to_string(),
+                    session_state_name(SessionState::Stale),
                     now,
-                    SessionState::Active.to_string(),
+                    session_state_name(SessionState::Active),
                     stale_before
                 ],
             )?;
@@ -41,9 +77,9 @@ impl Covey {
                     params![
                         claim.subtask_id,
                         claim.claim_id,
-                        SubtaskState::Claimed.to_string(),
-                        SubtaskState::InProgress.to_string(),
-                        SubtaskState::Available.to_string(),
+                        subtask_state_name(SubtaskState::Claimed),
+                        subtask_state_name(SubtaskState::InProgress),
+                        subtask_state_name(SubtaskState::Available),
                         now
                     ],
                 )?;
@@ -84,9 +120,9 @@ impl Covey {
                     params![
                         claim.subtask_id,
                         claim.claim_id,
-                        SubtaskState::Claimed.to_string(),
-                        SubtaskState::InProgress.to_string(),
-                        SubtaskState::Available.to_string(),
+                        subtask_state_name(SubtaskState::Claimed),
+                        subtask_state_name(SubtaskState::InProgress),
+                        subtask_state_name(SubtaskState::Available),
                         now
                     ],
                 )?;
@@ -122,9 +158,9 @@ impl Covey {
             let expired = tx.execute(
                 "UPDATE reservations SET state = ?1, updated_at = ?2 WHERE state = ?3 AND lease_deadline <= ?4",
                 params![
-                    ReservationState::Expired.to_string(),
+                    reservation_state_name(ReservationState::Expired),
                     now,
-                    ReservationState::Active.to_string(),
+                    reservation_state_name(ReservationState::Active),
                     lease_now
                 ],
             )?;

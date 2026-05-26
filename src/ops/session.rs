@@ -7,7 +7,8 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         EventType, ExitSessionReq, HeartbeatReq, ObjectType, RecordRuntimeAttestationReq,
-        RegisterSessionReq, RuntimeAttestation, SessionHandle, SessionState, TimestampMs,
+        RegisterSessionReq, RuntimeAttestation, SessionHandle, SessionRole, SessionState,
+        TimestampMs, session_state_name,
     },
     queries::{load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
@@ -17,6 +18,15 @@ use crate::{
         ensure_non_empty, ensure_transition, require_active_session, require_session,
     },
 };
+
+const fn session_role_name(role: SessionRole) -> &'static str {
+    match role {
+        SessionRole::Executor => "executor",
+        SessionRole::Orchestrator => "orchestrator",
+        SessionRole::ApplyGate => "apply_gate",
+        SessionRole::Reviewer => "reviewer",
+    }
+}
 
 impl Covey {
     /// Registers a new session or refreshes an already-active session with the same identity.
@@ -55,14 +65,14 @@ impl Covey {
                             session_token,
                             req.agent_principal_id.as_str(),
                             req.agent_instance_id.as_str(),
-                            req.role.to_string(),
-                            SessionState::Active.to_string(),
+                            session_role_name(req.role),
+                            session_state_name(SessionState::Active),
                             now,
                             lease_now,
                         ],
                     )?;
                     let handle = SessionHandle::new(
-                        session_token.clone(),
+                        session_token,
                         req.agent_principal_id().to_owned(),
                         req.agent_instance_id().to_owned(),
                         req.role,
@@ -71,8 +81,8 @@ impl Covey {
                         tx,
                         EventType::SessionRegistered,
                         ObjectType::Session,
-                        &session_token,
-                        &session_token,
+                        handle.session_token(),
+                        handle.session_token(),
                         &handle,
                         now,
                     )?;
@@ -106,12 +116,11 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     let session = require_active_session(tx, &req.session_token)?;
-                    let session_token = session.session_token.clone();
-                    validate_runtime_attestation_req(&req, &session_token)?;
+                    validate_runtime_attestation_req(&req, &session.session_token)?;
                     let attestation = RuntimeAttestation::try_from_parts(
-                        session.session_token.clone(),
-                        session.agent_principal_id.clone(),
-                        session.agent_instance_id.clone(),
+                        session.session_token,
+                        session.agent_principal_id,
+                        session.agent_instance_id,
                         session.role,
                         req.provider.clone(),
                         req.model.clone(),
@@ -126,7 +135,7 @@ impl Covey {
                     )
                     .map_err(|reason| {
                         CoveyError::InvalidRuntimeAttestation {
-                            session_token: session_token.clone(),
+                            session_token: req.session_token.clone(),
                             reason,
                         }
                     })?;
@@ -143,7 +152,7 @@ impl Covey {
                             attestation.session_token.as_str(),
                             attestation.agent_principal_id.as_str(),
                             attestation.agent_instance_id.as_str(),
-                            attestation.role.to_string(),
+                            session_role_name(attestation.role),
                             attestation.provider.as_str(),
                             attestation.model.as_str(),
                             attestation
@@ -253,10 +262,10 @@ impl Covey {
                         "UPDATE sessions SET state = ?2, active_subtask_id = NULL, updated_at = ?3 WHERE session_token = ?1 AND state IN (?4, ?5)",
                         params![
                             req.session_token.as_str(),
-                            SessionState::Exited.to_string(),
+                            session_state_name(SessionState::Exited),
                             now,
-                            SessionState::Active.to_string(),
-                            SessionState::Stale.to_string()
+                            session_state_name(SessionState::Active),
+                            session_state_name(SessionState::Stale)
                         ],
                     )?;
                     if updated != 1 {
@@ -330,8 +339,8 @@ impl Covey {
                 "#,
                 params![
                     agent_principal_id,
-                    role.to_string(),
-                    SessionState::Active.to_string()
+                    session_role_name(role),
+                    session_state_name(SessionState::Active)
                 ],
                 |row| {
                     crate::model::SessionHandle::try_from_raw_parts(

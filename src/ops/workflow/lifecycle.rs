@@ -10,12 +10,13 @@ use crate::{
     model::{
         AbandonSubtaskReq, ClaimNextReq, ClaimResult, ClaimState, ClaimSubtaskReq,
         CreateSubtaskRequest, EventType, ObjectType, ReviewState, Session, SessionRole,
-        SessionState, StartSubtaskReq, SubtaskId, SubtaskKind, SubtaskState,
+        SessionState, StartSubtaskReq, SubtaskId, SubtaskKind, SubtaskState, claim_state_name,
+        review_state_name, session_state_name, subtask_kind_name, subtask_state_name,
     },
     queries::load_subtask_tx,
     schema::advance_lease_clock,
     store::{
-        append_session_event, expire_claim_if_needed_for_subtask, ordered_claim_candidates,
+        append_session_event, expire_claim_if_needed_for_subtask, ordered_claim_candidate,
         refresh_meta_task_state, subtask_dependencies_satisfied,
     },
     validators::{
@@ -87,36 +88,35 @@ impl Covey {
                         }
                     };
 
-                    let candidates = ordered_claim_candidates(
+                    let Some(subtask_id) = ordered_claim_candidate(
                         tx,
                         kind,
                         candidate_state,
                         req.meta_task_id.as_deref(),
                         now,
-                    )?;
-                    for subtask_id in candidates {
-                        match claim_selected_subtask_tx(
-                            tx,
-                            &session,
-                            req.session_token.as_str(),
-                            &subtask_id,
-                            req.lease_duration_ms,
-                            lease_now,
-                            now,
-                        ) {
-                            Ok(result) => return Ok(Some(result)),
-                            Err(CoveyError::SubtaskAlreadyClaimed { .. }) => continue,
-                            Err(CoveyError::IllegalTransition { to, object, .. })
-                                if to == SubtaskState::Claimed.into()
-                                    && object == ObjectType::Subtask =>
-                            {
-                                continue;
-                            }
-                            Err(err) => return Err(err),
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    match claim_selected_subtask_tx(
+                        tx,
+                        &session,
+                        req.session_token.as_str(),
+                        &subtask_id,
+                        req.lease_duration_ms,
+                        lease_now,
+                        now,
+                    ) {
+                        Ok(result) => Ok(Some(result)),
+                        Err(CoveyError::SubtaskAlreadyClaimed { .. }) => Ok(None),
+                        Err(CoveyError::IllegalTransition { to, object, .. })
+                            if to == SubtaskState::Claimed.into()
+                                && object == ObjectType::Subtask =>
+                        {
+                            Ok(None)
                         }
+                        Err(err) => Err(err),
                     }
-
-                    Ok(None)
                 },
             )
         });
@@ -229,9 +229,9 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4",
                         params![
                             subtask.subtask_id,
-                            SubtaskState::InProgress.to_string(),
+                            subtask_state_name(SubtaskState::InProgress),
                             now,
-                            subtask.state().to_string()
+                            subtask_state_name(subtask.state())
                         ],
                     )?;
                     if updated != 1 {
@@ -263,10 +263,10 @@ impl Covey {
                                 "UPDATE reviews SET state = ?2, reviewer_session = ?3, updated_at = ?4 WHERE review_subtask_id = ?1 AND state = ?5",
                                 params![
                                     subtask.subtask_id,
-                                    ReviewState::InProgress.to_string(),
+                                    review_state_name(ReviewState::InProgress),
                                     req.session_token.as_str(),
                                     now,
-                                    review_state.to_string()
+                                    review_state_name(review_state)
                                 ],
                             )?;
                         }
@@ -332,7 +332,7 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, current_claim_id = NULL, updated_at = ?3 WHERE subtask_id = ?1 AND current_claim_id = ?4",
                         params![
                             subtask.subtask_id,
-                            SubtaskState::Abandoned.to_string(),
+                            subtask_state_name(SubtaskState::Abandoned),
                             now,
                             claim.claim_id
                         ],
@@ -402,7 +402,7 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, current_claim_id = NULL, updated_at = ?3 WHERE subtask_id = ?1 AND current_claim_id = ?4",
                         params![
                             subtask.subtask_id,
-                            next_state.to_string(),
+                            subtask_state_name(next_state),
                             now,
                             claim.claim_id
                         ],
@@ -467,7 +467,7 @@ impl Covey {
                             req.claim_id,
                             renewed_deadline,
                             now,
-                            ClaimState::Held.to_string(),
+                            claim_state_name(ClaimState::Held),
                             req.session_token.as_str(),
                             req.fence_seq
                         ],
@@ -480,8 +480,8 @@ impl Covey {
                         });
                     }
                     let result = ClaimResult::new(
-                        claim.claim_id.clone(),
-                        claim.subtask_id.clone(),
+                        claim.claim_id,
+                        claim.subtask_id,
                         claim.fence_seq,
                         crate::model::LeaseDeadlineMs::parse(renewed_deadline)?,
                     );
@@ -554,7 +554,7 @@ fn claim_selected_subtask_tx(
             session_token,
             fence_seq,
             lease_deadline,
-            ClaimState::Held.to_string(),
+            claim_state_name(ClaimState::Held),
             now
         ],
     )?;
@@ -563,10 +563,10 @@ fn claim_selected_subtask_tx(
         "UPDATE subtasks SET state = ?2, current_claim_id = ?3, artifact_digest = NULL, updated_at = ?4 WHERE subtask_id = ?1 AND state = ?5 AND current_claim_id IS NULL",
         params![
             subtask_id,
-            SubtaskState::Claimed.to_string(),
+            subtask_state_name(SubtaskState::Claimed),
             claim_id,
             now,
-            subtask.state().to_string()
+            subtask_state_name(subtask.state())
         ],
     )?;
     if subtask_updated != 1 {
@@ -584,7 +584,7 @@ fn claim_selected_subtask_tx(
             session_token,
             subtask_id,
             now,
-            SessionState::Active.to_string()
+            session_state_name(SessionState::Active)
         ],
     )?;
     if session_updated != 1 {
@@ -601,7 +601,7 @@ fn claim_selected_subtask_tx(
 
     let result = ClaimResult::new(
         crate::model::ClaimId::parse(claim_id)?,
-        crate::model::SubtaskId::parse(subtask_id)?,
+        subtask.subtask_id,
         fence_seq,
         lease_deadline,
     );
@@ -650,10 +650,10 @@ pub(crate) fn create_subtask_tx(
             subtask_id.as_str(),
             req.meta_task_id.as_str(),
             req.title.as_str(),
-            SubtaskKind::Work.to_string(),
+            subtask_kind_name(SubtaskKind::Work),
             Option::<String>::None,
             Option::<String>::None,
-            SubtaskState::Available.to_string(),
+            subtask_state_name(SubtaskState::Available),
             req.priority.get(),
             now,
         ],
@@ -672,5 +672,5 @@ pub(crate) fn create_subtask_tx(
         now,
     )?;
     refresh_meta_task_state(tx, req.meta_task_id.as_str(), now)?;
-    Ok(subtask_id.to_string())
+    Ok(String::from(subtask_id))
 }

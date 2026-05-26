@@ -8,9 +8,10 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimState, DecideReviewReq, EventType, FailedReviewVerdict, ObjectType,
+        ArtifactKind, ClaimState, DecideReviewReq, EventType, FailedReviewVerdict, ObjectType,
         PublishArtifactReq, ReviewDecisionResult, ReviewState, ReviewVerdict, SessionRole,
-        SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle,
+        SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle, review_state_name, review_verdict_name,
+        subtask_kind_name, subtask_state_name,
     },
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
@@ -24,6 +25,16 @@ use crate::{
         subtask_exists,
     },
 };
+
+const fn artifact_kind_name(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::PatchBundle => "patch_bundle",
+        ArtifactKind::IsolatedCommitRef => "isolated_commit_ref",
+        ArtifactKind::TreeBundle => "tree_bundle",
+        ArtifactKind::FindingsBundle => "findings_bundle",
+        ArtifactKind::VerificationBundle => "verification_bundle",
+    }
+}
 
 impl Covey {
     /// Publishes an immutable artifact for a work subtask.
@@ -78,7 +89,7 @@ impl Covey {
                         "#,
                         params![
                             req.artifact_digest,
-                            req.artifact_kind.to_string(),
+                            artifact_kind_name(req.artifact_kind),
                             req.base_rev,
                             subtask.subtask_id,
                             req.session_token,
@@ -97,11 +108,11 @@ impl Covey {
                         "#,
                         params![
                             subtask.subtask_id,
-                            ReviewState::Superseded.to_string(),
+                            review_state_name(ReviewState::Superseded),
                             now,
                             req.artifact_digest,
-                            ReviewState::Requested.to_string(),
-                            ReviewState::InProgress.to_string()
+                            review_state_name(ReviewState::Requested),
+                            review_state_name(ReviewState::InProgress)
                         ],
                     )?;
                     let updated = tx.execute(
@@ -115,9 +126,9 @@ impl Covey {
                         params![
                             subtask.subtask_id,
                             req.artifact_digest,
-                            SubtaskState::ArtifactPublished.to_string(),
+                            subtask_state_name(SubtaskState::ArtifactPublished),
                             now,
-                            subtask.state().to_string()
+                            subtask_state_name(subtask.state())
                         ],
                     )?;
                     if updated != 1 {
@@ -214,10 +225,10 @@ impl Covey {
                             review_subtask_id.as_str(),
                             subtask.meta_task_id,
                             format!("review {}", req.artifact_digest),
-                            SubtaskKind::Review.to_string(),
+                            subtask_kind_name(SubtaskKind::Review),
                             req.subtask_id.as_str(),
                             req.artifact_digest.as_str(),
-                            SubtaskState::Available.to_string(),
+                            subtask_state_name(SubtaskState::Available),
                             req.priority.get(),
                             now
                         ],
@@ -240,7 +251,7 @@ impl Covey {
                             req.artifact_digest.as_str(),
                             req.session_token.as_str(),
                             review_subtask_id,
-                            ReviewState::Requested.to_string(),
+                            review_state_name(ReviewState::Requested),
                             now
                         ],
                     )?;
@@ -248,9 +259,9 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4 AND artifact_digest = ?5",
                         params![
                             req.subtask_id,
-                            SubtaskState::ReviewPending.to_string(),
+                            subtask_state_name(SubtaskState::ReviewPending),
                             now,
-                            subtask.state().to_string(),
+                            subtask_state_name(subtask.state()),
                             req.artifact_digest.as_str()
                         ],
                     )?;
@@ -318,11 +329,11 @@ impl Covey {
                         lease_now,
                     )?;
                     let review = load_review_tx(tx, &req.review_id)?;
-                    let review_subtask_id = review.review_subtask_id().to_owned();
-                    if claim.subtask_id != review_subtask_id {
+                    let review_subtask_id = review.review_subtask_id();
+                    if claim.subtask_id.as_str() != review_subtask_id {
                         return Err(CoveyError::FenceTokenMismatch);
                     }
-                    let review_subtask = load_subtask_tx(tx, &review_subtask_id)?;
+                    let review_subtask = load_subtask_tx(tx, review_subtask_id)?;
                     ensure_meta_task_is_schedulable(tx, &review_subtask.meta_task_id)?;
                     require_session_can_claim_kind(&session, review_subtask.kind())?;
                     let artifact = load_artifact_tx(tx, review.artifact_digest())?;
@@ -367,11 +378,11 @@ impl Covey {
                         params![
                             req.review_id,
                             req.session_token,
-                            req.verdict.to_string(),
+                            review_verdict_name(req.verdict),
                             req.findings_digest.as_str(),
-                            ReviewState::Decided.to_string(),
+                            review_state_name(ReviewState::Decided),
                             now,
-                            review.state().to_string()
+                            review_state_name(review.state())
                         ],
                     )?;
                     if review_updated != 1 {
@@ -390,10 +401,10 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, current_claim_id = NULL, updated_at = ?3 WHERE subtask_id = ?1 AND current_claim_id = ?4 AND state = ?5",
                         params![
                             review_subtask_id,
-                            SubtaskState::Decided.to_string(),
+                            subtask_state_name(SubtaskState::Decided),
                             now,
                             claim.claim_id,
-                            review_subtask.state().to_string()
+                            subtask_state_name(review_subtask.state())
                         ],
                     )?;
                     if subtask_updated != 1 {
@@ -416,10 +427,10 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
                         params![
                             review.subtask_id(),
-                            work_state.to_string(),
+                            subtask_state_name(work_state),
                             now,
                             review.artifact_digest(),
-                            work_subtask.state().to_string()
+                            subtask_state_name(work_subtask.state())
                         ],
                     )?;
                     if work_updated != 1 {
@@ -511,8 +522,8 @@ fn create_review_followup_subtask_tx(
             followup_subtask_id.as_str(),
             source_subtask.meta_task_id.as_str(),
             title.as_str(),
-            SubtaskKind::Work.to_string(),
-            SubtaskState::Available.to_string(),
+            subtask_kind_name(SubtaskKind::Work),
+            subtask_state_name(SubtaskState::Available),
             source_subtask.priority.get(),
             now,
         ],

@@ -2207,10 +2207,6 @@ impl<'de> Deserialize<'de> for RepoopsAuthorityScopeFact {
 pub struct RepoopsScopePattern(String);
 
 impl RepoopsScopePattern {
-    fn parse(value: impl Into<String>) -> Result<Self, String> {
-        Self::try_from(value.into())
-    }
-
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -2221,15 +2217,7 @@ impl TryFrom<String> for RepoopsScopePattern {
     type Error = String;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.trim().is_empty() {
-            return Err("patterns must not be empty".to_owned());
-        }
-        if value.trim() != value {
-            return Err("patterns must be normalized".to_owned());
-        }
-        if value.chars().any(char::is_control) {
-            return Err("patterns must not contain control characters".to_owned());
-        }
+        validate_repoops_scope_pattern(&value)?;
         Ok(Self(value))
     }
 }
@@ -2250,10 +2238,9 @@ fn parse_repoops_scope_patterns(
     label: &str,
     patterns: Vec<String>,
 ) -> Result<Vec<RepoopsScopePattern>, String> {
-    let mut seen = HashSet::with_capacity(patterns.len());
-    let mut parsed = Vec::with_capacity(patterns.len());
-    for pattern in patterns {
-        let pattern = RepoopsScopePattern::parse(pattern).map_err(|reason| {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(patterns.len());
+    for pattern in &patterns {
+        validate_repoops_scope_pattern(pattern).map_err(|reason| {
             if reason == "patterns must not be empty" {
                 format!("{label} patterns must not be empty")
             } else if reason == "patterns must be normalized" {
@@ -2262,12 +2249,25 @@ fn parse_repoops_scope_patterns(
                 format!("{label} {reason}")
             }
         })?;
-        if !seen.insert(pattern.to_string()) {
+        if !seen.insert(pattern.as_str()) {
             return Err(format!("{label} patterns must not contain duplicates"));
         }
-        parsed.push(pattern);
     }
+    let parsed = patterns.into_iter().map(RepoopsScopePattern).collect();
     Ok(parsed)
+}
+
+fn validate_repoops_scope_pattern(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err("patterns must not be empty".to_owned());
+    }
+    if value.trim() != value {
+        return Err("patterns must be normalized".to_owned());
+    }
+    if value.chars().any(char::is_control) {
+        return Err("patterns must not contain control characters".to_owned());
+    }
+    Ok(())
 }
 
 /// Path ownership fact passed through to mutAI repoops preflight.
@@ -2887,12 +2887,6 @@ impl RepoopsAuthoritySnapshotSchemaVersion {
 }
 
 impl RepoopsAuthorityFactSource {
-    fn parse(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        validate_repoops_token_ref("repoops authority snapshot fact_sources", &value)?;
-        Ok(Self(value))
-    }
-
     fn as_str(&self) -> &str {
         &self.0
     }
@@ -2900,15 +2894,14 @@ impl RepoopsAuthorityFactSource {
 
 impl RepoopsAuthorityFactSources {
     fn parse(values: Vec<String>) -> Result<Self, String> {
-        let mut seen = HashSet::with_capacity(values.len());
-        let mut parsed = Vec::with_capacity(values.len());
-        for value in values {
-            let source = RepoopsAuthorityFactSource::parse(value)?;
-            if !seen.insert(source.as_str().to_owned()) {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(values.len());
+        for value in &values {
+            validate_repoops_token_ref("repoops authority snapshot fact_sources", value)?;
+            if !seen.insert(value.as_str()) {
                 return Err("repoops authority snapshot fact_sources must be unique".into());
             }
-            parsed.push(source);
         }
+        let parsed = values.into_iter().map(RepoopsAuthorityFactSource).collect();
         Ok(Self(parsed))
     }
 

@@ -18,7 +18,8 @@ use crate::{
     model::{
         Claim, ClaimState, EventType, LeaseDeadlineMs, LeaseDurationMs, MetaTaskState, ObjectType,
         ReadyQueueClaim, ReadyQueueState, ReviewState, SessionState, SubtaskKind, SubtaskState,
-        TimestampMs,
+        TimestampMs, claim_state_name, meta_task_state_name, ready_queue_state_name,
+        review_state_name, session_state_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_meta_task_tx, load_mutation_idempotency_record_tx,
@@ -244,139 +245,253 @@ fn redact_session_token(session_token: &str) -> String {
     if session_token == "system" || session_token == SYSTEM_EVENT_SESSION_TOKEN {
         return "system".to_owned();
     }
-    let suffix_len = session_token.chars().count().min(8);
-    let suffix: String = session_token
-        .chars()
+    let suffix_start = session_token
+        .char_indices()
         .rev()
-        .take(suffix_len)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("session:{suffix}")
+        .nth(7)
+        .map_or(0, |(index, _)| index);
+    let suffix = &session_token[suffix_start..];
+    let mut redacted = String::with_capacity("session:".len() + suffix.len());
+    redacted.push_str("session:");
+    redacted.push_str(suffix);
+    redacted
 }
 
 fn hash_request<T: Serialize>(request: &T) -> Result<String> {
-    let serialized = serde_json::to_vec(request)?;
-    Ok(blake3::hash(&serialized).to_hex().to_string())
+    let mut hasher = blake3::Hasher::new();
+    serde_json::to_writer(&mut hasher, request)?;
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
-pub(crate) fn ordered_claim_candidates(
+pub(crate) fn ordered_claim_candidate(
     tx: &Transaction<'_>,
     kind: SubtaskKind,
     candidate_state: SubtaskState,
     meta_task_id: Option<&str>,
     now: i64,
-) -> Result<Vec<String>> {
+) -> Result<Option<String>> {
     match kind {
         SubtaskKind::Work => {
-            let mut stmt = tx.prepare(
-                r#"
-                SELECT s.subtask_id
-                FROM subtasks s
-                JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
-                WHERE s.kind = ?1
-                  AND s.state = ?2
-                  AND m.state NOT IN (?3, ?4)
-                  AND (?6 IS NULL OR s.meta_task_id = ?6)
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM subtask_dependencies d
-                      JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
-                      WHERE d.subtask_id = s.subtask_id
-                        AND dep.state NOT IN (?7, ?8, ?9, ?10)
-                  )
-                ORDER BY
-                    MAX(
-                        s.priority - MIN(MAX(?5 - s.created_at, 0) / 30000, s.priority),
-                        0
-                    ) ASC,
-                    s.priority ASC,
-                    s.created_at ASC
-                "#,
-            )?;
-            let rows = stmt.query_map(
-                params![
-                    kind.to_string(),
-                    candidate_state.to_string(),
-                    MetaTaskState::Completed.to_string(),
-                    MetaTaskState::Cancelled.to_string(),
-                    now,
-                    meta_task_id,
-                    SubtaskState::Approved.to_string(),
-                    SubtaskState::ReadyForApply.to_string(),
-                    SubtaskState::Applied.to_string(),
-                    SubtaskState::Decided.to_string()
-                ],
-                |row| row.get::<_, String>(0),
-            )?;
-            collect_rows(rows)
+            if let Some(meta_task_id) = meta_task_id {
+                if !meta_task_is_claimable(tx, meta_task_id)? {
+                    return Ok(None);
+                }
+                let mut stmt = tx.prepare(
+                    r#"
+                    SELECT s.subtask_id
+                    FROM subtasks s
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND s.meta_task_id = ?4
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM subtask_dependencies d
+                          JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+                          WHERE d.subtask_id = s.subtask_id
+                            AND dep.state NOT IN (?5, ?6, ?7, ?8)
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM review_followup_subtasks f
+                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
+                                WHERE f.source_subtask_id = dep.subtask_id
+                                  AND followup.state IN (?5, ?6, ?7, ?8)
+                            )
+                      )
+                    ORDER BY
+                        MAX(
+                            s.priority - MIN(MAX(?3 - s.created_at, 0) / 30000, s.priority),
+                            0
+                        ) ASC,
+                        s.priority ASC,
+                        s.created_at ASC
+                    LIMIT 1
+                    "#,
+                )?;
+                stmt.query_row(
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(candidate_state),
+                        now,
+                        meta_task_id,
+                        subtask_state_name(SubtaskState::Approved),
+                        subtask_state_name(SubtaskState::ReadyForApply),
+                        subtask_state_name(SubtaskState::Applied),
+                        subtask_state_name(SubtaskState::Decided)
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Into::into)
+            } else {
+                let mut stmt = tx.prepare(
+                    r#"
+                    SELECT s.subtask_id
+                    FROM subtasks s
+                    JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND m.state NOT IN (?3, ?4)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM subtask_dependencies d
+                          JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+                          WHERE d.subtask_id = s.subtask_id
+                            AND dep.state NOT IN (?6, ?7, ?8, ?9)
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM review_followup_subtasks f
+                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
+                                WHERE f.source_subtask_id = dep.subtask_id
+                                  AND followup.state IN (?6, ?7, ?8, ?9)
+                            )
+                      )
+                    ORDER BY
+                        MAX(
+                            s.priority - MIN(MAX(?5 - s.created_at, 0) / 30000, s.priority),
+                            0
+                        ) ASC,
+                        s.priority ASC,
+                        s.created_at ASC
+                    LIMIT 1
+                    "#,
+                )?;
+                stmt.query_row(
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(candidate_state),
+                        meta_task_state_name(MetaTaskState::Completed),
+                        meta_task_state_name(MetaTaskState::Cancelled),
+                        now,
+                        subtask_state_name(SubtaskState::Approved),
+                        subtask_state_name(SubtaskState::ReadyForApply),
+                        subtask_state_name(SubtaskState::Applied),
+                        subtask_state_name(SubtaskState::Decided)
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Into::into)
+            }
         }
         SubtaskKind::Review => {
-            let mut stmt = tx.prepare(
-                r#"
-                SELECT s.subtask_id
-                FROM subtasks s
-                JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
-                WHERE s.kind = ?1
-                  AND s.state = ?2
-                  AND m.state NOT IN (?3, ?4)
-                  AND (?5 IS NULL OR s.meta_task_id = ?5)
-                ORDER BY s.priority ASC, s.created_at ASC
-                "#,
-            )?;
-            let rows = stmt.query_map(
-                params![
-                    kind.to_string(),
-                    candidate_state.to_string(),
-                    MetaTaskState::Completed.to_string(),
-                    MetaTaskState::Cancelled.to_string(),
-                    meta_task_id
-                ],
-                |row| row.get::<_, String>(0),
-            )?;
-            collect_rows(rows)
+            if let Some(meta_task_id) = meta_task_id {
+                if !meta_task_is_claimable(tx, meta_task_id)? {
+                    return Ok(None);
+                }
+                let mut stmt = tx.prepare(
+                    r#"
+                    SELECT s.subtask_id
+                    FROM subtasks s
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND s.meta_task_id = ?3
+                    ORDER BY s.priority ASC, s.created_at ASC
+                    LIMIT 1
+                    "#,
+                )?;
+                stmt.query_row(
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(candidate_state),
+                        meta_task_id
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Into::into)
+            } else {
+                let mut stmt = tx.prepare(
+                    r#"
+                    SELECT s.subtask_id
+                    FROM subtasks s
+                    JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND m.state NOT IN (?3, ?4)
+                    ORDER BY s.priority ASC, s.created_at ASC
+                    LIMIT 1
+                    "#,
+                )?;
+                stmt.query_row(
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(candidate_state),
+                        meta_task_state_name(MetaTaskState::Completed),
+                        meta_task_state_name(MetaTaskState::Cancelled)
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Into::into)
+            }
         }
     }
+}
+
+fn meta_task_is_claimable(tx: &Transaction<'_>, meta_task_id: &str) -> Result<bool> {
+    let state = tx
+        .query_row(
+            "SELECT state FROM meta_tasks WHERE meta_task_id = ?1",
+            params![meta_task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(!matches!(
+        state.as_deref(),
+        None | Some("completed") | Some("cancelled")
+    ))
 }
 
 pub(crate) fn subtask_dependencies_satisfied(
     tx: &Transaction<'_>,
     subtask_id: &str,
 ) -> Result<bool> {
-    let unsatisfied = tx.query_row(
+    let has_unsatisfied = tx.query_row(
         r#"
-        SELECT COUNT(*)
-        FROM subtask_dependencies d
-        JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
-        WHERE d.subtask_id = ?1
-          AND dep.state NOT IN (?2, ?3, ?4, ?5)
+        SELECT EXISTS (
+            SELECT 1
+            FROM subtask_dependencies d
+            JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+            WHERE d.subtask_id = ?1
+              AND dep.state NOT IN (?2, ?3, ?4, ?5)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM review_followup_subtasks f
+                  JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
+                  WHERE f.source_subtask_id = dep.subtask_id
+                    AND followup.state IN (?2, ?3, ?4, ?5)
+              )
+            LIMIT 1
+        )
         "#,
         params![
             subtask_id,
-            SubtaskState::Approved.to_string(),
-            SubtaskState::ReadyForApply.to_string(),
-            SubtaskState::Applied.to_string(),
-            SubtaskState::Decided.to_string()
+            subtask_state_name(SubtaskState::Approved),
+            subtask_state_name(SubtaskState::ReadyForApply),
+            subtask_state_name(SubtaskState::Applied),
+            subtask_state_name(SubtaskState::Decided)
         ],
         |row| row.get::<_, i64>(0),
     )?;
-    Ok(unsatisfied == 0)
+    Ok(has_unsatisfied == 0)
 }
 
-pub(crate) fn ordered_ready_queue_candidates(tx: &Transaction<'_>) -> Result<Vec<String>> {
+pub(crate) fn ordered_ready_queue_candidate(tx: &Transaction<'_>) -> Result<Option<String>> {
     let mut stmt = tx.prepare(
         r#"
         SELECT queue_id
         FROM ready_queue
         WHERE state = ?1
         ORDER BY enqueued_at ASC
+        LIMIT 1
         "#,
     )?;
-    let rows = stmt.query_map(params![ReadyQueueState::Queued.to_string()], |row| {
-        row.get::<_, String>(0)
-    })?;
-    collect_rows(rows)
+    stmt.query_row(
+        params![ready_queue_state_name(ReadyQueueState::Queued)],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub(crate) fn refresh_meta_task_state(
@@ -389,30 +504,28 @@ pub(crate) fn refresh_meta_task_state(
         return Ok(());
     }
 
-    let subtask_count = tx.query_row(
-        "SELECT COUNT(*) FROM subtasks WHERE meta_task_id = ?1",
+    let has_subtasks = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM subtasks WHERE meta_task_id = ?1 LIMIT 1)",
         params![meta_task_id],
         |row| row.get::<_, i64>(0),
     )?;
-    let desired_state = if subtask_count == 0 {
+    let desired_state = if has_subtasks == 0 {
         MetaTaskState::Planning
     } else {
-        let open_subtask_count = tx.query_row(
+        let has_open_subtasks = tx.query_row(
             r#"
-            SELECT COUNT(*)
-            FROM subtasks
-            WHERE meta_task_id = ?1
-              AND state NOT IN (?2, ?3, ?4)
+            SELECT EXISTS(
+                SELECT 1
+                FROM subtasks
+                WHERE meta_task_id = ?1
+                  AND state NOT IN ('applied', 'abandoned', 'decided')
+                LIMIT 1
+            )
             "#,
-            params![
-                meta_task_id,
-                SubtaskState::Applied.to_string(),
-                SubtaskState::Abandoned.to_string(),
-                SubtaskState::Decided.to_string()
-            ],
+            params![meta_task_id],
             |row| row.get::<_, i64>(0),
         )?;
-        if open_subtask_count == 0 {
+        if has_open_subtasks == 0 {
             MetaTaskState::Completed
         } else {
             MetaTaskState::Active
@@ -424,9 +537,9 @@ pub(crate) fn refresh_meta_task_state(
             "UPDATE meta_tasks SET state = ?2, updated_at = ?3 WHERE meta_task_id = ?1 AND state != ?4",
             params![
                 meta_task_id,
-                desired_state.to_string(),
+                meta_task_state_name(desired_state),
                 now,
-                MetaTaskState::Cancelled.to_string()
+                meta_task_state_name(MetaTaskState::Cancelled)
             ],
         )?;
     }
@@ -438,36 +551,68 @@ pub(crate) fn requeue_stale_ready_queue_claims(
     lease_now: i64,
     now: i64,
 ) -> Result<()> {
+    let mut candidates = Vec::new();
     let mut stmt = tx.prepare(
         r#"
-        SELECT q.queue_id
-        FROM ready_queue q
-        LEFT JOIN sessions s ON s.session_token = q.claimed_by_session_token
-        WHERE q.state = ?1
-          AND (
-                q.claim_lease_deadline <= ?2
-                OR s.state != ?3
-                OR s.session_token IS NULL
-              )
-        ORDER BY q.enqueued_at ASC
+        SELECT queue_id, enqueued_at
+        FROM ready_queue
+        WHERE state = ?1 AND claim_lease_deadline <= ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![ready_queue_state_name(ReadyQueueState::InFlight), lease_now],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    candidates.extend(collect_rows(rows)?);
+
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT q.queue_id, q.enqueued_at
+        FROM sessions s
+        JOIN ready_queue q INDEXED BY idx_ready_queue_inflight_claimant_enqueued
+          ON q.claimed_by_session_token = s.session_token
+         AND q.state = 'in_flight'
+        WHERE s.state IN (?1, ?2)
         "#,
     )?;
     let rows = stmt.query_map(
         params![
-            ReadyQueueState::InFlight.to_string(),
-            lease_now,
-            SessionState::Active.to_string()
+            session_state_name(SessionState::Stale),
+            session_state_name(SessionState::Exited)
         ],
-        |row| row.get::<_, String>(0),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
     )?;
-    for queue_id in collect_rows(rows)? {
+    candidates.extend(collect_rows(rows)?);
+
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT q.queue_id, q.enqueued_at
+        FROM ready_queue q INDEXED BY idx_ready_queue_inflight_claimant_enqueued
+        LEFT JOIN sessions s ON s.session_token = q.claimed_by_session_token
+        WHERE q.state = 'in_flight'
+          AND s.session_token IS NULL
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    candidates.extend(collect_rows(rows)?);
+
+    if candidates.len() > 1 {
+        candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        candidates.dedup_by(|left, right| left.0 == right.0);
+        candidates.sort_unstable_by(|left, right| {
+            left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+        });
+    }
+    for (queue_id, _) in candidates {
         tx.execute(
             "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4",
             params![
                 queue_id,
-                ReadyQueueState::Queued.to_string(),
+                ready_queue_state_name(ReadyQueueState::Queued),
                 now,
-                ReadyQueueState::InFlight.to_string()
+                ready_queue_state_name(ReadyQueueState::InFlight)
             ],
         )?;
     }
@@ -492,9 +637,9 @@ pub(crate) fn claim_ready_queue_item(
                 "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4",
                 params![
                     queue_id,
-                    ReadyQueueState::Cancelled.to_string(),
+                    ready_queue_state_name(ReadyQueueState::Cancelled),
                     now,
-                    ReadyQueueState::Queued.to_string()
+                    ready_queue_state_name(ReadyQueueState::Queued)
                 ],
             )?;
             return Ok(None);
@@ -509,9 +654,9 @@ pub(crate) fn claim_ready_queue_item(
             "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4",
             params![
                 queue_id,
-                ReadyQueueState::Superseded.to_string(),
+                ready_queue_state_name(ReadyQueueState::Superseded),
                 now,
-                ReadyQueueState::Queued.to_string()
+                ready_queue_state_name(ReadyQueueState::Queued)
             ],
         )?;
         return Ok(None);
@@ -532,11 +677,11 @@ pub(crate) fn claim_ready_queue_item(
             "#,
             params![
                 queue_id,
-                ReadyQueueState::InFlight.to_string(),
+                ready_queue_state_name(ReadyQueueState::InFlight),
                 session_token,
                 lease_deadline,
                 now,
-                ReadyQueueState::Queued.to_string()
+                ready_queue_state_name(ReadyQueueState::Queued)
             ],
             |row| row.get::<_, i64>(0),
         )
@@ -562,17 +707,15 @@ pub(crate) fn load_claims_for_meta_task(
     let mut stmt = tx.prepare(
         r#"
         SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.state, c.created_at, c.updated_at
-        FROM claims c
-        JOIN subtasks s ON s.subtask_id = c.subtask_id
+        FROM subtasks s
+        JOIN claims c INDEXED BY idx_claims_one_held_per_subtask
+          ON c.subtask_id = s.subtask_id
+         AND c.state = 'held'
         WHERE s.meta_task_id = ?1
-          AND c.state = ?2
         ORDER BY c.created_at ASC
         "#,
     )?;
-    let rows = stmt.query_map(
-        params![meta_task_id, ClaimState::Held.to_string()],
-        deserialize_row::<Claim>,
-    )?;
+    let rows = stmt.query_map(params![meta_task_id], deserialize_row::<Claim>)?;
     collect_rows(rows)
 }
 
@@ -585,15 +728,19 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
     let stale_claim = tx
         .query_row(
             r#"
-            SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.state, c.created_at, c.updated_at,
-                   s.state
+            SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.created_at, c.updated_at
             FROM claims c
             JOIN sessions s ON s.session_token = c.owner_session_token
             WHERE c.subtask_id = ?1 AND c.state = ?2
-            ORDER BY c.created_at ASC
+              AND (c.lease_deadline <= ?3 OR s.state <> ?4)
             LIMIT 1
             "#,
-            params![subtask_id, ClaimState::Held.to_string()],
+            params![
+                subtask_id,
+                claim_state_name(ClaimState::Held),
+                lease_now,
+                session_state_name(SessionState::Active)
+            ],
             |row| {
                 let claim = Claim::try_from_parts(
                     row.get(0)?,
@@ -602,8 +749,8 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
                     row.get(3)?,
                     row.get(4)?,
                     ClaimState::Held,
+                    row.get(5)?,
                     row.get(6)?,
-                    row.get(7)?,
                 )
                 .map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -612,19 +759,14 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
                         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
                     )
                 })?;
-                let session_state = row.get::<_, String>(8)?;
-                Ok((claim, session_state))
+                Ok(claim)
             },
         )
         .optional()?;
 
-    let Some((claim, session_state)) = stale_claim else {
+    let Some(claim) = stale_claim else {
         return Ok(());
     };
-
-    if claim.lease_deadline > lease_now && session_state == SessionState::Active.to_string() {
-        return Ok(());
-    }
 
     close_claim_and_detach(tx, &claim, ClaimState::Expired, now)?;
     reset_in_progress_review_for_expired_claim(tx, &claim.subtask_id, now)?;
@@ -633,9 +775,9 @@ pub(crate) fn expire_claim_if_needed_for_subtask(
         params![
             claim.subtask_id,
             claim.claim_id,
-            SubtaskState::Claimed.to_string(),
-            SubtaskState::InProgress.to_string(),
-            SubtaskState::Available.to_string(),
+            subtask_state_name(SubtaskState::Claimed),
+            subtask_state_name(SubtaskState::InProgress),
+            subtask_state_name(SubtaskState::Available),
             now
         ],
     )?;
@@ -655,10 +797,46 @@ pub(crate) fn reset_in_progress_review_for_expired_claim(
         "UPDATE reviews SET state = ?2, updated_at = ?3 WHERE review_subtask_id = ?1 AND state = ?4",
         params![
             review_subtask_id,
-            ReviewState::Requested.to_string(),
+            review_state_name(ReviewState::Requested),
             now,
-            ReviewState::InProgress.to_string()
+            review_state_name(ReviewState::InProgress)
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_session_token_to_last_eight_chars() {
+        assert_eq!(
+            redact_session_token("session_1234567890abcdef"),
+            "session:90abcdef"
+        );
+        assert_eq!(redact_session_token("short"), "session:short");
+        assert_eq!(
+            redact_session_token("session_αβγδεζηθικ"),
+            "session:γδεζηθικ"
+        );
+        assert_eq!(redact_session_token("system"), "system");
+        assert_eq!(redact_session_token(SYSTEM_EVENT_SESSION_TOKEN), "system");
+    }
+
+    #[test]
+    fn hash_request_matches_buffered_json_blake3() {
+        let request = serde_json::json!({
+            "session_token": "session_123",
+            "metadata": {
+                "priority": 3,
+                "paths": ["covey/src/store.rs", "covey/src/schema.rs"]
+            },
+            "idempotency_key": "idem-123"
+        });
+        let serialized = serde_json::to_vec(&request).expect("serialize request");
+        let expected = blake3::hash(&serialized).to_hex().to_string();
+
+        assert_eq!(hash_request(&request).expect("hash request"), expected);
+    }
 }

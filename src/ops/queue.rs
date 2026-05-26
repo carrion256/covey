@@ -11,15 +11,17 @@ use crate::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
         LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, ObjectType, QueueId,
         ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        RecordApplyVerificationReq, ReviewId, RuntimeAttestation, Session, SessionRole,
-        SessionToken, SubtaskState, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+        RecordApplyVerificationReq, ReviewId, ReviewState, ReviewVerdict, RuntimeAttestation,
+        Session, SessionRole, SessionToken, SettlementTarget, SubtaskState, SupersedeQueueItemReq,
+        VerifyLandingAuthorizationReq, ready_queue_state_name, review_state_name,
+        review_verdict_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_queue_item_tx, load_session_tx, load_subtask_tx,
     },
     schema::advance_lease_clock,
     store::{
-        append_session_event, claim_ready_queue_item, ordered_ready_queue_candidates,
+        append_session_event, claim_ready_queue_item, ordered_ready_queue_candidate,
         refresh_meta_task_state, requeue_stale_ready_queue_claims,
     },
     validators::{
@@ -29,6 +31,12 @@ use crate::{
         require_session_can_enqueue,
     },
 };
+
+const fn settlement_target_name(target: SettlementTarget) -> &'static str {
+    match target {
+        SettlementTarget::Canonical => "canonical",
+    }
+}
 
 impl Covey {
     /// Enqueues an approved artifact for apply.
@@ -75,10 +83,10 @@ impl Covey {
                         "#,
                         params![
                             req.subtask_id,
-                            ReadyQueueState::Superseded.to_string(),
+                            ready_queue_state_name(ReadyQueueState::Superseded),
                             now,
-                            ReadyQueueState::Queued.to_string(),
-                            ReadyQueueState::InFlight.to_string()
+                            ready_queue_state_name(ReadyQueueState::Queued),
+                            ready_queue_state_name(ReadyQueueState::InFlight)
                         ],
                     )?;
 
@@ -95,8 +103,8 @@ impl Covey {
                             queue_id,
                             req.artifact_digest,
                             req.subtask_id,
-                            req.settlement_target.to_string(),
-                            ReadyQueueState::Queued.to_string(),
+                            settlement_target_name(req.settlement_target),
+                            ready_queue_state_name(ReadyQueueState::Queued),
                             now
                         ],
                     )?;
@@ -104,9 +112,9 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4 AND artifact_digest = ?5",
                         params![
                             req.subtask_id,
-                            SubtaskState::ReadyForApply.to_string(),
+                            subtask_state_name(SubtaskState::ReadyForApply),
                             now,
-                            subtask.state().to_string(),
+                            subtask_state_name(subtask.state()),
                             req.artifact_digest
                         ],
                     )?;
@@ -148,24 +156,31 @@ impl Covey {
     /// Returns queued apply items in enqueue order.
     pub fn fetch_ready_queue(&self, limit: usize) -> Result<Vec<ReadyQueueItem>> {
         let started_at = Instant::now();
-        let result = self.with_read_conn(|conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT queue_id, artifact_digest, subtask_id, settlement_target, state,
-                       claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
-                       enqueued_at, updated_at
-                FROM ready_queue
-                WHERE state = ?1
-                ORDER BY enqueued_at ASC
-                LIMIT ?2
-                "#,
-            )?;
-            let rows = stmt.query_map(
-                params![ReadyQueueState::Queued.to_string(), limit as i64],
-                deserialize_row::<ReadyQueueItem>,
-            )?;
-            collect_rows(rows)
-        });
+        let result = if limit == 0 {
+            Ok(Vec::new())
+        } else {
+            self.with_read_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT queue_id, artifact_digest, subtask_id, settlement_target, state,
+                           claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
+                           enqueued_at, updated_at
+                    FROM ready_queue
+                    WHERE state = ?1
+                    ORDER BY enqueued_at ASC
+                    LIMIT ?2
+                    "#,
+                )?;
+                let rows = stmt.query_map(
+                    params![
+                        ready_queue_state_name(ReadyQueueState::Queued),
+                        limit as i64
+                    ],
+                    deserialize_row::<ReadyQueueItem>,
+                )?;
+                collect_rows(rows)
+            })
+        };
         self.log_operation(
             "fetch_ready_queue",
             "system",
@@ -203,7 +218,7 @@ impl Covey {
                         req.lease_duration_ms.get(),
                     )?;
                     requeue_stale_ready_queue_claims(tx, lease_now, now)?;
-                    for queue_id in ordered_ready_queue_candidates(tx)? {
+                    while let Some(queue_id) = ordered_ready_queue_candidate(tx)? {
                         if let Some(claim) = claim_ready_queue_item(
                             tx,
                             &queue_id,
@@ -477,9 +492,9 @@ impl Covey {
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state = ?4 AND claimed_by_session_token = ?5 AND claim_fence_seq = ?6",
                         params![
                             req.queue_id.as_str(),
-                            ReadyQueueState::Applied.to_string(),
+                            ready_queue_state_name(ReadyQueueState::Applied),
                             now,
-                            ReadyQueueState::InFlight.to_string(),
+                            ready_queue_state_name(ReadyQueueState::InFlight),
                             req.session_token.as_str(),
                             req.claim_fence_seq
                         ],
@@ -495,9 +510,9 @@ impl Covey {
                         "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4 AND artifact_digest = ?5",
                         params![
                             item.subtask_id(),
-                            SubtaskState::Applied.to_string(),
+                            subtask_state_name(SubtaskState::Applied),
                             now,
-                            SubtaskState::ReadyForApply.to_string(),
+                            subtask_state_name(SubtaskState::ReadyForApply),
                             item.artifact_digest()
                         ],
                     )?;
@@ -556,10 +571,10 @@ impl Covey {
                         "UPDATE ready_queue SET state = ?2, claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = ?3 WHERE queue_id = ?1 AND state IN (?4, ?5)",
                         params![
                             req.queue_id.as_str(),
-                            ReadyQueueState::Superseded.to_string(),
+                            ready_queue_state_name(ReadyQueueState::Superseded),
                             now,
-                            ReadyQueueState::Queued.to_string(),
-                            ReadyQueueState::InFlight.to_string()
+                            ready_queue_state_name(ReadyQueueState::Queued),
+                            ready_queue_state_name(ReadyQueueState::InFlight)
                         ],
                     )?;
                     if updated != 1 {
@@ -597,15 +612,24 @@ impl Covey {
         let started_at = Instant::now();
         let now = self.clock.wall_now_ms();
         let result = self.with_read_conn(|conn| {
-            let (queued_count, oldest_queued): (i64, Option<i64>) = conn.query_row(
-                "SELECT COUNT(*), MIN(enqueued_at) FROM ready_queue WHERE state = ?1",
-                params![ReadyQueueState::Queued.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            let (in_flight_count, oldest_in_flight): (i64, Option<i64>) = conn.query_row(
-                "SELECT COUNT(*), MIN(enqueued_at) FROM ready_queue WHERE state = ?1",
-                params![ReadyQueueState::InFlight.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+            let queued_state = ready_queue_state_name(ReadyQueueState::Queued);
+            let in_flight_state = ready_queue_state_name(ReadyQueueState::InFlight);
+            let (queued_count, oldest_queued, in_flight_count, oldest_in_flight): (
+                i64,
+                Option<i64>,
+                i64,
+                Option<i64>,
+            ) = conn.query_row(
+                r#"
+                SELECT COALESCE(SUM(CASE WHEN state = ?1 THEN 1 ELSE 0 END), 0),
+                       MIN(CASE WHEN state = ?1 THEN enqueued_at END),
+                       COALESCE(SUM(CASE WHEN state = ?2 THEN 1 ELSE 0 END), 0),
+                       MIN(CASE WHEN state = ?2 THEN enqueued_at END)
+                FROM ready_queue
+                WHERE state IN (?1, ?2)
+                "#,
+                params![&queued_state, &in_flight_state],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
             ReadyQueueMetrics::new(
                 queued_count.max(0) as usize,
@@ -788,8 +812,8 @@ fn require_live_apply_gate_evidence(
             params![
                 item.subtask_id(),
                 item.artifact_digest(),
-                crate::model::ReviewState::Decided.to_string(),
-                crate::model::ReviewVerdict::Approve.to_string()
+                review_state_name(ReviewState::Decided),
+                review_verdict_name(ReviewVerdict::Approve)
             ],
             |row| {
                 Ok((

@@ -6,7 +6,10 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
     error::{CoveyError, Result},
-    model::{CreateSubtaskRequest, ImportOpenSpecAction, ObjectType, SubtaskId, SubtaskState},
+    model::{
+        CreateSubtaskRequest, ImportOpenSpecAction, MetaTaskState, ObjectType, SubtaskId,
+        SubtaskState, meta_task_state_name, subtask_state_name,
+    },
     ops::workflow::create_subtask_tx,
 };
 
@@ -42,7 +45,7 @@ pub(super) fn apply_openspec_import_diff_tx(
                     params![
                         record.object_id(),
                         prompt_text,
-                        crate::model::MetaTaskState::Planning.to_string(),
+                        meta_task_state_name(MetaTaskState::Planning),
                         session_token,
                         now
                     ],
@@ -90,8 +93,8 @@ pub(super) fn apply_openspec_import_diff_tx(
                         record.object_id(),
                         title,
                         now,
-                        SubtaskState::Available.to_string(),
-                        SubtaskState::ChangesRequested.to_string()
+                        subtask_state_name(SubtaskState::Available),
+                        subtask_state_name(SubtaskState::ChangesRequested)
                     ],
                 )?;
                 if updated != 1 {
@@ -138,8 +141,8 @@ fn settled_subtask_with_same_title_tx(
             "#,
             params![
                 subtask_id,
-                SubtaskState::Available.to_string(),
-                SubtaskState::ChangesRequested.to_string()
+                subtask_state_name(SubtaskState::Available),
+                subtask_state_name(SubtaskState::ChangesRequested)
             ],
             |row| row.get::<_, String>(0),
         )

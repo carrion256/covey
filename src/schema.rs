@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::{
     error::{CoveyError, Result},
-    model::{ActorKind, EventType, ObjectType},
+    model::{ActorKind, EventType, ObjectType, object_type_name},
 };
 
 pub(crate) const SYSTEM_EVENT_SESSION_TOKEN: &str = "__covey_system__";
@@ -12,6 +12,46 @@ pub(crate) const SYSTEM_EVENT_SESSION_TOKEN: &str = "__covey_system__";
 pub(crate) enum EventActor<'a> {
     Session(&'a str),
     System,
+}
+
+const fn actor_kind_name(kind: ActorKind) -> &'static str {
+    match kind {
+        ActorKind::Session => "session",
+        ActorKind::System => "system",
+    }
+}
+
+const fn event_type_name(event_type: EventType) -> &'static str {
+    match event_type {
+        EventType::SessionRegistered => "session_registered",
+        EventType::SessionHeartbeat => "session_heartbeat",
+        EventType::SessionExited => "session_exited",
+        EventType::RuntimeAttestationRecorded => "runtime_attestation_recorded",
+        EventType::MetaTaskSubmitted => "meta_task_submitted",
+        EventType::MetaTaskCancelled => "meta_task_cancelled",
+        EventType::SubtaskCreated => "subtask_created",
+        EventType::SubtaskClaimed => "subtask_claimed",
+        EventType::SubtaskStarted => "subtask_started",
+        EventType::SubtaskAbandoned => "subtask_abandoned",
+        EventType::ClaimReleased => "claim_released",
+        EventType::ClaimRenewed => "claim_renewed",
+        EventType::ArtifactPublished => "artifact_published",
+        EventType::ReviewRequested => "review_requested",
+        EventType::ReviewDecided => "review_decided",
+        EventType::ReadyQueueEnqueued => "ready_queue_enqueued",
+        EventType::ReadyQueueInFlight => "ready_queue_in_flight",
+        EventType::ApplyVerificationRecorded => "apply_verification_recorded",
+        EventType::ReadyQueueApplied => "ready_queue_applied",
+        EventType::ReadyQueueSuperseded => "ready_queue_superseded",
+        EventType::ReservationRequested => "reservation_requested",
+        EventType::ReservationReleased => "reservation_released",
+        EventType::ReservationRenewed => "reservation_renewed",
+        EventType::ConflictResolved => "conflict_resolved",
+        EventType::SessionsReaped => "sessions_reaped",
+        EventType::ClaimsExpired => "claims_expired",
+        EventType::ReservationsExpired => "reservations_expired",
+        EventType::OpenSpecImported => "open_spec_imported",
+    }
 }
 
 impl<'a> From<&'a str> for EventActor<'a> {
@@ -117,10 +157,10 @@ pub(crate) fn append_event<'a, T: Serialize>(
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         "#,
         params![
-            event_type.to_string(),
-            object_type.to_string(),
+            event_type_name(event_type),
+            object_type_name(object_type),
             object_id,
-            actor_kind.to_string(),
+            actor_kind_name(actor_kind),
             session_token,
             serde_json::to_string(payload)?,
             now

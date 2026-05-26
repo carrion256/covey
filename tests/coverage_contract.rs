@@ -316,6 +316,10 @@ fn ready_queue_alternate_paths_cover_fetch_claim_supersede_and_owner_errors(rig:
     let queued = rig.covey.fetch_ready_queue(10).expect("fetch queue");
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].queue_id(), queue_id);
+    assert_eq!(
+        rig.covey.fetch_ready_queue(0).expect("fetch zero limit"),
+        []
+    );
 
     let claim = rig
         .covey
@@ -365,6 +369,47 @@ fn ready_queue_alternate_paths_cover_fetch_claim_supersede_and_owner_errors(rig:
         ))
         .expect("supersede in-flight item");
     assert_eq!(rig.covey.fetch_ready_queue(10).expect("fetch after"), []);
+}
+
+#[rstest]
+fn claim_next_ready_queue_skips_invalid_head_without_materializing_queue(rig: Rig) {
+    let (_first_orch, first_queue_id) =
+        enqueue_ready_item(&rig, "queue_invalid_head", "blake3:queue_invalid_head");
+    rig.clock.advance(1);
+    let (_second_orch, second_queue_id) =
+        enqueue_ready_item(&rig, "queue_valid_tail", "blake3:queue_valid_tail");
+    let gate = register(
+        &rig.covey,
+        "gate-queue-skip-invalid",
+        SessionRole::ApplyGate,
+    );
+
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    conn.execute(
+        "UPDATE subtasks SET state = ?2 WHERE subtask_id = ?1",
+        params!["queue_invalid_head", SubtaskState::Approved.to_string(),],
+    )
+    .expect("invalidate first queued subtask");
+
+    let claim = rig
+        .covey
+        .claim_next_ready_queue_item(claim_ready_queue_req(
+            gate,
+            30_000,
+            id_key("claim-ready-skip-invalid-head"),
+        ))
+        .expect("claim queue")
+        .expect("queue claim");
+    assert_eq!(claim.queue_id, second_queue_id);
+
+    let first_state: String = conn
+        .query_row(
+            "SELECT state FROM ready_queue WHERE queue_id = ?1",
+            params![first_queue_id],
+            |row| row.get(0),
+        )
+        .expect("first queue state");
+    assert_eq!(first_state, covey::ReadyQueueState::Superseded.to_string());
 }
 
 #[rstest]

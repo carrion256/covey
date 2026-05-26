@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 use crate::{
     Clock, Covey, ManualClock, RegisterSessionReq, Result, SessionRole, SubmitMetaTaskReq,
@@ -56,4 +56,987 @@ fn in_memory_covey_exercises_shared_connection_read_paths() {
         meta_task_id
     );
     assert!(!covey.fetch_events(0, 10).expect("fetch events").is_empty());
+}
+
+#[test]
+fn claim_candidate_lookup_queries_use_candidate_indexes() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let conn = covey.conn.lock().expect("covey connection mutex");
+
+    let subtask_indexes = index_names(&conn, "subtasks");
+    assert!(
+        subtask_indexes
+            .iter()
+            .any(|name| name == "idx_subtasks_available_review_priority"),
+        "global review candidate lookup index is missing: {subtask_indexes:?}"
+    );
+    assert!(
+        subtask_indexes
+            .iter()
+            .any(|name| name == "idx_subtasks_available_review_meta_priority"),
+        "scoped review candidate lookup index is missing: {subtask_indexes:?}"
+    );
+    assert!(
+        subtask_indexes
+            .iter()
+            .any(|name| name == "idx_subtasks_available_work_priority"),
+        "global work candidate lookup index is missing: {subtask_indexes:?}"
+    );
+    assert!(
+        subtask_indexes
+            .iter()
+            .any(|name| name == "idx_subtasks_available_work_meta_priority"),
+        "scoped work candidate lookup index is missing: {subtask_indexes:?}"
+    );
+    assert!(
+        subtask_indexes
+            .iter()
+            .any(|name| name == "idx_subtasks_nonterminal_updated"),
+        "stuck-subtask lookup index is missing: {subtask_indexes:?}"
+    );
+    assert!(
+        subtask_indexes
+            .iter()
+            .any(|name| name == "idx_subtasks_open_meta"),
+        "open-subtask meta refresh index is missing: {subtask_indexes:?}"
+    );
+    let review_indexes = index_names(&conn, "reviews");
+    assert!(
+        review_indexes
+            .iter()
+            .any(|name| name == "idx_reviews_subtask_created"),
+        "subtask review status lookup index is missing: {review_indexes:?}"
+    );
+    let review_followup_indexes = index_names(&conn, "review_followup_subtasks");
+    assert!(
+        review_followup_indexes
+            .iter()
+            .any(|name| name == "idx_review_followup_subtasks_source"),
+        "review follow-up source lookup index is missing: {review_followup_indexes:?}"
+    );
+    let ready_queue_indexes = index_names(&conn, "ready_queue");
+    assert!(
+        ready_queue_indexes
+            .iter()
+            .any(|name| name == "idx_ready_queue_subtask_enqueued"),
+        "subtask ready-queue status lookup index is missing: {ready_queue_indexes:?}"
+    );
+    assert!(
+        ready_queue_indexes
+            .iter()
+            .any(|name| name == "idx_ready_queue_inflight_claimant_enqueued"),
+        "in-flight ready-queue claimant lookup index is missing: {ready_queue_indexes:?}"
+    );
+    let reservation_indexes = index_names(&conn, "reservations");
+    assert!(
+        reservation_indexes
+            .iter()
+            .any(|name| name == "idx_reservations_state_deadline"),
+        "reservation expiry lookup index is missing: {reservation_indexes:?}"
+    );
+    assert!(
+        reservation_indexes
+            .iter()
+            .any(|name| name == "idx_reservations_active_scope_key_deadline"),
+        "active reservation overlap scope lookup index is missing: {reservation_indexes:?}"
+    );
+    let conflict_indexes = index_names(&conn, "conflicts");
+    assert!(
+        conflict_indexes
+            .iter()
+            .any(|name| name == "idx_conflicts_detected_desc"),
+        "conflict listing index is missing: {conflict_indexes:?}"
+    );
+    assert!(
+        conflict_indexes
+            .iter()
+            .any(|name| name == "idx_conflicts_reservation_overlap_subject"),
+        "reservation-overlap subject conflict index is missing: {conflict_indexes:?}"
+    );
+    assert!(
+        conflict_indexes
+            .iter()
+            .any(|name| name == "idx_conflicts_reservation_overlap_overlapping"),
+        "reservation-overlap overlapping conflict index is missing: {conflict_indexes:?}"
+    );
+    let claim_indexes = index_names(&conn, "claims");
+    assert!(
+        claim_indexes
+            .iter()
+            .any(|name| name == "idx_claims_held_owner_created"),
+        "held-claim owner lookup index is missing: {claim_indexes:?}"
+    );
+    let session_indexes = index_names(&conn, "sessions");
+    assert!(
+        session_indexes
+            .iter()
+            .any(|name| name == "idx_sessions_state_token"),
+        "session state lookup index is missing: {session_indexes:?}"
+    );
+
+    let review_global_plan = query_plan(
+        &conn,
+        r#"
+        SELECT s.subtask_id
+        FROM subtasks s
+        JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+        WHERE s.kind = ?1
+          AND s.state = ?2
+          AND m.state NOT IN (?3, ?4)
+        ORDER BY s.priority ASC, s.created_at ASC
+        LIMIT 1
+        "#,
+        params!["review", "available", "completed", "cancelled"],
+    );
+    assert_plan_uses_index(
+        "global review claim candidate lookup",
+        &review_global_plan,
+        "idx_subtasks_available_review_priority",
+    );
+    assert!(
+        !plan_mentions(&review_global_plan, "USE TEMP B-TREE"),
+        "global review claim candidate lookup should stream priority order from the index: {review_global_plan:?}"
+    );
+
+    let scoped_review_plan = query_plan(
+        &conn,
+        r#"
+        SELECT s.subtask_id
+        FROM subtasks s
+        WHERE s.kind = ?1
+          AND s.state = ?2
+          AND s.meta_task_id = ?3
+        ORDER BY s.priority ASC, s.created_at ASC
+        LIMIT 1
+        "#,
+        params!["review", "available", "meta-1"],
+    );
+    assert_plan_uses_index(
+        "scoped review claim candidate lookup",
+        &scoped_review_plan,
+        "idx_subtasks_available_review_meta_priority",
+    );
+
+    let work_global_plan = query_plan(
+        &conn,
+        r#"
+        SELECT s.subtask_id
+        FROM subtasks s
+        JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+        WHERE s.kind = ?1
+          AND s.state = ?2
+          AND m.state NOT IN (?3, ?4)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM subtask_dependencies d
+              JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+              WHERE d.subtask_id = s.subtask_id
+                AND dep.state NOT IN (?6, ?7, ?8, ?9)
+          )
+        ORDER BY
+            MAX(
+                s.priority - MIN(MAX(?5 - s.created_at, 0) / 30000, s.priority),
+                0
+            ) ASC,
+            s.priority ASC,
+            s.created_at ASC
+        LIMIT 1
+        "#,
+        params![
+            "work",
+            "available",
+            "completed",
+            "cancelled",
+            1_700_000_000_000_i64,
+            "approved",
+            "ready_for_apply",
+            "applied",
+            "decided"
+        ],
+    );
+    assert_plan_uses_index(
+        "global work claim candidate lookup",
+        &work_global_plan,
+        "idx_subtasks_available_work_priority",
+    );
+
+    let scoped_work_plan = query_plan(
+        &conn,
+        r#"
+        SELECT s.subtask_id
+        FROM subtasks s
+        WHERE s.kind = ?1
+          AND s.state = ?2
+          AND s.meta_task_id = ?4
+          AND NOT EXISTS (
+              SELECT 1
+              FROM subtask_dependencies d
+              JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+              WHERE d.subtask_id = s.subtask_id
+                AND dep.state NOT IN (?5, ?6, ?7, ?8)
+          )
+        ORDER BY
+            MAX(
+                s.priority - MIN(MAX(?3 - s.created_at, 0) / 30000, s.priority),
+                0
+            ) ASC,
+            s.priority ASC,
+            s.created_at ASC
+        LIMIT 1
+        "#,
+        params![
+            "work",
+            "available",
+            1_700_000_000_000_i64,
+            "meta-1",
+            "approved",
+            "ready_for_apply",
+            "applied",
+            "decided"
+        ],
+    );
+    assert_plan_uses_index(
+        "scoped work claim candidate lookup",
+        &scoped_work_plan,
+        "idx_subtasks_available_work_meta_priority",
+    );
+
+    let subtask_reviews_plan = query_plan(
+        &conn,
+        r#"
+        SELECT review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id, verdict, findings_digest, state, created_at, updated_at
+        FROM reviews
+        WHERE subtask_id = ?1
+        ORDER BY created_at ASC
+        "#,
+        params!["work-1"],
+    );
+    assert_plan_uses_index(
+        "subtask status review lookup",
+        &subtask_reviews_plan,
+        "idx_reviews_subtask_created",
+    );
+    assert!(
+        !plan_mentions(&subtask_reviews_plan, "USE TEMP B-TREE"),
+        "subtask status review lookup should stream created_at order from the index: {subtask_reviews_plan:?}"
+    );
+
+    let subtask_ready_queue_plan = query_plan(
+        &conn,
+        r#"
+        SELECT queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at
+        FROM ready_queue
+        WHERE subtask_id = ?1
+        ORDER BY enqueued_at ASC
+        "#,
+        params!["work-1"],
+    );
+    assert_plan_uses_index(
+        "subtask status ready-queue lookup",
+        &subtask_ready_queue_plan,
+        "idx_ready_queue_subtask_enqueued",
+    );
+    assert!(
+        !plan_mentions(&subtask_ready_queue_plan, "USE TEMP B-TREE"),
+        "subtask status ready-queue lookup should stream enqueued_at order from the index: {subtask_ready_queue_plan:?}"
+    );
+
+    let expired_ready_queue_claims_plan = query_plan(
+        &conn,
+        r#"
+        SELECT queue_id, enqueued_at
+        FROM ready_queue
+        WHERE state = ?1 AND claim_lease_deadline <= ?2
+        "#,
+        params!["in_flight", 1_700_000_000_000_i64],
+    );
+    assert_plan_uses_index(
+        "expired ready-queue claim lookup",
+        &expired_ready_queue_claims_plan,
+        "idx_ready_queue_state_claim_deadline",
+    );
+    assert!(
+        !plan_mentions(&expired_ready_queue_claims_plan, "USE TEMP B-TREE"),
+        "expired ready-queue claim lookup should not sort before the enqueued_at merge: {expired_ready_queue_claims_plan:?}"
+    );
+
+    let inactive_ready_queue_claims_plan = query_plan(
+        &conn,
+        r#"
+        SELECT q.queue_id, q.enqueued_at
+        FROM sessions s
+        JOIN ready_queue q INDEXED BY idx_ready_queue_inflight_claimant_enqueued
+          ON q.claimed_by_session_token = s.session_token
+         AND q.state = 'in_flight'
+        WHERE s.state IN (?1, ?2)
+        "#,
+        params!["stale", "exited"],
+    );
+    assert_plan_uses_index(
+        "inactive-session ready-queue claim lookup",
+        &inactive_ready_queue_claims_plan,
+        "idx_sessions_state_token",
+    );
+    assert_plan_uses_index(
+        "inactive-session ready-queue claim lookup",
+        &inactive_ready_queue_claims_plan,
+        "idx_ready_queue_inflight_claimant_enqueued",
+    );
+    assert!(
+        !plan_mentions(&inactive_ready_queue_claims_plan, "USE TEMP B-TREE"),
+        "inactive-session ready-queue claim lookup should not sort before the enqueued_at merge: {inactive_ready_queue_claims_plan:?}"
+    );
+
+    let missing_session_ready_queue_claims_plan = query_plan(
+        &conn,
+        r#"
+        SELECT q.queue_id, q.enqueued_at
+        FROM ready_queue q INDEXED BY idx_ready_queue_inflight_claimant_enqueued
+        LEFT JOIN sessions s ON s.session_token = q.claimed_by_session_token
+        WHERE q.state = 'in_flight'
+          AND s.session_token IS NULL
+        "#,
+        [],
+    );
+    assert_plan_uses_index(
+        "missing-session ready-queue claim lookup",
+        &missing_session_ready_queue_claims_plan,
+        "idx_ready_queue_inflight_claimant_enqueued",
+    );
+    assert!(
+        !plan_mentions(&missing_session_ready_queue_claims_plan, "USE TEMP B-TREE"),
+        "missing-session ready-queue claim lookup should not sort before the enqueued_at merge: {missing_session_ready_queue_claims_plan:?}"
+    );
+
+    let stuck_subtasks_plan = query_plan(
+        &conn,
+        r#"
+        SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest,
+               state, current_claim_id, artifact_digest, priority, created_at, updated_at
+        FROM subtasks
+        WHERE state NOT IN ('available', 'applied', 'abandoned', 'decided')
+          AND updated_at <= ?1
+        ORDER BY updated_at ASC
+        LIMIT ?2
+        "#,
+        params![1_700_000_000_000_i64, 100_i64],
+    );
+    assert_plan_uses_index(
+        "stuck subtask lookup",
+        &stuck_subtasks_plan,
+        "idx_subtasks_nonterminal_updated",
+    );
+    assert!(
+        !plan_mentions(&stuck_subtasks_plan, "USE TEMP B-TREE"),
+        "stuck subtask lookup should stream updated_at order from the index: {stuck_subtasks_plan:?}"
+    );
+
+    let stuck_subtasks_observability_plan = query_plan(
+        &conn,
+        r#"
+        SELECT st.subtask_id, st.meta_task_id, st.title, st.kind,
+               st.review_target_subtask_id, st.review_target_artifact_digest,
+               st.state, st.current_claim_id, st.artifact_digest, st.priority,
+               st.created_at, st.updated_at,
+               c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq,
+               c.lease_deadline, c.state, c.created_at, c.updated_at,
+               s.session_token, s.agent_principal_id, s.agent_instance_id,
+               s.role, s.state, s.active_subtask_id, s.last_heartbeat_at,
+               s.last_heartbeat_tick, s.created_at, s.updated_at
+        FROM subtasks st
+        LEFT JOIN claims c ON c.claim_id = st.current_claim_id
+        LEFT JOIN sessions s ON s.session_token = c.owner_session_token
+        WHERE st.state NOT IN ('available', 'applied', 'abandoned', 'decided')
+          AND st.updated_at <= ?1
+        ORDER BY st.updated_at ASC
+        LIMIT ?2
+        "#,
+        params![1_700_000_000_000_i64, 100_i64],
+    );
+    assert_plan_uses_index(
+        "stuck-subtask observability lookup",
+        &stuck_subtasks_observability_plan,
+        "idx_subtasks_nonterminal_updated",
+    );
+    assert!(
+        !plan_mentions(&stuck_subtasks_observability_plan, "USE TEMP B-TREE"),
+        "stuck-subtask observability lookup should stream updated_at order from the subtask index: {stuck_subtasks_observability_plan:?}"
+    );
+
+    let dependency_satisfaction_plan = query_plan(
+        &conn,
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM subtask_dependencies d
+            JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+            WHERE d.subtask_id = ?1
+              AND dep.state NOT IN (?2, ?3, ?4, ?5)
+            LIMIT 1
+        )
+        "#,
+        params![
+            "work-1",
+            "approved",
+            "ready_for_apply",
+            "applied",
+            "decided"
+        ],
+    );
+    assert_plan_uses_index(
+        "dependency satisfaction lookup",
+        &dependency_satisfaction_plan,
+        "sqlite_autoindex_subtask_dependencies_1",
+    );
+
+    let any_subtask_exists_plan = query_plan(
+        &conn,
+        r#"
+        SELECT EXISTS(SELECT 1 FROM subtasks WHERE meta_task_id = ?1 LIMIT 1)
+        "#,
+        params!["meta-1"],
+    );
+    assert_plan_uses_index(
+        "any-subtask meta refresh existence check",
+        &any_subtask_exists_plan,
+        "idx_subtasks_meta_task_priority",
+    );
+
+    let open_subtask_exists_plan = query_plan(
+        &conn,
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM subtasks
+            WHERE meta_task_id = ?1
+              AND state NOT IN ('applied', 'abandoned', 'decided')
+            LIMIT 1
+        )
+        "#,
+        params!["meta-1"],
+    );
+    assert_plan_uses_index(
+        "open-subtask meta refresh existence check",
+        &open_subtask_exists_plan,
+        "idx_subtasks_open_meta",
+    );
+
+    let held_claims_for_meta_plan = query_plan(
+        &conn,
+        r#"
+        SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.state, c.created_at, c.updated_at
+        FROM subtasks s
+        JOIN claims c INDEXED BY idx_claims_one_held_per_subtask
+          ON c.subtask_id = s.subtask_id
+         AND c.state = 'held'
+        WHERE s.meta_task_id = ?1
+        ORDER BY c.created_at ASC
+        "#,
+        params!["meta-1"],
+    );
+    assert_plan_uses_index(
+        "held claims for meta-task lookup",
+        &held_claims_for_meta_plan,
+        "idx_subtasks_meta_task_priority",
+    );
+    assert_plan_uses_index(
+        "held claims for meta-task lookup",
+        &held_claims_for_meta_plan,
+        "idx_claims_one_held_per_subtask",
+    );
+
+    let held_claim_for_subtask_plan = query_plan(
+        &conn,
+        r#"
+        SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.created_at, c.updated_at
+        FROM claims c
+        JOIN sessions s ON s.session_token = c.owner_session_token
+        WHERE c.subtask_id = ?1 AND c.state = ?2
+          AND (c.lease_deadline <= ?3 OR s.state <> ?4)
+        LIMIT 1
+        "#,
+        params!["work-1", "held", 1_700_000_000_000_i64, "active"],
+    );
+    assert_plan_uses_index(
+        "held claim for subtask lookup",
+        &held_claim_for_subtask_plan,
+        "idx_claims_one_held_per_subtask",
+    );
+    assert!(
+        !plan_mentions(&held_claim_for_subtask_plan, "USE TEMP B-TREE"),
+        "held claim for subtask lookup should not sort because held claims are unique per subtask: {held_claim_for_subtask_plan:?}"
+    );
+
+    let lease_expired_claims_plan = query_plan(
+        &conn,
+        r#"
+        SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.state, c.created_at, c.updated_at
+        FROM claims c
+        WHERE c.state = ?1 AND c.lease_deadline <= ?2
+        "#,
+        params!["held", 1_700_000_000_000_i64],
+    );
+    assert_plan_uses_index(
+        "lease-expired claim lookup",
+        &lease_expired_claims_plan,
+        "idx_claims_state_deadline",
+    );
+    assert!(
+        !plan_mentions(&lease_expired_claims_plan, "USE TEMP B-TREE"),
+        "lease-expired claim lookup should not sort before the hook-side created_at merge: {lease_expired_claims_plan:?}"
+    );
+
+    let expiring_claims_observability_plan = query_plan(
+        &conn,
+        r#"
+        SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq,
+               c.lease_deadline, c.state, c.created_at, c.updated_at,
+               st.subtask_id, st.meta_task_id, st.title, st.kind,
+               st.review_target_subtask_id, st.review_target_artifact_digest,
+               st.state, st.current_claim_id, st.artifact_digest, st.priority,
+               st.created_at, st.updated_at,
+               s.session_token, s.agent_principal_id, s.agent_instance_id,
+               s.role, s.state, s.active_subtask_id, s.last_heartbeat_at,
+               s.last_heartbeat_tick, s.created_at, s.updated_at
+        FROM claims c
+        JOIN subtasks st ON st.subtask_id = c.subtask_id
+        JOIN sessions s ON s.session_token = c.owner_session_token
+        WHERE c.state = ?1 AND c.lease_deadline <= ?2
+        ORDER BY c.lease_deadline ASC
+        LIMIT ?3
+        "#,
+        params!["held", 1_700_000_000_000_i64, 100_i64],
+    );
+    assert_plan_uses_index(
+        "expiring-claims observability lookup",
+        &expiring_claims_observability_plan,
+        "idx_claims_state_deadline",
+    );
+    assert!(
+        !plan_mentions(&expiring_claims_observability_plan, "USE TEMP B-TREE"),
+        "expiring-claims observability lookup should stream lease_deadline order from the claim index: {expiring_claims_observability_plan:?}"
+    );
+
+    let inactive_session_claims_plan = query_plan(
+        &conn,
+        r#"
+        SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq, c.lease_deadline, c.state, c.created_at, c.updated_at
+        FROM sessions s
+        JOIN claims c INDEXED BY idx_claims_held_owner_created
+          ON c.owner_session_token = s.session_token
+         AND c.state = 'held'
+        WHERE s.state IN (?1, ?2)
+        "#,
+        params!["stale", "exited"],
+    );
+    assert_plan_uses_index(
+        "inactive-session claim lookup",
+        &inactive_session_claims_plan,
+        "idx_sessions_state_token",
+    );
+    assert_plan_uses_index(
+        "inactive-session claim lookup",
+        &inactive_session_claims_plan,
+        "idx_claims_held_owner_created",
+    );
+    assert!(
+        !plan_mentions(&inactive_session_claims_plan, "USE TEMP B-TREE"),
+        "inactive-session claim lookup should not sort before the hook-side created_at merge: {inactive_session_claims_plan:?}"
+    );
+
+    let expired_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations
+        WHERE state = ?1 AND lease_deadline <= ?2
+        "#,
+        params!["active", 1_700_000_000_000_i64],
+    );
+    assert_plan_uses_index(
+        "expired reservation lookup",
+        &expired_reservations_plan,
+        "idx_reservations_state_deadline",
+    );
+    assert!(
+        !plan_mentions(&expired_reservations_plan, "USE TEMP B-TREE"),
+        "expired reservation lookup should not sort because expiry resolution is order-independent: {expired_reservations_plan:?}"
+    );
+
+    let active_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations
+        WHERE state = 'active' AND lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64],
+    );
+    assert_plan_uses_index(
+        "active reservation overlap lookup",
+        &active_reservations_plan,
+        "idx_reservations_state_deadline",
+    );
+    assert!(
+        !plan_mentions(&active_reservations_plan, "USE TEMP B-TREE"),
+        "active reservation overlap lookup should not sort because candidate IDs are collected into a set: {active_reservations_plan:?}"
+    );
+
+    let repo_global_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations
+        WHERE state = 'active' AND scope_class = 'repo_global' AND lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64],
+    );
+    assert_plan_uses_index(
+        "repo-global reservation overlap lookup",
+        &repo_global_reservations_plan,
+        "idx_reservations_state_deadline",
+    );
+    assert!(
+        !plan_mentions(&repo_global_reservations_plan, "USE TEMP B-TREE"),
+        "repo-global reservation overlap lookup should not sort because candidate IDs are collected into a set: {repo_global_reservations_plan:?}"
+    );
+
+    let indexed_repo_global_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active' AND scope_class = 'repo_global' AND lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64],
+    );
+    assert_plan_uses_index(
+        "repo-global reservation overlap scope lookup",
+        &indexed_repo_global_reservations_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&indexed_repo_global_reservations_plan, "USE TEMP B-TREE"),
+        "repo-global reservation overlap scope lookup should not sort before set collection: {indexed_repo_global_reservations_plan:?}"
+    );
+
+    let exact_path_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active' AND scope_class = 'exact_path' AND scope_key = ?2 AND lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64, "src/lib.rs"],
+    );
+    assert_plan_uses_index(
+        "exact-path reservation overlap scope lookup",
+        &exact_path_reservations_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&exact_path_reservations_plan, "USE TEMP B-TREE"),
+        "exact-path reservation overlap scope lookup should not sort before set collection: {exact_path_reservations_plan:?}"
+    );
+
+    let exact_paths_under_subtree_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active' AND scope_class = 'exact_path' AND scope_key >= ?2 AND scope_key < ?3 AND lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64, "src/", "src0"],
+    );
+    assert_plan_uses_index(
+        "exact-paths-under-subtree reservation overlap scope lookup",
+        &exact_paths_under_subtree_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&exact_paths_under_subtree_plan, "USE TEMP B-TREE"),
+        "exact-paths-under-subtree reservation overlap scope lookup should not sort before set collection: {exact_paths_under_subtree_plan:?}"
+    );
+
+    let subtrees_under_subtree_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active' AND scope_class = 'subtree' AND scope_key >= ?2 AND scope_key < ?3 AND lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64, "src/", "src0"],
+    );
+    assert_plan_uses_index(
+        "subtrees-under-subtree reservation overlap scope lookup",
+        &subtrees_under_subtree_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&subtrees_under_subtree_plan, "USE TEMP B-TREE"),
+        "subtrees-under-subtree reservation overlap scope lookup should not sort before set collection: {subtrees_under_subtree_plan:?}"
+    );
+
+    let containing_subtree_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active' AND scope_class = 'subtree' AND lease_deadline > ?1 AND scope_key IN (?2, ?3)
+        "#,
+        params![1_700_000_000_000_i64, "src", "src/lib.rs"],
+    );
+    assert_plan_uses_index(
+        "containing-subtree reservation overlap scope lookup",
+        &containing_subtree_reservations_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&containing_subtree_reservations_plan, "USE TEMP B-TREE"),
+        "containing-subtree reservation overlap scope lookup should not sort before set collection: {containing_subtree_reservations_plan:?}"
+    );
+
+    let generated_member_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT r.reservation_id
+        FROM reservation_generated_members gm INDEXED BY idx_reservation_generated_members_member_path
+        CROSS JOIN reservations r
+        WHERE r.reservation_id = gm.reservation_id
+          AND gm.member_path = ?2
+          AND r.state = 'active'
+          AND r.scope_class = 'generated_set'
+          AND r.lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64, "generated/out.rs"],
+    );
+    assert_plan_uses_index(
+        "generated-member reservation overlap lookup",
+        &generated_member_reservations_plan,
+        "idx_reservation_generated_members_member_path",
+    );
+    assert_plan_uses_index(
+        "generated-member reservation overlap lookup",
+        &generated_member_reservations_plan,
+        "sqlite_autoindex_reservations_1",
+    );
+    assert!(
+        !plan_mentions(&generated_member_reservations_plan, "USE TEMP B-TREE"),
+        "generated-member reservation overlap lookup should not sort or distinct before set collection: {generated_member_reservations_plan:?}"
+    );
+
+    let generated_members_under_subtree_plan = query_plan(
+        &conn,
+        r#"
+        SELECT r.reservation_id
+        FROM reservation_generated_members gm INDEXED BY idx_reservation_generated_members_member_path
+        CROSS JOIN reservations r
+        WHERE r.reservation_id = gm.reservation_id
+          AND gm.member_path >= ?2
+          AND gm.member_path < ?3
+          AND r.state = 'active'
+          AND r.scope_class = 'generated_set'
+          AND r.lease_deadline > ?1
+        "#,
+        params![1_700_000_000_000_i64, "generated/", "generated0"],
+    );
+    assert_plan_uses_index(
+        "generated-members-under-subtree reservation overlap lookup",
+        &generated_members_under_subtree_plan,
+        "idx_reservation_generated_members_member_path",
+    );
+    assert_plan_uses_index(
+        "generated-members-under-subtree reservation overlap lookup",
+        &generated_members_under_subtree_plan,
+        "sqlite_autoindex_reservations_1",
+    );
+    assert!(
+        !plan_mentions(&generated_members_under_subtree_plan, "USE TEMP B-TREE"),
+        "generated-members-under-subtree reservation overlap lookup should not sort or distinct before set collection: {generated_members_under_subtree_plan:?}"
+    );
+
+    let generated_members_reservations_plan = query_plan(
+        &conn,
+        r#"
+        SELECT r.reservation_id
+        FROM reservation_generated_members gm INDEXED BY idx_reservation_generated_members_member_path
+        CROSS JOIN reservations r
+        WHERE r.reservation_id = gm.reservation_id
+          AND gm.member_path IN (?2, ?3)
+          AND r.state = 'active'
+          AND r.scope_class = 'generated_set'
+          AND r.lease_deadline > ?1
+        "#,
+        params![
+            1_700_000_000_000_i64,
+            "generated/out.rs",
+            "generated/other.rs"
+        ],
+    );
+    assert_plan_uses_index(
+        "generated-members reservation overlap lookup",
+        &generated_members_reservations_plan,
+        "idx_reservation_generated_members_member_path",
+    );
+    assert_plan_uses_index(
+        "generated-members reservation overlap lookup",
+        &generated_members_reservations_plan,
+        "sqlite_autoindex_reservations_1",
+    );
+    assert!(
+        !plan_mentions(&generated_members_reservations_plan, "USE TEMP B-TREE"),
+        "generated-members reservation overlap lookup should not sort or distinct before set collection: {generated_members_reservations_plan:?}"
+    );
+
+    let generated_exact_members_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active'
+          AND scope_class = ?1
+          AND lease_deadline > ?2
+          AND scope_key IN (?3, ?4)
+        "#,
+        params![
+            "exact_path",
+            1_700_000_000_000_i64,
+            "generated/out.rs",
+            "generated/other.rs"
+        ],
+    );
+    assert_plan_uses_index(
+        "generated-candidate exact-path batch overlap lookup",
+        &generated_exact_members_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&generated_exact_members_plan, "USE TEMP B-TREE"),
+        "generated-candidate exact-path batch overlap lookup should not sort before set collection: {generated_exact_members_plan:?}"
+    );
+
+    let generated_ancestor_subtree_plan = query_plan(
+        &conn,
+        r#"
+        SELECT reservation_id
+        FROM reservations INDEXED BY idx_reservations_active_scope_key_deadline
+        WHERE state = 'active'
+          AND scope_class = ?1
+          AND lease_deadline > ?2
+          AND scope_key IN (?3, ?4, ?5)
+        "#,
+        params![
+            "subtree",
+            1_700_000_000_000_i64,
+            "generated",
+            "generated/pkg",
+            "generated/pkg/out.rs"
+        ],
+    );
+    assert_plan_uses_index(
+        "generated-candidate ancestor-subtree batch overlap lookup",
+        &generated_ancestor_subtree_plan,
+        "idx_reservations_active_scope_key_deadline",
+    );
+    assert!(
+        !plan_mentions(&generated_ancestor_subtree_plan, "USE TEMP B-TREE"),
+        "generated-candidate ancestor-subtree batch overlap lookup should not sort before set collection: {generated_ancestor_subtree_plan:?}"
+    );
+
+    let conflicts_by_detected_plan = query_plan(
+        &conn,
+        r#"
+        SELECT conflict_id, object_type, object_id, conflict_kind, payload_json, detected_at, resolution_state
+        FROM conflicts
+        ORDER BY detected_at DESC
+        LIMIT ?1
+        "#,
+        params![1_000_i64],
+    );
+    assert_plan_uses_index(
+        "conflict listing",
+        &conflicts_by_detected_plan,
+        "idx_conflicts_detected_desc",
+    );
+    assert!(
+        !plan_mentions(&conflicts_by_detected_plan, "USE TEMP B-TREE"),
+        "conflict listing should stream detected_at order from the index: {conflicts_by_detected_plan:?}"
+    );
+
+    let reservation_subject_conflict_plan = query_plan(
+        &conn,
+        r#"
+        UPDATE conflicts
+        SET resolution_state = ?1,
+            detected_at = ?2
+        WHERE conflict_kind = 'reservation_overlap'
+          AND resolution_state != 'resolved'
+          AND json_extract(payload_json, '$.reservation_id') = ?3
+        "#,
+        params!["resolved", 1_700_000_000_000_i64, "reservation-1"],
+    );
+    assert_plan_uses_index(
+        "reservation-overlap subject conflict resolution",
+        &reservation_subject_conflict_plan,
+        "idx_conflicts_reservation_overlap_subject",
+    );
+
+    let reservation_overlapping_conflict_plan = query_plan(
+        &conn,
+        r#"
+        UPDATE conflicts
+        SET resolution_state = ?1,
+            detected_at = ?2
+        WHERE conflict_kind = 'reservation_overlap'
+          AND resolution_state != 'resolved'
+          AND json_extract(payload_json, '$.overlapping_reservation_id') = ?3
+        "#,
+        params!["resolved", 1_700_000_000_000_i64, "reservation-1"],
+    );
+    assert_plan_uses_index(
+        "reservation-overlap overlapping conflict resolution",
+        &reservation_overlapping_conflict_plan,
+        "idx_conflicts_reservation_overlap_overlapping",
+    );
+}
+
+fn index_names(conn: &Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_index_list(?1)")
+        .expect("prepare index list");
+    stmt.query_map(params![table], |row| row.get::<_, String>(0))
+        .expect("query index list")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect index list")
+}
+
+fn query_plan<P>(conn: &Connection, sql: &str, params: P) -> Vec<String>
+where
+    P: rusqlite::Params,
+{
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("prepare query plan");
+    stmt.query_map(params, |row| row.get::<_, String>(3))
+        .expect("query plan")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect query plan")
+}
+
+fn assert_plan_uses_index(label: &str, plan: &[String], index_name: &str) {
+    assert!(
+        plan.iter().any(|step| step.contains(index_name)),
+        "{label} should use {index_name}; plan was {plan:?}"
+    );
+    assert!(
+        !plan
+            .iter()
+            .any(|step| step.contains("SCAN s") && !step.contains(index_name)),
+        "{label} should not scan subtasks without the candidate index; plan was {plan:?}"
+    );
+}
+
+fn plan_mentions(plan: &[String], needle: &str) -> bool {
+    plan.iter().any(|step| step.contains(needle))
 }

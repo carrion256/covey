@@ -10,7 +10,8 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ClaimState, EventType, MetaTaskState, MetaTaskStatus, ObjectType, ReadyQueueState,
-        SessionRole, SubtaskState,
+        SessionRole, SubtaskState, claim_state_name, meta_task_state_name, ready_queue_state_name,
+        subtask_state_name,
     },
     queries::{load_meta_task_tx, load_subtasks_for_meta_task_tx},
     store::{append_session_event, load_claims_for_meta_task},
@@ -72,10 +73,10 @@ impl Covey {
                         "UPDATE meta_tasks SET state = ?2, updated_at = ?3 WHERE meta_task_id = ?1 AND state NOT IN (?4, ?5)",
                         params![
                             req.meta_task_id.as_str(),
-                            MetaTaskState::Cancelled.to_string(),
+                            meta_task_state_name(MetaTaskState::Cancelled),
                             now,
-                            MetaTaskState::Completed.to_string(),
-                            MetaTaskState::Cancelled.to_string()
+                            meta_task_state_name(MetaTaskState::Completed),
+                            meta_task_state_name(MetaTaskState::Cancelled)
                         ],
                     )?;
                     if updated != 1 {
@@ -91,9 +92,9 @@ impl Covey {
                             "UPDATE claims SET state = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4",
                             params![
                                 claim.claim_id,
-                                ClaimState::Revoked.to_string(),
+                                claim_state_name(ClaimState::Revoked),
                                 now,
-                                ClaimState::Held.to_string()
+                                claim_state_name(ClaimState::Held)
                             ],
                         )?;
                         tx.execute(
@@ -115,10 +116,10 @@ impl Covey {
                         "#,
                         params![
                             req.meta_task_id.as_str(),
-                            ReadyQueueState::Cancelled.to_string(),
+                            ready_queue_state_name(ReadyQueueState::Cancelled),
                             now,
-                            ReadyQueueState::Queued.to_string(),
-                            ReadyQueueState::InFlight.to_string()
+                            ready_queue_state_name(ReadyQueueState::Queued),
+                            ready_queue_state_name(ReadyQueueState::InFlight)
                         ],
                     )?;
                     tx.execute(
@@ -134,9 +135,9 @@ impl Covey {
                         "#,
                         params![
                             req.meta_task_id.as_str(),
-                            SubtaskState::Applied.to_string(),
-                            SubtaskState::Abandoned.to_string(),
-                            SubtaskState::Abandoned.to_string(),
+                            subtask_state_name(SubtaskState::Applied),
+                            subtask_state_name(SubtaskState::Abandoned),
+                            subtask_state_name(SubtaskState::Abandoned),
                             now
                         ],
                     )?;
@@ -204,7 +205,7 @@ pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
         params![
             meta_task_id,
             prompt_text,
-            MetaTaskState::Planning.to_string(),
+            meta_task_state_name(MetaTaskState::Planning),
             session_token,
             now
         ],

@@ -1276,6 +1276,195 @@ fn repoops_authority_snapshot_returns_claim_scope_and_lock_facts() {
 }
 
 #[test]
+fn repoops_authority_snapshot_filters_irrelevant_reservations_without_losing_locks() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+
+    let orch = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "orch-repoops-filter",
+            "--agent-instance-id",
+            "orch-repoops-filter-1",
+            "--role",
+            "orchestrator",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("orch token")
+        .to_owned();
+    let exec = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "worker-repoops-filter",
+            "--agent-instance-id",
+            "worker-repoops-filter-1",
+            "--role",
+            "executor",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("exec token")
+        .to_owned();
+    let meta_task_id = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "repoops filtered snapshot",
+        ],
+    ))["meta_task_id"]
+        .as_str()
+        .expect("meta id")
+        .to_owned();
+
+    for (subtask_id, title) in [
+        ("repoops_filter_work", "repoops filtered work"),
+        ("repoops_filter_foreign", "repoops filtered foreign"),
+        ("repoops_filter_irrelevant", "repoops filtered irrelevant"),
+    ] {
+        success_data(&run_db(
+            &db,
+            &[
+                "subtask",
+                "create",
+                "--session-token",
+                &orch,
+                "--meta-task-id",
+                &meta_task_id,
+                "--title",
+                title,
+                "--kind",
+                "work",
+                "--priority",
+                "1",
+                "--subtask-id",
+                subtask_id,
+            ],
+        ));
+    }
+
+    let claim = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "claim",
+            "--session-token",
+            &exec,
+            "--subtask-id",
+            "repoops_filter_work",
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_owned();
+    let fence_seq = claim["fence_seq"].as_i64().expect("fence").to_string();
+    success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "start",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+        ],
+    ));
+
+    for args in [
+        vec![
+            "--owner-subtask-id",
+            "repoops_filter_work",
+            "--scope-class",
+            "subtree",
+            "--scope-key",
+            "src",
+        ],
+        vec![
+            "--owner-subtask-id",
+            "repoops_filter_foreign",
+            "--scope-class",
+            "exact-path",
+            "--scope-key",
+            "src/lib.rs",
+        ],
+        vec![
+            "--owner-subtask-id",
+            "repoops_filter_foreign",
+            "--scope-class",
+            "generated-set",
+            "--scope-key",
+            "generated",
+            "--member",
+            "generated/out.rs",
+        ],
+        vec![
+            "--owner-subtask-id",
+            "repoops_filter_irrelevant",
+            "--scope-class",
+            "exact-path",
+            "--scope-key",
+            "docs/readme.md",
+        ],
+    ] {
+        let mut command = vec!["reservation", "request", "--session-token", &orch];
+        command.extend(args);
+        command.extend(["--lease-duration-ms", "30000"]);
+        success_data(&run_db(&db, &command));
+    }
+
+    let snapshot = success_data(&run_db(
+        &db,
+        &[
+            "repoops",
+            "authority-snapshot",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+            "--paths",
+            "src/lib.rs",
+            "generated/out.rs",
+        ],
+    ));
+
+    assert_eq!(snapshot["scope"]["in"], serde_json::json!(["src/**"]));
+    let locks = snapshot["locks"].as_array().expect("locks");
+    assert!(locks.iter().any(|lock| {
+        lock["path"] == "src/lib.rs"
+            && lock["owner"] == "worker-repoops-filter"
+            && lock["status"] == "owned"
+    }));
+    assert!(locks.iter().any(|lock| {
+        lock["path"] == "src/lib.rs"
+            && lock["owner"] == "subtask:repoops_filter_foreign"
+            && lock["status"] == "foreign_owner"
+    }));
+    assert!(locks.iter().any(|lock| {
+        lock["path"] == "generated/out.rs"
+            && lock["owner"] == "subtask:repoops_filter_foreign"
+            && lock["status"] == "foreign_owner"
+    }));
+    assert!(
+        locks.iter().all(|lock| lock["path"] != "docs/readme.md"),
+        "irrelevant reservation leaked into lock facts: {locks:?}"
+    );
+}
+
+#[test]
 fn import_rejects_ambiguous_destination_flags() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");

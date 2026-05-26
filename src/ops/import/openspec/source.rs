@@ -1,6 +1,7 @@
 #![cfg_attr(coverage_nightly, coverage(off))]
 
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -79,17 +80,21 @@ fn validate_source_digest_binding(
     required: &[OpenSpecSourceDigest],
     spec_digests: &[OpenSpecSourceDigest],
 ) -> Result<()> {
+    let mut compiled_by_path = HashMap::with_capacity(compiled.len());
+    for digest in compiled {
+        compiled_by_path
+            .entry(digest.path())
+            .or_insert(digest.digest());
+    }
+
     for expected in required.iter().chain(spec_digests.iter()) {
-        let Some(actual) = compiled
-            .iter()
-            .find(|digest| digest.path() == expected.path())
-        else {
+        let Some(actual_digest) = compiled_by_path.get(expected.path()) else {
             return Err(CoveyError::InvalidSourceSchema {
                 path: expected.path().to_owned(),
                 detail: "compiled mission missing source digest binding".to_owned(),
             });
         };
-        if actual.digest() != expected.digest() {
+        if *actual_digest != expected.digest() {
             return Err(CoveyError::InvalidSourceSchema {
                 path: expected.path().to_owned(),
                 detail: "compiled mission source digest is stale".to_owned(),

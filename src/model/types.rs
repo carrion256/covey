@@ -1,5 +1,5 @@
 use std::{
-    borrow::Borrow,
+    borrow::{Borrow, Cow},
     fmt,
     ops::{Add, Deref, Sub},
     str::FromStr,
@@ -494,14 +494,19 @@ impl TryFrom<String> for RepoopsPath {
                 "must not contain control characters",
             ));
         }
-        let mut normalized = value.trim().replace('\\', "/");
+        let mut normalized = if value.as_bytes().contains(&b'\\') {
+            Cow::Owned(value.trim().replace('\\', "/"))
+        } else {
+            Cow::Borrowed(value.trim())
+        };
         while let Some(rest) = normalized.strip_prefix("./") {
-            normalized = rest.to_owned();
+            normalized = Cow::Owned(rest.to_owned());
         }
         while let Some(rest) = normalized.strip_prefix('/') {
-            normalized = rest.to_owned();
+            normalized = Cow::Owned(rest.to_owned());
         }
-        let mut parts = Vec::new();
+        let mut parts =
+            Vec::with_capacity(normalized.bytes().filter(|byte| *byte == b'/').count() + 1);
         for part in normalized.split('/') {
             match part {
                 "" | "." => {}

@@ -18,6 +18,129 @@ pub enum ObjectType {
     Conflict,
 }
 
+pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
+    match object_type {
+        ObjectType::MetaTask => "meta_task",
+        ObjectType::Subtask => "subtask",
+        ObjectType::Claim => "claim",
+        ObjectType::Artifact => "artifact",
+        ObjectType::Review => "review",
+        ObjectType::ReadyQueue => "ready_queue",
+        ObjectType::Session => "session",
+        ObjectType::RuntimeAttestation => "runtime_attestation",
+        ObjectType::Reservation => "reservation",
+        ObjectType::Conflict => "conflict",
+    }
+}
+
+pub(crate) const fn claim_state_name(state: ClaimState) -> &'static str {
+    match state {
+        ClaimState::Held => "held",
+        ClaimState::Released => "released",
+        ClaimState::Expired => "expired",
+        ClaimState::Revoked => "revoked",
+    }
+}
+
+pub(crate) const fn session_state_name(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Active => "active",
+        SessionState::Stale => "stale",
+        SessionState::Exited => "exited",
+    }
+}
+
+pub(crate) const fn review_state_name(state: ReviewState) -> &'static str {
+    match state {
+        ReviewState::Requested => "requested",
+        ReviewState::InProgress => "in_progress",
+        ReviewState::Decided => "decided",
+        ReviewState::Superseded => "superseded",
+    }
+}
+
+pub(crate) const fn subtask_state_name(state: SubtaskState) -> &'static str {
+    match state {
+        SubtaskState::Available => "available",
+        SubtaskState::Blocked => "blocked",
+        SubtaskState::Claimed => "claimed",
+        SubtaskState::InProgress => "in_progress",
+        SubtaskState::ArtifactPublished => "artifact_published",
+        SubtaskState::ReviewPending => "review_pending",
+        SubtaskState::ChangesRequested => "changes_requested",
+        SubtaskState::Approved => "approved",
+        SubtaskState::Decided => "decided",
+        SubtaskState::ReadyForApply => "ready_for_apply",
+        SubtaskState::Applied => "applied",
+        SubtaskState::Abandoned => "abandoned",
+    }
+}
+
+pub(crate) const fn ready_queue_state_name(state: ReadyQueueState) -> &'static str {
+    match state {
+        ReadyQueueState::Queued => "queued",
+        ReadyQueueState::InFlight => "in_flight",
+        ReadyQueueState::Applied => "applied",
+        ReadyQueueState::Superseded => "superseded",
+        ReadyQueueState::Cancelled => "cancelled",
+    }
+}
+
+pub(crate) const fn meta_task_state_name(state: MetaTaskState) -> &'static str {
+    match state {
+        MetaTaskState::Planning => "planning",
+        MetaTaskState::Active => "active",
+        MetaTaskState::Completed => "completed",
+        MetaTaskState::Cancelled => "cancelled",
+    }
+}
+
+pub(crate) const fn subtask_kind_name(kind: SubtaskKind) -> &'static str {
+    match kind {
+        SubtaskKind::Work => "work",
+        SubtaskKind::Review => "review",
+    }
+}
+
+pub(crate) const fn reservation_state_name(state: ReservationState) -> &'static str {
+    match state {
+        ReservationState::Active => "active",
+        ReservationState::Released => "released",
+        ReservationState::Expired => "expired",
+    }
+}
+
+pub(crate) const fn review_verdict_name(verdict: ReviewVerdict) -> &'static str {
+    match verdict {
+        ReviewVerdict::Approve => "approve",
+        ReviewVerdict::ChangesRequested => "changes_requested",
+        ReviewVerdict::Blocked => "blocked",
+    }
+}
+
+pub(crate) const fn conflict_resolution_state_name(state: ConflictResolutionState) -> &'static str {
+    match state {
+        ConflictResolutionState::Open => "open",
+        ConflictResolutionState::Acknowledged => "acknowledged",
+        ConflictResolutionState::Resolved => "resolved",
+    }
+}
+
+pub(crate) const fn scope_class_name(scope_class: ScopeClass) -> &'static str {
+    match scope_class {
+        ScopeClass::ExactPath => "exact_path",
+        ScopeClass::Subtree => "subtree",
+        ScopeClass::RepoGlobal => "repo_global",
+        ScopeClass::GeneratedSet => "generated_set",
+    }
+}
+
+pub(crate) const fn conflict_kind_name(kind: ConflictKind) -> &'static str {
+    match kind {
+        ConflictKind::ReservationOverlap => "reservation_overlap",
+    }
+}
+
 /// Mutating event kinds emitted by the append-only event log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
 #[serde(rename_all = "snake_case")]

@@ -19,6 +19,7 @@ use crate::{
         ImportOpenSpecAction, ImportOpenSpecReq, ImportOpenSpecResult, MetaTaskId, ObjectType,
         OpenSpecChangeId, OpenSpecDigest, OpenSpecImportProvenance, OpenSpecPath,
         OpenSpecSourceDigest, OpenSpecTaskId, PromptText, SubtaskId, SubtaskTitle,
+        object_type_name,
     },
     queries::load_import_provenance_tx,
     validators::{MAX_OBJECT_ID_LEN, MAX_PATH_LEN, ensure_length, require_role},
@@ -323,7 +324,7 @@ impl Covey {
         ensure_length("object_id", object_id, MAX_OBJECT_ID_LEN)?;
         let result = self.with_read_tx(|tx| load_import_provenance_tx(tx, object_type, object_id));
         self.log_operation("import_provenance", "system", started_at, &result, |_| {
-            vec![format!("{}:{object_id}", object_type.to_string())]
+            vec![format!("{}:{object_id}", object_type_name(object_type))]
         });
         result
     }

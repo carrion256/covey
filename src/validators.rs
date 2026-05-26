@@ -5,7 +5,8 @@ use crate::{
     model::{
         ArtifactDigest, Claim, ClaimState, FenceSeq, MetaTaskState, ObjectType, ReadyQueueState,
         ReservationState, ReviewState, RuntimeAttestation, Session, SessionRole, SessionState,
-        SessionToken, StateValue, SubtaskId, SubtaskKind, SubtaskState,
+        SessionToken, StateValue, SubtaskId, SubtaskKind, SubtaskState, claim_state_name,
+        review_state_name, session_state_name,
     },
     queries::{
         load_artifact_tx, load_claim_tx, load_meta_task_tx, load_runtime_attestation_tx,
@@ -31,7 +32,7 @@ pub(crate) fn ensure_no_other_active_session(
     let existing = tx
         .query_row(
             "SELECT session_token FROM sessions WHERE agent_principal_id = ?1 AND state = ?2",
-            params![principal_id, SessionState::Active.to_string()],
+            params![principal_id, session_state_name(SessionState::Active)],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
@@ -171,7 +172,7 @@ pub(crate) fn held_claim_owner(
 ) -> Result<Option<SessionToken>> {
     tx.query_row(
         "SELECT owner_session_token FROM claims WHERE subtask_id = ?1 AND state = ?2",
-        params![subtask_id, ClaimState::Held.to_string()],
+        params![subtask_id, claim_state_name(ClaimState::Held)],
         |row| row.get(0),
     )
     .optional()
@@ -179,13 +180,17 @@ pub(crate) fn held_claim_owner(
 }
 
 pub(crate) fn require_session_can_claim_kind(session: &Session, kind: SubtaskKind) -> Result<()> {
-    let expected = match kind {
-        SubtaskKind::Work => vec![SessionRole::Executor],
-        SubtaskKind::Review => vec![SessionRole::Reviewer],
+    let allowed = match kind {
+        SubtaskKind::Work => session.role == SessionRole::Executor,
+        SubtaskKind::Review => session.role == SessionRole::Reviewer,
     };
-    if expected.contains(&session.role) {
+    if allowed {
         Ok(())
     } else {
+        let expected = match kind {
+            SubtaskKind::Work => vec![SessionRole::Executor],
+            SubtaskKind::Review => vec![SessionRole::Reviewer],
+        };
         Err(CoveyError::WrongRole {
             expected,
             actual: session.role,
@@ -194,24 +199,28 @@ pub(crate) fn require_session_can_claim_kind(session: &Session, kind: SubtaskKin
 }
 
 pub(crate) fn require_session_can_request_review(session: &Session) -> Result<()> {
-    let expected = vec![SessionRole::Executor, SessionRole::Orchestrator];
-    if expected.contains(&session.role) {
+    if matches!(
+        session.role,
+        SessionRole::Executor | SessionRole::Orchestrator
+    ) {
         Ok(())
     } else {
         Err(CoveyError::WrongRole {
-            expected,
+            expected: vec![SessionRole::Executor, SessionRole::Orchestrator],
             actual: session.role,
         })
     }
 }
 
 pub(crate) fn require_session_can_enqueue(session: &Session) -> Result<()> {
-    let expected = vec![SessionRole::Orchestrator, SessionRole::ApplyGate];
-    if expected.contains(&session.role) {
+    if matches!(
+        session.role,
+        SessionRole::Orchestrator | SessionRole::ApplyGate
+    ) {
         Ok(())
     } else {
         Err(CoveyError::WrongRole {
-            expected,
+            expected: vec![SessionRole::Orchestrator, SessionRole::ApplyGate],
             actual: session.role,
         })
     }
@@ -277,9 +286,9 @@ pub(crate) fn close_claim_and_detach(
         "UPDATE claims SET state = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4",
         params![
             claim.claim_id,
-            state.to_string(),
+            claim_state_name(state),
             now,
-            ClaimState::Held.to_string()
+            claim_state_name(ClaimState::Held)
         ],
     )?;
     if rows != 1 {
@@ -378,8 +387,8 @@ pub(crate) fn ensure_no_open_review_round(
             params![
                 subtask_id,
                 artifact_digest,
-                ReviewState::Requested.to_string(),
-                ReviewState::InProgress.to_string()
+                review_state_name(ReviewState::Requested),
+                review_state_name(ReviewState::InProgress)
             ],
             |_| Ok(()),
         )

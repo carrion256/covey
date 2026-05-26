@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::error::{CoveyError, Result};
 
-use super::{OpenSpecSourceTask, util::blake3_digest};
+use super::{OpenSpecSourceTask, util::blake3_prefixed_digest};
 
 pub(super) fn parse_openspec_tasks(
     tasks_text: &str,
@@ -39,7 +39,7 @@ pub(super) fn parse_openspec_tasks(
                 "missing task title",
             ));
         }
-        if !seen.insert(task_id.to_owned()) {
+        if !seen.insert(task_id) {
             return Err(invalid_openspec_task(
                 source_path,
                 line_index + 1,
@@ -51,7 +51,7 @@ pub(super) fn parse_openspec_tasks(
             task_id.to_owned(),
             title.to_owned(),
             source_path.to_owned(),
-            blake3_digest(format!("{task_id}\n{title}").as_bytes()),
+            task_digest(task_id, title),
             None,
             Vec::new(),
         )?);
@@ -79,6 +79,14 @@ fn invalid_openspec_task(source_path: &str, line: usize, reason: &str) -> CoveyE
         path: source_path.to_owned(),
         detail: format!("{reason} at line {line}"),
     }
+}
+
+fn task_digest(task_id: &str, title: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(task_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(title.as_bytes());
+    blake3_prefixed_digest(hasher.finalize())
 }
 
 fn validate_openspec_task_id(task_id: &str) -> std::result::Result<(), &'static str> {

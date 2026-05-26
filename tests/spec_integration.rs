@@ -2581,6 +2581,250 @@ fn claim_next_skips_changes_requested_work() {
 }
 
 #[test]
+fn claim_next_treats_applied_review_followup_as_satisfying_source_dependency() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let source_subtask_id = seed_changes_requested_work_subtask(&rig);
+    let meta_task_id = covey
+        .subtask_status(&source_subtask_id)
+        .expect("source status")
+        .subtask()
+        .meta_task_id
+        .to_string();
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let followup_subtask_id: String = conn
+        .query_row(
+            "SELECT followup_subtask_id FROM review_followup_subtasks WHERE source_subtask_id = ?1",
+            params![source_subtask_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("follow-up subtask id");
+    drop(conn);
+
+    let orchestrator = register(
+        &covey,
+        "orchestrator-followup-unblocks-dependent",
+        "orchestrator-followup-unblocks-dependent",
+        SessionRole::Orchestrator,
+    );
+    let dependent_subtask_id = covey
+        .create_subtask(
+            CreateSubtaskRequest::try_from_raw_parts(
+                orchestrator.clone(),
+                meta_task_id,
+                Some("dependent_after_review_followup".into()),
+                "dependent after review follow-up",
+                100,
+                id_key("create-dependent"),
+            )
+            .expect("valid dependent create request"),
+        )
+        .expect("create dependent");
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO subtask_dependencies (subtask_id, depends_on_subtask_id, source_ref, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            dependent_subtask_id.as_str(),
+            source_subtask_id.as_str(),
+            "source-dependency",
+            1_700_000_000_000_i64
+        ],
+    )
+    .expect("insert dependency on failed source");
+    drop(conn);
+
+    let worker = register(
+        &covey,
+        "worker-followup-unblocks-dependent",
+        "worker-followup-unblocks-dependent",
+        SessionRole::Executor,
+    );
+    attest(&covey, &worker);
+    let reviewer = register(
+        &covey,
+        "reviewer-followup-unblocks-dependent",
+        "reviewer-followup-unblocks-dependent",
+        SessionRole::Reviewer,
+    );
+    attest(&covey, &reviewer);
+    let gate = register(
+        &covey,
+        "gate-followup-unblocks-dependent",
+        "gate-followup-unblocks-dependent",
+        SessionRole::ApplyGate,
+    );
+
+    let followup_claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-followup"),
+            )
+            .expect("valid claim request"),
+        )
+        .expect("claim follow-up")
+        .expect("follow-up claim");
+    assert_eq!(followup_claim.subtask_id, followup_subtask_id);
+    covey
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                followup_claim.claim_id.clone(),
+                followup_claim.fence_seq,
+                id_key("start-followup"),
+            )
+            .expect("valid start request"),
+        )
+        .expect("start follow-up");
+    covey
+        .publish_artifact(
+            PublishArtifactReq::try_from_raw_parts(
+                worker.clone(),
+                followup_claim.claim_id.clone(),
+                followup_claim.fence_seq,
+                "blake3:followup_unblocks_dependent".into(),
+                ArtifactKind::PatchBundle,
+                "base".into(),
+                "followup-unblocks-dependent.json".into(),
+                "blake3:followup_unblocks_dependent_paths".into(),
+                id_key("publish-followup"),
+            )
+            .expect("valid follow-up publish"),
+        )
+        .expect("publish follow-up");
+    let review_id = covey
+        .request_review(
+            RequestReviewReq::try_from_raw_parts(
+                worker.clone(),
+                followup_subtask_id.clone(),
+                "blake3:followup_unblocks_dependent",
+                Some("review_followup_unblocks_dependent".into()),
+                1,
+                id_key("request-followup-review"),
+            )
+            .expect("valid review request"),
+        )
+        .expect("request follow-up review");
+    covey
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                followup_claim.claim_id,
+                followup_claim.fence_seq,
+                id_key("release-followup"),
+            )
+            .expect("valid release request"),
+        )
+        .expect("release follow-up claim");
+
+    let review_claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                reviewer.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-review"),
+            )
+            .expect("valid review claim request"),
+        )
+        .expect("claim review")
+        .expect("review claim");
+    covey
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-review"),
+            )
+            .expect("valid review start request"),
+        )
+        .expect("start review");
+    covey
+        .decide_review(
+            DecideReviewReq::try_from_raw_parts(
+                reviewer,
+                review_id.clone(),
+                review_claim.claim_id,
+                review_claim.fence_seq,
+                covey::ReviewVerdict::Approve,
+                "blake3:followup_unblocks_dependent_findings".into(),
+                id_key("approve-followup"),
+            )
+            .expect("valid review decision request"),
+        )
+        .expect("approve follow-up");
+    let queue_id = covey
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orchestrator,
+                "blake3:followup_unblocks_dependent".into(),
+                followup_subtask_id.clone(),
+                SettlementTarget::Canonical,
+                id_key("enqueue-followup"),
+            )
+            .expect("valid enqueue request"),
+        )
+        .expect("enqueue follow-up");
+    let queue_claim = covey
+        .claim_next_ready_queue_item(claim_ready_queue_req(
+            gate.clone(),
+            30_000,
+            id_key("claim-ready-queue"),
+        ))
+        .expect("claim ready queue")
+        .expect("queue claim");
+    assert_eq!(queue_claim.queue_id, queue_id);
+    record_apply_verification(
+        &covey,
+        &gate,
+        &queue_claim.queue_id,
+        "blake3:followup_unblocks_dependent",
+        &review_id,
+        "blake3:followup_unblocks_dependent_findings",
+        queue_claim.claim_fence_seq,
+    );
+    covey
+        .mark_applied(mark_applied_req(
+            gate,
+            queue_claim.queue_id.to_string(),
+            queue_claim.claim_fence_seq,
+            id_key("mark-followup-applied"),
+        ))
+        .expect("mark follow-up applied");
+
+    assert_eq!(
+        covey
+            .subtask_status(&source_subtask_id)
+            .expect("source status")
+            .subtask()
+            .state(),
+        SubtaskState::ChangesRequested
+    );
+    assert_eq!(
+        covey
+            .subtask_status(&followup_subtask_id)
+            .expect("follow-up status")
+            .subtask()
+            .state(),
+        SubtaskState::Applied
+    );
+
+    let dependent_claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker,
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-dependent"),
+            )
+            .expect("valid dependent claim request"),
+        )
+        .expect("claim dependent")
+        .expect("dependent should become claimable after follow-up is applied");
+    assert_eq!(dependent_claim.subtask_id, dependent_subtask_id);
+}
+
+#[test]
 fn claim_subtask_mixed_path_race_single_winner() {
     let rig = Rig::new();
     let covey = rig.covey();

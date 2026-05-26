@@ -1,4 +1,7 @@
-use std::time::Instant;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Serialize;
@@ -7,8 +10,9 @@ use crate::{
     Covey, SessionRole,
     error::{CoveyError, Result},
     model::{
-        CreateSubtaskRequest, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
-        ImportBdV1SkipReason, SessionToken, SourceIssueId, bd_import_v1_subtask_id,
+        CreateSubtaskRequest, IdempotencyKey, ImportBdV1ItemResult, ImportBdV1Req,
+        ImportBdV1Result, ImportBdV1SkipReason, MetaTaskId, SessionToken, SourceIssueId, SubtaskId,
+        SubtaskPriority, SubtaskTitle, bd_import_v1_subtask_id,
     },
     ops::meta_task::submit_meta_task_tx,
     ops::workflow::create_subtask_tx,
@@ -214,14 +218,14 @@ fn import_bd_v1_work_subtask_tx(
         return Ok(subtask_id);
     }
 
-    let create_req = CreateSubtaskRequest::try_from_raw_parts(
-        req.session_token.to_string(),
-        destination_meta_task_id.clone(),
-        Some(subtask_id.clone()),
-        req.title.clone(),
-        req.priority,
-        req.idempotency_key.clone(),
-    )?;
+    let create_req = CreateSubtaskRequest {
+        session_token: req.session_token.clone(),
+        meta_task_id: MetaTaskId::parse(destination_meta_task_id.clone())?,
+        subtask_id: Some(SubtaskId::parse(subtask_id.clone())?),
+        title: SubtaskTitle::parse(req.title.clone())?,
+        priority: SubtaskPriority::parse(req.priority)?,
+        idempotency_key: IdempotencyKey::parse(req.idempotency_key.clone())?,
+    };
 
     create_subtask_tx(tx, &create_req, now)
 }
@@ -233,29 +237,31 @@ fn import_bd_v1_source_rows_tx(
     source_snapshot: &SourceSnapshot,
     now: i64,
 ) -> Result<ImportBdV1Result> {
-    let mut ordered_issues = source_snapshot.issues.clone();
+    let mut ordered_issues = source_snapshot.issues.iter().collect::<Vec<_>>();
+    let dependency_counts = dependency_counts_by_issue(&source_snapshot.dependencies);
+    let labeled_skip_issue_ids = labeled_skip_issue_ids(&source_snapshot.labels);
     ordered_issues.sort_by(|left, right| {
-        let left_dep_count = source_snapshot
-            .dependencies
-            .iter()
-            .filter(|dep| dep.issue_id == left.id)
-            .count();
-        let right_dep_count = source_snapshot
-            .dependencies
-            .iter()
-            .filter(|dep| dep.issue_id == right.id)
-            .count();
-
         left.priority
             .cmp(&right.priority)
-            .then_with(|| left_dep_count.cmp(&right_dep_count))
+            .then_with(|| {
+                dependency_counts
+                    .get(left.id.as_str())
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(
+                        &dependency_counts
+                            .get(right.id.as_str())
+                            .copied()
+                            .unwrap_or(0),
+                    )
+            })
             .then_with(|| left.id.cmp(&right.id))
     });
 
     let mut items = Vec::with_capacity(ordered_issues.len());
 
-    for issue in &ordered_issues {
-        match assess_source_issue(issue, source_snapshot) {
+    for issue in ordered_issues {
+        match assess_source_issue(issue, &labeled_skip_issue_ids) {
             SourceIssueEligibility::Importable => {
                 let existed_before =
                     existing_subtask_matches_destination(tx, &issue.id, destination_meta_task_id)?;
@@ -302,6 +308,26 @@ fn import_bd_v1_source_rows_tx(
         .map_err(|reason| CoveyError::InvalidImportDestination { reason })
 }
 
+fn dependency_counts_by_issue(dependencies: &[SourceDependency]) -> HashMap<&str, usize> {
+    let mut counts = HashMap::with_capacity(dependencies.len());
+    for dependency in dependencies {
+        *counts.entry(dependency.issue_id.as_str()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn labeled_skip_issue_ids(labels: &[SourceLabel]) -> HashSet<&str> {
+    let mut issue_ids = HashSet::with_capacity(labels.len());
+    for label in labels {
+        if label.label.eq_ignore_ascii_case("review")
+            || label.label.eq_ignore_ascii_case("import:skip")
+        {
+            issue_ids.insert(label.issue_id.as_str());
+        }
+    }
+    issue_ids
+}
+
 fn existing_subtask_matches_destination(
     tx: &Transaction<'_>,
     source_issue_id: &str,
@@ -325,7 +351,7 @@ fn existing_subtask_matches_destination(
 
 fn assess_source_issue(
     issue: &SourceIssue,
-    source_snapshot: &SourceSnapshot,
+    labeled_skip_issue_ids: &HashSet<&str>,
 ) -> SourceIssueEligibility {
     if issue.id.trim().is_empty() {
         return SourceIssueEligibility::Skip(ImportBdV1SkipReason::InvalidRow {
@@ -366,11 +392,7 @@ fn assess_source_issue(
         });
     }
 
-    if source_snapshot.labels.iter().any(|label| {
-        label.issue_id == issue.id
-            && (label.label.eq_ignore_ascii_case("review")
-                || label.label.eq_ignore_ascii_case("import:skip"))
-    }) {
+    if labeled_skip_issue_ids.contains(issue.id.as_str()) {
         return SourceIssueEligibility::Skip(ImportBdV1SkipReason::InvalidRow {
             detail: "unsupported labeled issue".to_owned(),
         });
@@ -445,13 +467,20 @@ fn ensure_table_exists(source_conn: &Connection, path: &str, table_name: &str) -
 fn ensure_issue_columns(source_conn: &Connection, path: &str) -> Result<()> {
     let mut stmt = source_conn.prepare("PRAGMA table_info(issues)")?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    let mut present_columns = Vec::new();
+    let mut present_mask = 0u8;
     for column in columns {
-        present_columns.push(column?);
+        match column?.as_str() {
+            "id" => present_mask |= 1 << 0,
+            "title" => present_mask |= 1 << 1,
+            "status" => present_mask |= 1 << 2,
+            "priority" => present_mask |= 1 << 3,
+            "issue_type" => present_mask |= 1 << 4,
+            _ => {}
+        }
     }
 
-    for required in REQUIRED_ISSUES_COLUMNS {
-        if !present_columns.iter().any(|column| column == required) {
+    for (index, required) in REQUIRED_ISSUES_COLUMNS.iter().enumerate() {
+        if present_mask & (1 << index) == 0 {
             return Err(CoveyError::InvalidSourceSchema {
                 path: path.to_owned(),
                 detail: format!("issues table missing required column {required}"),
@@ -463,19 +492,21 @@ fn ensure_issue_columns(source_conn: &Connection, path: &str) -> Result<()> {
 }
 
 fn load_source_issues(source_conn: &Connection, path: &str) -> Result<Vec<SourceIssue>> {
-    let deleted_at_predicate = if issue_table_has_column(source_conn, "deleted_at")? {
-        "WHERE deleted_at IS NULL OR deleted_at = ''"
-    } else {
-        ""
-    };
-    let mut stmt = source_conn.prepare(&format!(
+    let sql = if issue_table_has_column(source_conn, "deleted_at")? {
         r#"
             SELECT id, title, status, priority, issue_type
             FROM issues
-            {deleted_at_predicate}
+            WHERE deleted_at IS NULL OR deleted_at = ''
             ORDER BY priority ASC, id ASC
             "#
-    ))?;
+    } else {
+        r#"
+            SELECT id, title, status, priority, issue_type
+            FROM issues
+            ORDER BY priority ASC, id ASC
+            "#
+    };
+    let mut stmt = source_conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok(SourceIssue {
             id: row.get(0)?,
@@ -604,8 +635,8 @@ fn resolve_import_bd_v1_destination<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceDependency, SourceIssue, SourceIssueEligibility, SourceIssueStatus, SourceLabel,
-        SourceSnapshot, assess_source_issue, parse_import_bd_v1_destination,
+        SourceIssue, SourceIssueEligibility, SourceIssueStatus, assess_source_issue,
+        parse_import_bd_v1_destination,
     };
     use crate::error::CoveyError;
     use crate::model::ImportBdV1SkipReason;
@@ -624,11 +655,6 @@ mod tests {
 
     #[test]
     fn source_issue_status_is_typed_for_import_eligibility() {
-        let source = SourceSnapshot {
-            issues: Vec::new(),
-            dependencies: Vec::<SourceDependency>::new(),
-            labels: Vec::<SourceLabel>::new(),
-        };
         let issue = SourceIssue {
             id: "BD-1".to_owned(),
             title: "closed work".to_owned(),
@@ -636,9 +662,10 @@ mod tests {
             priority: 1,
             issue_type: "task".to_owned(),
         };
+        let labeled_skip_issue_ids = std::collections::HashSet::new();
 
         assert!(matches!(
-            assess_source_issue(&issue, &source),
+            assess_source_issue(&issue, &labeled_skip_issue_ids),
             SourceIssueEligibility::Skip(ImportBdV1SkipReason::InvalidRow { detail })
                 if detail == "unsupported status closed"
         ));

@@ -1,0 +1,2 @@
+CREATE INDEX IF NOT EXISTS idx_review_followup_subtasks_source
+ON review_followup_subtasks(source_subtask_id, followup_subtask_id);

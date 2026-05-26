@@ -1,6 +1,6 @@
 use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use super::{
     AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind,
@@ -2300,6 +2300,10 @@ impl Reservation {
         self.scope.generated_members()
     }
 
+    pub(crate) fn generated_member_strs(&self) -> impl Iterator<Item = &str> {
+        self.scope.generated_member_strs()
+    }
+
     #[must_use]
     pub const fn created_at(&self) -> TimestampMs {
         self.timestamps.created_at()
@@ -2308,6 +2312,37 @@ impl Reservation {
     #[must_use]
     pub const fn updated_at(&self) -> TimestampMs {
         self.timestamps.updated_at()
+    }
+
+    pub(crate) fn into_flat_parts(
+        self,
+    ) -> (
+        ReservationId,
+        SubtaskId,
+        ScopeClass,
+        String,
+        Vec<String>,
+        LeaseDeadlineMs,
+        TimestampMs,
+    ) {
+        let Self {
+            reservation_id,
+            owner_subtask_id,
+            scope,
+            lease_deadline,
+            timestamps,
+            ..
+        } = self;
+        let (scope_class, scope_key, generated_members) = scope.into_parts();
+        (
+            reservation_id,
+            owner_subtask_id,
+            scope_class,
+            scope_key,
+            generated_members,
+            lease_deadline,
+            timestamps.created_at(),
+        )
     }
 }
 
@@ -2399,6 +2434,37 @@ impl ReservationScope {
             Self::ExactPath { .. } | Self::Subtree { .. } | Self::RepoGlobal => Vec::new(),
         }
     }
+
+    pub(crate) fn generated_member_strs(&self) -> impl Iterator<Item = &str> {
+        self.generated_member_slice()
+            .iter()
+            .map(GeneratedReservationMember::as_str)
+    }
+
+    fn generated_member_slice(&self) -> &[GeneratedReservationMember] {
+        match self {
+            Self::GeneratedSet {
+                generated_members, ..
+            } => generated_members.as_slice(),
+            Self::ExactPath { .. } | Self::Subtree { .. } | Self::RepoGlobal => &[],
+        }
+    }
+
+    fn into_parts(self) -> (ScopeClass, String, Vec<String>) {
+        match self {
+            Self::ExactPath { scope_key } => (ScopeClass::ExactPath, scope_key.into(), Vec::new()),
+            Self::Subtree { scope_key } => (ScopeClass::Subtree, scope_key.into(), Vec::new()),
+            Self::RepoGlobal => (ScopeClass::RepoGlobal, "repo".to_owned(), Vec::new()),
+            Self::GeneratedSet {
+                scope_key,
+                generated_members,
+            } => (
+                ScopeClass::GeneratedSet,
+                scope_key.into(),
+                generated_members.into(),
+            ),
+        }
+    }
 }
 
 impl ReservationScopeKey {
@@ -2439,17 +2505,19 @@ impl GeneratedReservationMembers {
         if generated_members.is_empty() {
             return Err("generated-set reservations require generated_members".to_owned());
         }
-        let mut seen = BTreeSet::new();
-        let mut parsed = Vec::with_capacity(generated_members.len());
-        for member in generated_members {
-            let parsed_member = GeneratedReservationMember::parse_for_scope(member)?;
-            if !seen.insert(parsed_member.as_str().to_owned()) {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(generated_members.len());
+        for member in &generated_members {
+            validate_generated_reservation_member_for_scope(member)?;
+            if !seen.insert(member.as_str()) {
                 return Err(
                     "generated-set reservations require unique generated_members".to_owned(),
                 );
             }
-            parsed.push(parsed_member);
         }
+        let parsed = generated_members
+            .into_iter()
+            .map(GeneratedReservationMember)
+            .collect();
         Ok(Self(parsed))
     }
 
@@ -2460,26 +2528,26 @@ impl GeneratedReservationMembers {
             .map(GeneratedReservationMember::to_string)
             .collect()
     }
+
+    fn as_slice(&self) -> &[GeneratedReservationMember] {
+        &self.0
+    }
 }
 
 impl GeneratedReservationMember {
-    fn parse_for_scope(member: String) -> Result<Self, String> {
-        if member.trim().is_empty() {
-            return Err(
-                "generated-set reservations require non-empty generated_members".to_owned(),
-            );
-        }
-        if member.trim() != member || member.chars().any(char::is_control) {
-            return Err(
-                "generated-set reservations require normalized generated_members".to_owned(),
-            );
-        }
-        Ok(Self(member))
-    }
-
     fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn validate_generated_reservation_member_for_scope(member: &str) -> Result<(), String> {
+    if member.trim().is_empty() {
+        return Err("generated-set reservations require non-empty generated_members".to_owned());
+    }
+    if member.trim() != member || member.chars().any(char::is_control) {
+        return Err("generated-set reservations require normalized generated_members".to_owned());
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for GeneratedReservationMember {
@@ -2498,7 +2566,11 @@ impl TryFrom<Vec<String>> for GeneratedReservationMembers {
 
 impl From<GeneratedReservationMembers> for Vec<String> {
     fn from(generated_members: GeneratedReservationMembers) -> Self {
-        generated_members.to_vec()
+        generated_members
+            .0
+            .into_iter()
+            .map(|member| member.0)
+            .collect()
     }
 }
 
@@ -4661,6 +4733,10 @@ impl OverlapCandidate {
 
     pub(crate) fn generated_members(&self) -> Vec<String> {
         self.scope.generated_members()
+    }
+
+    pub(crate) fn generated_member_strs(&self) -> impl Iterator<Item = &str> {
+        self.scope.generated_member_strs()
     }
 }
 
