@@ -1320,7 +1320,8 @@ struct LandingAuthorization {
     verdict_digest: ArtifactDigest,
     apply_verification_seal_digest: ArtifactDigest,
     seal_digest: ArtifactDigest,
-    head_commit: String,
+    base_tree_oid: String,
+    changed_paths_digest: ChangedPathsDigest,
     target_ref: String,
 }
 
@@ -1329,7 +1330,7 @@ impl Serialize for LandingAuthorization {
     where
         S: Serializer,
     {
-        let mut record = serializer.serialize_struct("LandingAuthorization", 13)?;
+        let mut record = serializer.serialize_struct("LandingAuthorization", 14)?;
         record.serialize_field("schema_version", self.schema_version)?;
         record.serialize_field("accepted", &true)?;
         record.serialize_field("queue_id", &self.queue_id)?;
@@ -1344,7 +1345,8 @@ impl Serialize for LandingAuthorization {
             &self.apply_verification_seal_digest,
         )?;
         record.serialize_field("seal_digest", &self.seal_digest)?;
-        record.serialize_field("head_commit", &self.head_commit)?;
+        record.serialize_field("base_tree_oid", &self.base_tree_oid)?;
+        record.serialize_field("changed_paths_digest", &self.changed_paths_digest)?;
         record.serialize_field("target_ref", &self.target_ref)?;
         record.end()
     }
@@ -2041,6 +2043,8 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             .target_ref
             .clone()
             .unwrap_or_else(|| req.mainline_ref.clone());
+        let base_tree_oid =
+            artifact_base_tree_oid(&req.repo, &artifact, req.mainline_ref.as_str())?;
         let auth = LandingAuthorization {
             schema_version: "codex_hook_landing_authorization.v1",
             queue_id: queue_id.clone(),
@@ -2052,7 +2056,8 @@ fn verify_apply_request(req: &VerifyRequest) -> Result<Value, ApplyProofError> {
             verdict_digest: apply.verdict_digest.clone(),
             apply_verification_seal_digest: apply.seal_digest.clone(),
             seal_digest: seal_digest.clone(),
-            head_commit: head,
+            base_tree_oid,
+            changed_paths_digest: artifact.changed_paths_digest.clone(),
             target_ref: target_ref.to_string(),
         };
         insert_object(
@@ -2458,6 +2463,25 @@ fn load_artifact(conn: &Connection, digest: &str) -> Result<ArtifactRow, ApplyPr
         },
     )
     .map_err(Into::into)
+}
+
+fn artifact_base_tree_oid(
+    repo: &Path,
+    artifact: &ArtifactRow,
+    fallback_ref: &str,
+) -> Result<String, ApplyProofError> {
+    let manifest_path = PathBuf::from(artifact.manifest_path.as_str());
+    let base_rev = read_json(&manifest_path)
+        .ok()
+        .and_then(|manifest| {
+            manifest
+                .get("base_rev")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| fallback_ref.to_owned());
+    let base_tree_rev = format!("{base_rev}^{{tree}}");
+    git(repo, ["rev-parse", base_tree_rev.as_str()])
 }
 
 fn load_review(conn: &Connection, review_id: &str) -> Result<ReviewRow, ApplyProofError> {
@@ -3578,6 +3602,33 @@ mod tests {
             target_ref: None,
             output: Some(PathBuf::from("proof.json")),
         }
+    }
+
+    #[test]
+    fn landing_authorization_serializes_tree_and_artifact_context_without_head_commit() {
+        let authorization = LandingAuthorization {
+            schema_version: "codex_hook_landing_authorization.v1",
+            queue_id: QueueId::parse("queue-1").expect("valid queue id"),
+            artifact_digest: ArtifactDigest::parse("blake3:artifact").expect("valid digest"),
+            review_id: ReviewId::parse("review-1").expect("valid review id"),
+            findings_digest: FindingsDigest::parse("blake3:findings").expect("valid findings"),
+            claim_fence_seq: FenceSeq::parse(7).expect("valid fence"),
+            verifier: VerifierId::parse("mutai-rs:settlement-apply-gate").expect("valid verifier"),
+            verdict_digest: ArtifactDigest::parse("blake3:verdict").expect("valid verdict"),
+            apply_verification_seal_digest: ArtifactDigest::parse("blake3:apply-seal")
+                .expect("valid apply seal"),
+            seal_digest: ArtifactDigest::parse("blake3:seal").expect("valid seal"),
+            base_tree_oid: "tree-oid".to_owned(),
+            changed_paths_digest: ChangedPathsDigest::parse("blake3:paths")
+                .expect("valid changed paths"),
+            target_ref: "origin/main".to_owned(),
+        };
+
+        let payload = serde_json::to_value(authorization).expect("serialize authorization");
+
+        assert_eq!(payload["base_tree_oid"], "tree-oid");
+        assert_eq!(payload["changed_paths_digest"], "blake3:paths");
+        assert!(payload.get("head_commit").is_none());
     }
 
     fn runtime_attestation_row(
