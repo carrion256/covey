@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::{
     AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
-    CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LeaseDeadlineMs,
-    LeaseDurationMs, MetaTaskId, ModelId, PromptText, ProviderId, ProviderRunId,
+    CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid,
+    LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, PromptText, ProviderId, ProviderRunId,
     ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope, ReviewId,
     ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole, SessionToken,
     SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
@@ -1018,6 +1018,43 @@ impl RecordApplyVerificationReq {
             verdict_digest: ArtifactDigest::parse(verdict_digest.into())?,
             seal_digest: ArtifactDigest::parse(seal_digest.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record final landed commit receipt for an applied artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordLandingReceiptReq {
+    pub session_token: SessionToken,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub claim_fence_seq: FenceSeq,
+    pub target_ref: BaseRev,
+    pub landed_commit_oid: LandedCommitOid,
+}
+
+impl RecordLandingReceiptReq {
+    /// Builds a landing-receipt request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, queue id, artifact digest,
+    /// fence, target ref, or commit oid is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        queue_id: impl Into<String>,
+        artifact_digest: impl Into<String>,
+        claim_fence_seq: impl Into<i64>,
+        target_ref: impl Into<String>,
+        landed_commit_oid: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            queue_id: QueueId::parse(queue_id.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
+            target_ref: BaseRev::parse(target_ref.into())?,
+            landed_commit_oid: LandedCommitOid::parse(landed_commit_oid.into())?,
         })
     }
 }

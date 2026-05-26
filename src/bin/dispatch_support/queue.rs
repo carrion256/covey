@@ -101,6 +101,29 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
                 format!("landing authorization verified {}", status.queue_id()),
             ))
         }
+        QueueCommand::RecordLandingReceipt(args) => {
+            let queue_id = args.queue_id.clone();
+            let artifact_digest = args.artifact_digest.clone();
+            let landed_commit_oid = args.landed_commit_oid.clone();
+            let req = RecordLandingReceiptReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id,
+                args.artifact_digest,
+                args.claim_fence_seq,
+                args.target_ref,
+                args.landed_commit_oid,
+            )?;
+            store.record_landing_receipt(req)?;
+            Ok(Rendered::summary(
+                serde_json::json!({
+                    "operation": "record_landing_receipt",
+                    "queue_id": queue_id,
+                    "artifact_digest": artifact_digest,
+                    "landed_commit_oid": landed_commit_oid,
+                }),
+                format!("landing receipt recorded {queue_id}"),
+            ))
+        }
         QueueCommand::MarkApplied(args) => {
             let req = MarkAppliedReq::try_from_raw_parts(
                 args.session_token,

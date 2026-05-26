@@ -150,6 +150,22 @@ fn validate_normalized_text(
     Ok(())
 }
 
+fn validate_commit_oid(field: &'static str, value: &str) -> Result<(), CoveyTypeValidationError> {
+    if !(7..=64).contains(&value.len()) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must be 7 to 64 hexadecimal characters",
+        ));
+    }
+    if !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must contain only hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prompt_text(field: &'static str, value: &str) -> Result<(), CoveyTypeValidationError> {
     const MAX_PROMPT_TEXT_LEN: usize = 32 * 1024;
 
@@ -606,6 +622,7 @@ string_newtype!(ChangedPathsDigest, "changed_paths_digest", validate_digest);
 string_newtype!(FindingsDigest, "findings_digest", validate_digest);
 string_newtype!(OpenSpecDigest, "openspec_digest", validate_blake3_digest);
 string_newtype!(BaseRev, "base_rev", validate_tokenish);
+string_newtype!(LandedCommitOid, "landed_commit_oid", validate_commit_oid);
 string_newtype!(ProviderId, "provider", validate_tokenish);
 string_newtype!(ModelId, "model", validate_tokenish);
 string_newtype!(ProviderRunId, "provider_run_id", validate_normalized_text);

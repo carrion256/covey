@@ -9,11 +9,12 @@ use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
     Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, FenceSeq,
     IdempotencyKey, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
-    PublishArtifactReq, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
-    ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
-    SubtaskTitle, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
+    ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SubtaskTitle, SupersedeQueueItemReq,
+    VerifyLandingAuthorizationReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -898,6 +899,66 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
         Err(CoveyError::ApplyGateEvidenceMissing { reason, .. })
             if reason == "accepted apply verifier verdict does not match landing authorization"
     ));
+}
+
+#[rstest]
+fn landing_receipt_records_landed_commit_after_apply(rig: Rig) {
+    let subtask_id = "queue_landing_receipt";
+    let digest = "blake3:queue_landing_receipt";
+    let (_orch, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
+    let gate = register(&rig.covey, "gate-landing-receipt", SessionRole::ApplyGate);
+    let claim = rig
+        .covey
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
+        .expect("claim queue item");
+    record_apply_verification(
+        &rig.covey,
+        &gate,
+        &queue_id,
+        subtask_id,
+        digest,
+        &format!("{digest}-findings"),
+        claim.claim_fence_seq,
+    );
+    rig.covey
+        .mark_applied(mark_applied_req(
+            gate.clone(),
+            queue_id.clone(),
+            claim.claim_fence_seq,
+            id_key("mark-applied"),
+        ))
+        .expect("mark applied");
+
+    rig.covey
+        .record_landing_receipt(
+            RecordLandingReceiptReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id.clone(),
+                digest,
+                claim.claim_fence_seq,
+                "origin/main",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("valid landing receipt request"),
+        )
+        .expect("record landing receipt");
+
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let receipt: (String, String, String) = conn
+        .query_row(
+            "SELECT artifact_digest, target_ref, landed_commit_oid FROM landing_receipts WHERE queue_id = ?1",
+            params![queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("landing receipt row");
+    assert_eq!(receipt.0, digest);
+    assert_eq!(receipt.1, "origin/main");
+    assert_eq!(receipt.2, "0123456789abcdef0123456789abcdef01234567");
 }
 
 fn prepare_approved_artifact_without_review(

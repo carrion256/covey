@@ -11,10 +11,10 @@ use crate::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
         LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, ObjectType, QueueId,
         ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        RecordApplyVerificationReq, ReviewId, ReviewState, ReviewVerdict, RuntimeAttestation,
-        Session, SessionRole, SessionToken, SettlementTarget, SubtaskState, SupersedeQueueItemReq,
-        VerifyLandingAuthorizationReq, ready_queue_state_name, review_state_name,
-        review_verdict_name, subtask_state_name,
+        RecordApplyVerificationReq, RecordLandingReceiptReq, ReviewId, ReviewState, ReviewVerdict,
+        RuntimeAttestation, Session, SessionRole, SessionToken, SettlementTarget, SubtaskState,
+        SupersedeQueueItemReq, VerifyLandingAuthorizationReq, ready_queue_state_name,
+        review_state_name, review_verdict_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -752,6 +752,70 @@ impl Covey {
             started_at,
             &result,
             |status| vec![format!("queue:{}", status.queue_id())],
+        );
+        result
+    }
+
+    /// Records the final commit oid as a settlement receipt after landing.
+    pub fn record_landing_receipt(&self, req: RecordLandingReceiptReq) -> Result<()> {
+        let started_at = Instant::now();
+        let session_token_for_log = req.session_token.clone();
+        let result = self.with_write_tx(|tx, now| {
+            require_role(
+                tx,
+                &req.session_token,
+                &[SessionRole::ApplyGate, SessionRole::Orchestrator],
+            )?;
+            let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
+            let queue_id = QueueId::parse(item.queue_id())?;
+            if item.state() != ReadyQueueState::Applied {
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id,
+                    reason: "landing receipt requires an applied queue item".to_owned(),
+                });
+            }
+            if item.artifact_digest() != req.artifact_digest {
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id,
+                    reason: "landing receipt artifact digest does not match queue item".to_owned(),
+                });
+            }
+            if item.claim_fence_seq() != Some(req.claim_fence_seq.get()) {
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id,
+                    reason: "landing receipt claim fence does not match queue item".to_owned(),
+                });
+            }
+            tx.execute(
+                r#"
+                INSERT INTO landing_receipts (
+                    queue_id, artifact_digest, claim_fence_seq, target_ref, landed_commit_oid,
+                    recorded_by_session, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(queue_id, artifact_digest) DO UPDATE SET
+                    claim_fence_seq = excluded.claim_fence_seq,
+                    target_ref = excluded.target_ref,
+                    landed_commit_oid = excluded.landed_commit_oid,
+                    recorded_by_session = excluded.recorded_by_session
+                "#,
+                params![
+                    req.queue_id.as_str(),
+                    req.artifact_digest.as_str(),
+                    req.claim_fence_seq,
+                    req.target_ref.as_str(),
+                    req.landed_commit_oid.as_str(),
+                    req.session_token.as_str(),
+                    now,
+                ],
+            )?;
+            Ok(())
+        });
+        self.log_operation(
+            "record_landing_receipt",
+            &session_token_for_log,
+            started_at,
+            &result,
+            |_| vec![format!("queue:{}", req.queue_id)],
         );
         result
     }

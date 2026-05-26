@@ -12,6 +12,8 @@ pub(crate) enum QueueCommand {
     RecordApplyVerification(RecordApplyVerificationArgs),
     #[command(name = "verify-landing-authorization")]
     VerifyLandingAuthorization(VerifyLandingAuthorizationArgs),
+    #[command(name = "record-landing-receipt")]
+    RecordLandingReceipt(RecordLandingReceiptArgs),
     #[command(name = "mark-applied")]
     MarkApplied(MarkAppliedArgs),
     Supersede(SupersedeQueueArgs),
@@ -101,6 +103,22 @@ pub(crate) struct VerifyLandingAuthorizationArgs {
     pub(crate) verdict_digest: String,
     #[arg(long)]
     pub(crate) seal_digest: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RecordLandingReceiptArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) queue_id: String,
+    #[arg(long)]
+    pub(crate) artifact_digest: String,
+    #[arg(long)]
+    pub(crate) claim_fence_seq: i64,
+    #[arg(long)]
+    pub(crate) target_ref: String,
+    #[arg(long)]
+    pub(crate) landed_commit_oid: String,
 }
 
 #[derive(Args, Debug)]
