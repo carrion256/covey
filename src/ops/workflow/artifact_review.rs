@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use rusqlite::params;
+use rusqlite::{Transaction, params};
 
 use crate::{
     Covey,
@@ -496,7 +496,7 @@ impl Covey {
 }
 
 fn create_review_followup_subtask_tx(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Transaction<'_>,
     source_subtask: &crate::model::SubtaskRow,
     source_artifact_digest: &str,
     findings_digest: &str,
@@ -550,4 +550,63 @@ fn create_review_followup_subtask_tx(
         ],
     )?;
     Ok(followup_subtask_id)
+}
+
+pub(crate) fn ensure_changes_requested_followup_blocks_tx(
+    tx: &Transaction<'_>,
+    created_by_session: &str,
+    now: i64,
+) -> Result<usize> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT r.review_id
+        FROM reviews r
+        JOIN subtasks s ON s.subtask_id = r.subtask_id
+        WHERE r.state = ?1
+          AND r.verdict = ?2
+          AND s.kind = ?3
+          AND s.state = ?4
+          AND NOT EXISTS (
+              SELECT 1
+              FROM review_followup_subtasks f
+              WHERE f.review_id = r.review_id
+          )
+        ORDER BY r.updated_at ASC, r.created_at ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            review_state_name(ReviewState::Decided),
+            review_verdict_name(ReviewVerdict::ChangesRequested),
+            subtask_kind_name(SubtaskKind::Work),
+            subtask_state_name(SubtaskState::ChangesRequested),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let review_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut created = 0;
+    for review_id in review_ids {
+        let review = load_review_tx(tx, &review_id)?;
+        let source_subtask = load_subtask_tx(tx, review.subtask_id())?;
+        let findings_digest = review
+            .findings_digest()
+            .ok_or(CoveyError::IllegalTransition {
+                from: review.state().into(),
+                to: SubtaskState::Available.into(),
+                object: ObjectType::Subtask,
+            })?;
+        create_review_followup_subtask_tx(
+            tx,
+            &source_subtask,
+            review.artifact_digest(),
+            findings_digest,
+            created_by_session,
+            review.review_id(),
+            now,
+        )?;
+        created += 1;
+    }
+    Ok(created)
 }

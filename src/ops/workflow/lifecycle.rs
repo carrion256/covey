@@ -28,6 +28,8 @@ use crate::{
     },
 };
 
+use super::artifact_review::ensure_changes_requested_followup_blocks_tx;
+
 impl Covey {
     /// Creates a new work or review subtask under an existing meta-task.
     pub fn create_subtask(&self, req: CreateSubtaskRequest) -> Result<String> {
@@ -87,6 +89,13 @@ impl Covey {
                             });
                         }
                     };
+                    if session.role == SessionRole::Executor {
+                        ensure_changes_requested_followup_blocks_tx(
+                            tx,
+                            req.session_token.as_str(),
+                            now,
+                        )?;
+                    }
 
                     let Some(subtask_id) = ordered_claim_candidate(
                         tx,

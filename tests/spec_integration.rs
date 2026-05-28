@@ -2525,7 +2525,7 @@ fn claim_subtask_rejects_illegal_state_without_appending_event() {
 }
 
 #[test]
-fn claim_next_skips_changes_requested_work() {
+fn claim_next_claims_appended_followup_for_changes_requested_work() {
     let rig = Rig::new();
     let covey = rig.covey();
     let subtask_id = seed_changes_requested_work_subtask(&rig);
@@ -2578,6 +2578,102 @@ fn claim_next_skips_changes_requested_work() {
             .active_subtask_id(),
         Some(&followup_subtask)
     );
+}
+
+#[test]
+fn claim_next_repairs_missing_followup_for_changes_requested_work() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let subtask_id = seed_changes_requested_work_subtask(&rig);
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let review_id: String = conn
+        .query_row(
+            "SELECT review_id FROM review_followup_subtasks WHERE source_subtask_id = ?1",
+            params![subtask_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("review id");
+    let stale_followup_subtask_id: String = conn
+        .query_row(
+            "SELECT followup_subtask_id FROM review_followup_subtasks WHERE review_id = ?1",
+            params![review_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("stale follow-up id");
+    conn.execute(
+        "DELETE FROM review_followup_subtasks WHERE review_id = ?1",
+        params![review_id.as_str()],
+    )
+    .expect("remove follow-up mapping");
+    conn.execute(
+        "DELETE FROM subtask_fence_counter WHERE subtask_id = ?1",
+        params![stale_followup_subtask_id.as_str()],
+    )
+    .expect("remove stale follow-up fence counter");
+    conn.execute(
+        "DELETE FROM subtasks WHERE subtask_id = ?1",
+        params![stale_followup_subtask_id.as_str()],
+    )
+    .expect("remove stale follow-up block");
+    drop(conn);
+
+    let worker = register(
+        &covey,
+        "worker-next-repairs-missing-followup",
+        "worker-next-repairs-missing-followup",
+        SessionRole::Executor,
+    );
+    let before_events = count_subtask_claim_events(&covey);
+
+    let claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next-repairs-missing-followup"),
+            )
+            .expect("valid claim-next request"),
+        )
+        .expect("next claim result")
+        .expect("missing changes-requested follow-up should be repaired and claimed");
+
+    assert_ne!(claim.subtask_id, subtask_id);
+    assert_eq!(count_subtask_claim_events(&covey), before_events + 1);
+    assert_eq!(
+        covey
+            .subtask_status(&subtask_id)
+            .expect("source status")
+            .subtask()
+            .state(),
+        SubtaskState::ChangesRequested
+    );
+    assert_eq!(
+        covey
+            .subtask_status(&claim.subtask_id)
+            .expect("follow-up status")
+            .subtask()
+            .state(),
+        SubtaskState::Claimed
+    );
+    assert_eq!(
+        covey
+            .session_status(&worker)
+            .expect("worker status")
+            .session()
+            .active_subtask_id()
+            .map(|subtask_id| subtask_id.as_str()),
+        Some(claim.subtask_id.as_str())
+    );
+
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let repaired_followup_id: String = conn
+        .query_row(
+            "SELECT followup_subtask_id FROM review_followup_subtasks WHERE review_id = ?1",
+            params![review_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("repaired follow-up id");
+    assert_eq!(repaired_followup_id, claim.subtask_id);
 }
 
 #[test]
