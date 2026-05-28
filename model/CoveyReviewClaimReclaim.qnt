@@ -15,7 +15,16 @@ module CoveyReviewClaimReclaim {
     verdict: Verdict,
     artifactCurrent: bool,
     followupAvailable: bool,
+    followupCount: int,
+    followupReviewBound: bool,
+    followupSourceSubtaskBound: bool,
+    followupSourceArtifactBound: bool,
+    followupFindingsBound: bool,
+    followupCreatedByReviewer: bool,
+    followupWorkAvailable: bool,
+    executorClaimedFollowup: bool,
     staleDecisionRejected: bool,
+    duplicateDecisionRejected: bool,
   }
 
   var s: Model
@@ -41,7 +50,16 @@ module CoveyReviewClaimReclaim {
       verdict: NoVerdict,
       artifactCurrent: true,
       followupAvailable: false,
+      followupCount: 0,
+      followupReviewBound: false,
+      followupSourceSubtaskBound: false,
+      followupSourceArtifactBound: false,
+      followupFindingsBound: false,
+      followupCreatedByReviewer: false,
+      followupWorkAvailable: false,
+      executorClaimedFollowup: false,
       staleDecisionRejected: false,
+      duplicateDecisionRejected: false,
     }
   }
 
@@ -62,7 +80,8 @@ module CoveyReviewClaimReclaim {
       .with("claim", Held)
       .with("owner", reviewer)
       .with("currentFence", s.currentFence + 1)
-      .with("staleDecisionRejected", false),
+      .with("staleDecisionRejected", false)
+      .with("duplicateDecisionRejected", false),
   }
 
   action startReview = all {
@@ -112,7 +131,15 @@ module CoveyReviewClaimReclaim {
       .with("claim", Released)
       .with("owner", NoReviewer)
       .with("verdict", ChangesRequested)
-      .with("followupAvailable", true),
+      .with("followupAvailable", true)
+      .with("followupCount", 1)
+      .with("followupReviewBound", true)
+      .with("followupSourceSubtaskBound", true)
+      .with("followupSourceArtifactBound", true)
+      .with("followupFindingsBound", true)
+      .with("followupCreatedByReviewer", true)
+      .with("followupWorkAvailable", true)
+      .with("executorClaimedFollowup", false),
   }
 
   action decideBlocked = all {
@@ -123,7 +150,33 @@ module CoveyReviewClaimReclaim {
       .with("claim", Released)
       .with("owner", NoReviewer)
       .with("verdict", Blocked)
-      .with("followupAvailable", true),
+      .with("followupAvailable", true)
+      .with("followupCount", 1)
+      .with("followupReviewBound", true)
+      .with("followupSourceSubtaskBound", true)
+      .with("followupSourceArtifactBound", true)
+      .with("followupFindingsBound", true)
+      .with("followupCreatedByReviewer", true)
+      .with("followupWorkAvailable", true)
+      .with("executorClaimedFollowup", false),
+  }
+
+  action rejectDuplicateDecisionAttempt = all {
+    s.review == Decided,
+    s.verdict != NoVerdict,
+    not(s.duplicateDecisionRejected),
+    s' = s.with("duplicateDecisionRejected", true),
+  }
+
+  action claimExecutorFollowup = all {
+    s.review == Decided,
+    s.followupAvailable,
+    s.followupWorkAvailable,
+    s.followupCount == 1,
+    not(s.executorClaimedFollowup),
+    s' = s
+      .with("followupWorkAvailable", false)
+      .with("executorClaimedFollowup", true),
   }
 
   action artifactSuperseded = all {
@@ -146,6 +199,8 @@ module CoveyReviewClaimReclaim {
     decideApprove,
     decideChangesRequested,
     decideBlocked,
+    rejectDuplicateDecisionAttempt,
+    claimExecutorFollowup,
     artifactSuperseded,
   }
 
@@ -154,6 +209,8 @@ module CoveyReviewClaimReclaim {
     and s.currentFence <= 3
     and s.expiredFence >= 0
     and s.expiredFence <= s.currentFence
+    and s.followupCount >= 0
+    and s.followupCount <= 1
 
   val heldClaimRequiresReviewerOwner =
     s.claim != Held or s.owner != NoReviewer
@@ -177,19 +234,51 @@ module CoveyReviewClaimReclaim {
     not(s.staleDecisionRejected) or (s.review == Requested and s.reviewSubtask == Available)
 
   val nonApprovalDecisionCreatesFollowup =
-    not(s.verdict.in(Set(ChangesRequested, Blocked))) or s.followupAvailable
+    not(s.verdict.in(Set(ChangesRequested, Blocked)))
+    or (s.followupAvailable and s.followupCount == 1 and (s.followupWorkAvailable or s.executorClaimedFollowup))
 
   val approveDoesNotCreateFollowup =
-    s.verdict != Approve or not(s.followupAvailable)
+    s.verdict != Approve or (not(s.followupAvailable) and s.followupCount == 0)
+
+  val noFollowupWithoutFailedReviewDecision =
+    s.followupCount == 0 or s.verdict.in(Set(ChangesRequested, Blocked))
+
+  val followupRecordBindsReviewSourceArtifactFindingsAndReviewer =
+    s.followupCount == 0
+    or (
+      s.followupReviewBound
+      and s.followupSourceSubtaskBound
+      and s.followupSourceArtifactBound
+      and s.followupFindingsBound
+      and s.followupCreatedByReviewer
+    )
+
+  val changesRequestedFollowupIsExecutorClaimable =
+    s.verdict != ChangesRequested or s.followupWorkAvailable or s.executorClaimedFollowup
+
+  val blockedFollowupIsExecutorClaimable =
+    s.verdict != Blocked or s.followupWorkAvailable or s.executorClaimedFollowup
+
+  val executorClaimedFollowupCameFromFailedReview =
+    not(s.executorClaimedFollowup) or (s.followupCount == 1 and s.verdict.in(Set(ChangesRequested, Blocked)))
+
+  val executorClaimConsumesAvailability =
+    not(s.executorClaimedFollowup) or not(s.followupWorkAvailable)
+
+  val duplicateDecisionDoesNotDuplicateFollowup =
+    not(s.duplicateDecisionRejected) or s.followupCount <= 1
 
   val decidedReviewHasVerdict =
     s.review != Decided or s.verdict != NoVerdict
 
   val supersededNeverDecidesOrCreatesFollowup =
-    s.review != Superseded or (s.verdict == NoVerdict and not(s.followupAvailable))
+    s.review != Superseded or (s.verdict == NoVerdict and not(s.followupAvailable) and s.followupCount == 0)
 
   val artifactDriftCannotBeDecided =
     s.artifactCurrent or s.review != Decided
+
+  val staleDecisionAttemptDoesNotCreateFollowup =
+    not(s.staleDecisionRejected) or s.followupCount == 0
 
   val fenceMonotonicAfterReclaim =
     s.claim != Held or s.currentFence > s.expiredFence

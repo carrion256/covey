@@ -4,6 +4,8 @@ use serde::Deserialize;
 const COVEY_REVIEW_FOLLOWUP_ITF: &str = include_str!("fixtures/quint/CoveyReviewFollowup.itf.json");
 const COVEY_REVIEW_CLAIM_RECLAIM_ITF: &str =
     include_str!("fixtures/quint/CoveyReviewClaimReclaim.itf.json");
+const COVEY_REVIEW_CLAIM_RECLAIM_CHANGES_REQUESTED_ITF: &str =
+    include_str!("fixtures/quint/CoveyReviewClaimReclaimChangesRequested.itf.json");
 const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
@@ -363,6 +365,8 @@ struct ClaimDependencyGateState {
     #[serde(deserialize_with = "deserialize_itf_variant")]
     kind: String,
     #[serde(deserialize_with = "deserialize_itf_variant")]
+    lineage: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
     candidate: String,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     dependency: String,
@@ -521,8 +525,26 @@ struct ReviewClaimReclaimState {
     artifact_current: bool,
     #[serde(rename = "followupAvailable")]
     followup_available: bool,
+    #[serde(rename = "followupCount", deserialize_with = "deserialize_itf_bigint")]
+    followup_count: i64,
+    #[serde(rename = "followupReviewBound")]
+    followup_review_bound: bool,
+    #[serde(rename = "followupSourceSubtaskBound")]
+    followup_source_subtask_bound: bool,
+    #[serde(rename = "followupSourceArtifactBound")]
+    followup_source_artifact_bound: bool,
+    #[serde(rename = "followupFindingsBound")]
+    followup_findings_bound: bool,
+    #[serde(rename = "followupCreatedByReviewer")]
+    followup_created_by_reviewer: bool,
+    #[serde(rename = "followupWorkAvailable")]
+    followup_work_available: bool,
+    #[serde(rename = "executorClaimedFollowup")]
+    executor_claimed_followup: bool,
     #[serde(rename = "staleDecisionRejected")]
     stale_decision_rejected: bool,
+    #[serde(rename = "duplicateDecisionRejected")]
+    duplicate_decision_rejected: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -764,22 +786,76 @@ fn replay_review_claim_reclaim_trace(trace: &ReviewClaimReclaimItfTrace) -> Vec<
             ));
         }
         if matches!(state.verdict.as_str(), "ChangesRequested" | "Blocked")
-            && !state.followup_available
+            && !(state.followup_available
+                && state.followup_count == 1
+                && (state.followup_work_available || state.executor_claimed_followup))
         {
             violations.push(format!(
                 "state[{index}]: non-approval review decision lacks follow-up"
             ));
         }
-        if state.verdict == "Approve" && state.followup_available {
+        if state.verdict == "Approve" && (state.followup_available || state.followup_count != 0) {
             violations.push(format!(
                 "state[{index}]: approved review unexpectedly created follow-up"
+            ));
+        }
+        if state.followup_count != 0
+            && !matches!(state.verdict.as_str(), "ChangesRequested" | "Blocked")
+        {
+            violations.push(format!(
+                "state[{index}]: follow-up exists without failed review decision"
+            ));
+        }
+        if state.followup_count != 0
+            && !(state.followup_review_bound
+                && state.followup_source_subtask_bound
+                && state.followup_source_artifact_bound
+                && state.followup_findings_bound
+                && state.followup_created_by_reviewer)
+        {
+            violations.push(format!(
+                "state[{index}]: follow-up record lacks review/source/artifact/findings/reviewer binding"
+            ));
+        }
+        if state.verdict == "ChangesRequested"
+            && !(state.followup_work_available || state.executor_claimed_followup)
+        {
+            violations.push(format!(
+                "state[{index}]: changes-requested follow-up is not executor claimable"
+            ));
+        }
+        if state.verdict == "Blocked"
+            && !(state.followup_work_available || state.executor_claimed_followup)
+        {
+            violations.push(format!(
+                "state[{index}]: blocked follow-up is not executor claimable"
+            ));
+        }
+        if state.executor_claimed_followup
+            && !(state.followup_count == 1
+                && matches!(state.verdict.as_str(), "ChangesRequested" | "Blocked"))
+        {
+            violations.push(format!(
+                "state[{index}]: executor claimed follow-up without failed review"
+            ));
+        }
+        if state.executor_claimed_followup && state.followup_work_available {
+            violations.push(format!(
+                "state[{index}]: executor follow-up claim did not consume availability"
+            ));
+        }
+        if state.duplicate_decision_rejected && state.followup_count > 1 {
+            violations.push(format!(
+                "state[{index}]: duplicate review decision duplicated follow-up"
             ));
         }
         if state.review == "Decided" && state.verdict == "NoVerdict" {
             violations.push(format!("state[{index}]: decided review lacks verdict"));
         }
         if state.review == "Superseded"
-            && (state.verdict != "NoVerdict" || state.followup_available)
+            && (state.verdict != "NoVerdict"
+                || state.followup_available
+                || state.followup_count != 0)
         {
             violations.push(format!(
                 "state[{index}]: superseded review decided or created follow-up"
@@ -787,6 +863,11 @@ fn replay_review_claim_reclaim_trace(trace: &ReviewClaimReclaimItfTrace) -> Vec<
         }
         if !state.artifact_current && state.review == "Decided" {
             violations.push(format!("state[{index}]: stale artifact review was decided"));
+        }
+        if state.stale_decision_rejected && state.followup_count != 0 {
+            violations.push(format!(
+                "state[{index}]: stale review decision created follow-up"
+            ));
         }
         if state.claim == "Held" && state.current_fence <= state.expired_fence {
             violations.push(format!(
@@ -1427,8 +1508,11 @@ fn claim_dependency_meta_claimable(meta: &str) -> bool {
     matches!(meta, "MetaActive" | "MetaPlanning")
 }
 
-fn claim_dependency_satisfied(kind: &str, dependency: &str) -> bool {
+fn claim_dependency_satisfied(kind: &str, lineage: &str, dependency: &str) -> bool {
     if kind == "Review" {
+        return true;
+    }
+    if lineage == "ReviewFollowupCandidate" {
         return true;
     }
     matches!(
@@ -1454,9 +1538,11 @@ fn claim_dependency_expected_reject(state: &ClaimDependencyGateState) -> &'stati
         "WrongRole"
     } else if !claim_dependency_meta_claimable(&state.meta) {
         "MetaUnavailable"
-    } else if state.candidate != "CandidateAvailable" {
+    } else if state.candidate != "CandidateAvailable"
+        || (state.kind == "Review" && state.lineage != "PlainCandidate")
+    {
         "IllegalTransition"
-    } else if !claim_dependency_satisfied(&state.kind, &state.dependency) {
+    } else if !claim_dependency_satisfied(&state.kind, &state.lineage, &state.dependency) {
         "DependencyUnsatisfied"
     } else {
         "NoReject"
@@ -1493,7 +1579,8 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
                 "{prefix}: claim dependency decision does not match inputs"
             ));
         }
-        let expected_dependency = claim_dependency_satisfied(&state.kind, &state.dependency);
+        let expected_dependency =
+            claim_dependency_satisfied(&state.kind, &state.lineage, &state.dependency);
         if state.dependency_satisfied != expected_dependency {
             violations.push(format!(
                 "{prefix}: dependency satisfaction marker does not match state"
@@ -1508,6 +1595,7 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
             violations.push(format!("{prefix}: open dependency allowed work claim"));
         }
         if state.kind == "Work"
+            && state.lineage == "ChangesRequestedSourceCandidate"
             && matches!(
                 state.dependency.as_str(),
                 "DepChangesRequestedNoFollowup" | "DepChangesRequestedFollowupAvailable"
@@ -1516,6 +1604,16 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
         {
             violations.push(format!(
                 "{prefix}: changes-requested dependency without terminal follow-up allowed claim"
+            ));
+        }
+        if state.kind == "Work"
+            && state.lineage == "ReviewFollowupCandidate"
+            && state.dependency == "DepChangesRequestedFollowupAvailable"
+            && state.claim_path == "ClaimNext"
+            && !state.claim_created
+        {
+            violations.push(format!(
+                "{prefix}: review follow-up candidate for changes-requested source was not claimed"
             ));
         }
         if state.kind == "Work"
@@ -1886,6 +1984,12 @@ fn review_claim_reclaim_trace() -> ReviewClaimReclaimItfTrace {
 }
 
 #[fixture]
+fn review_claim_reclaim_changes_requested_trace() -> ReviewClaimReclaimItfTrace {
+    serde_json::from_str(COVEY_REVIEW_CLAIM_RECLAIM_CHANGES_REQUESTED_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn core_lifecycle_trace() -> CoreItfTrace {
     serde_json::from_str(COVEY_CORE_LIFECYCLE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -1950,8 +2054,63 @@ fn covey_replays_quint_review_claim_reclaim_itf_trace(
         !review_claim_reclaim_trace.states.is_empty(),
         "fixture should contain at least one state"
     );
+    assert!(
+        review_claim_reclaim_trace
+            .states
+            .iter()
+            .any(|state| state.s.verdict == "Blocked"
+                && state.s.followup_count == 1
+                && state.s.followup_work_available),
+        "fixture should cover blocked follow-up availability"
+    );
+    assert!(
+        review_claim_reclaim_trace
+            .states
+            .iter()
+            .any(|state| state.s.duplicate_decision_rejected),
+        "fixture should cover duplicate decision rejection"
+    );
+    assert!(
+        review_claim_reclaim_trace
+            .states
+            .iter()
+            .any(|state| state.s.executor_claimed_followup && !state.s.followup_work_available),
+        "fixture should cover executor follow-up claim consuming availability"
+    );
     assert_eq!(
         replay_review_claim_reclaim_trace(&review_claim_reclaim_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_review_claim_reclaim_changes_requested_itf_trace(
+    review_claim_reclaim_changes_requested_trace: ReviewClaimReclaimItfTrace,
+) {
+    assert!(
+        !review_claim_reclaim_changes_requested_trace
+            .states
+            .is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert!(
+        review_claim_reclaim_changes_requested_trace
+            .states
+            .iter()
+            .any(|state| state.s.verdict == "ChangesRequested"
+                && state.s.followup_count == 1
+                && state.s.followup_work_available),
+        "fixture should cover changes-requested follow-up availability"
+    );
+    assert!(
+        review_claim_reclaim_changes_requested_trace
+            .states
+            .iter()
+            .any(|state| state.s.executor_claimed_followup && !state.s.followup_work_available),
+        "fixture should cover executor follow-up claim consuming changes-requested availability"
+    );
+    assert_eq!(
+        replay_review_claim_reclaim_trace(&review_claim_reclaim_changes_requested_trace),
         Vec::<String>::new()
     );
 }
@@ -2123,6 +2282,22 @@ fn covey_replays_quint_claim_dependency_gate_itf_trace(
     }
     assert!(
         claim_dependency_gate_trace.states.iter().any(|state| {
+            state.s.lineage == "ChangesRequestedSourceCandidate"
+                && state.s.dependency == "DepChangesRequestedFollowupAvailable"
+                && !state.s.claim_created
+        }),
+        "fixture should cover blocked original changes-requested source candidate"
+    );
+    assert!(
+        claim_dependency_gate_trace.states.iter().any(|state| {
+            state.s.lineage == "ReviewFollowupCandidate"
+                && state.s.dependency == "DepChangesRequestedFollowupAvailable"
+                && state.s.claim_created
+        }),
+        "fixture should cover claimable review follow-up candidate"
+    );
+    assert!(
+        claim_dependency_gate_trace.states.iter().any(|state| {
             state.s.claim_path == "TargetedClaim"
                 && state.s.decision == "Rejected"
                 && state.s.reject_reason == "DependencyUnsatisfied"
@@ -2269,7 +2444,16 @@ fn covey_review_claim_reclaim_replay_reports_counterexample_shape() {
         verdict: "ChangesRequested".to_owned(),
         artifact_current: false,
         followup_available: false,
+        followup_count: 0,
+        followup_review_bound: false,
+        followup_source_subtask_bound: false,
+        followup_source_artifact_bound: false,
+        followup_findings_bound: false,
+        followup_created_by_reviewer: false,
+        followup_work_available: false,
+        executor_claimed_followup: false,
         stale_decision_rejected: true,
+        duplicate_decision_rejected: false,
     };
     let trace = ReviewClaimReclaimItfTrace {
         states: vec![ReviewClaimReclaimItfState { s: state }],
@@ -2283,8 +2467,42 @@ fn covey_review_claim_reclaim_replay_reports_counterexample_shape() {
             "state[0]: expired review claim decided review",
             "state[0]: stale decision rejection mutated review state",
             "state[0]: non-approval review decision lacks follow-up",
+            "state[0]: changes-requested follow-up is not executor claimable",
             "state[0]: stale artifact review was decided",
         ]
+    );
+}
+
+#[rstest]
+fn covey_review_claim_reclaim_replay_reports_followup_binding_counterexample() {
+    let state = ReviewClaimReclaimState {
+        review: "Decided".to_owned(),
+        review_subtask: "SubtaskDecided".to_owned(),
+        claim: "Released".to_owned(),
+        owner: "NoReviewer".to_owned(),
+        current_fence: 1,
+        expired_fence: 0,
+        verdict: "ChangesRequested".to_owned(),
+        artifact_current: true,
+        followup_available: true,
+        followup_count: 1,
+        followup_review_bound: false,
+        followup_source_subtask_bound: true,
+        followup_source_artifact_bound: false,
+        followup_findings_bound: true,
+        followup_created_by_reviewer: false,
+        followup_work_available: true,
+        executor_claimed_followup: false,
+        stale_decision_rejected: false,
+        duplicate_decision_rejected: false,
+    };
+    let trace = ReviewClaimReclaimItfTrace {
+        states: vec![ReviewClaimReclaimItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_review_claim_reclaim_trace(&trace),
+        vec!["state[0]: follow-up record lacks review/source/artifact/findings/reviewer binding"]
     );
 }
 
@@ -2506,6 +2724,7 @@ fn covey_claim_dependency_gate_replay_reports_counterexample_shape() {
         session: "SessionOccupied".to_owned(),
         meta: "MetaCompleted".to_owned(),
         kind: "Work".to_owned(),
+        lineage: "PlainCandidate".to_owned(),
         candidate: "NoCandidate".to_owned(),
         dependency: "DepOpen".to_owned(),
         decision: "ClaimCreated".to_owned(),
@@ -2533,6 +2752,40 @@ fn covey_claim_dependency_gate_replay_reports_counterexample_shape() {
             "state[0]: occupied session created claim",
             "state[0]: terminal meta created claim",
             "state[0]: selected absent candidate",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_claim_dependency_gate_replay_reports_unclaimed_review_followup_counterexample() {
+    let state = ClaimDependencyGateState {
+        claim_path: "ClaimNext".to_owned(),
+        role: "Executor".to_owned(),
+        session: "SessionFree".to_owned(),
+        meta: "MetaActive".to_owned(),
+        kind: "Work".to_owned(),
+        lineage: "ReviewFollowupCandidate".to_owned(),
+        candidate: "CandidateAvailable".to_owned(),
+        dependency: "DepChangesRequestedFollowupAvailable".to_owned(),
+        decision: "NoClaimableCandidate".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        dependency_satisfied: true,
+        candidate_selected: false,
+        claim_created: false,
+        subtask_claimed: false,
+        session_active_subtask_set: false,
+        fence_issued: false,
+        evaluated: true,
+    };
+    let trace = ClaimDependencyGateItfTrace {
+        states: vec![ClaimDependencyGateItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_claim_dependency_gate_trace(&trace),
+        vec![
+            "state[0]: claim dependency decision does not match inputs",
+            "state[0]: review follow-up candidate for changes-requested source was not claimed",
         ]
     );
 }
