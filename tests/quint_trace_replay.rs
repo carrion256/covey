@@ -1,6 +1,6 @@
 use covey::{
-    ConflictResolutionState, OverlapQueryReq, RecordRuntimeAttestationReq, RequestReservationReq,
-    ResolveConflictReq, ScopeClass,
+    ConflictResolutionState, OverlapQueryReq, RecordRuntimeAttestationReq,
+    RepoopsAuthoritySnapshotReq, RequestReservationReq, ResolveConflictReq, ScopeClass,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -50,6 +50,8 @@ const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
 const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
 const COVEY_REPOOPS_SNAPSHOT_ITF: &str =
     include_str!("fixtures/quint/CoveyRepoopsSnapshot.itf.json");
+const COVEY_REPOOPS_SNAPSHOT_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyRepoopsSnapshotRequestShape.itf.json");
 const COVEY_TRANSITION_MATRIX_ITF: &str =
     include_str!("fixtures/quint/CoveyTransitionMatrix.itf.json");
 
@@ -141,6 +143,16 @@ struct RepoopsSnapshotItfTrace {
 #[derive(Debug, Deserialize)]
 struct RepoopsSnapshotItfState {
     s: RepoopsSnapshotState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoopsSnapshotRequestShapeItfTrace {
+    states: Vec<RepoopsSnapshotRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoopsSnapshotRequestShapeItfState {
+    s: RepoopsSnapshotRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,6 +558,36 @@ struct RepoopsSnapshotState {
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
     reject_reason: String,
     accepted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoopsSnapshotRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "claimIdValid")]
+    claim_id_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "pathSetNonEmpty")]
+    path_set_non_empty: bool,
+    #[serde(rename = "everyPathValid")]
+    every_path_valid: bool,
+    #[serde(rename = "duplicateAfterNormalization")]
+    duplicate_after_normalization: bool,
+    #[serde(rename = "normalizesPathSyntax")]
+    normalizes_path_syntax: bool,
+    #[serde(rename = "serializedPathsNormalized")]
+    serialized_paths_normalized: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3225,6 +3267,137 @@ fn replay_repoops_snapshot_trace(trace: &RepoopsSnapshotItfTrace) -> Vec<String>
     violations
 }
 
+fn repoops_snapshot_request_expected_reject(
+    state: &RepoopsSnapshotRequestShapeState,
+) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.claim_id_valid {
+        "ClaimIdInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.path_set_non_empty {
+        "EmptyPathSetInvalid"
+    } else if !state.every_path_valid {
+        "PathInvalid"
+    } else if state.duplicate_after_normalization {
+        "DuplicatePathInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn repoops_snapshot_request_paths(state: &RepoopsSnapshotRequestShapeState) -> Vec<String> {
+    match state.case.as_str() {
+        "ValidSinglePath" => vec!["src/lib.rs".to_owned()],
+        "ValidNormalizedPath" => vec!["./src/lib.rs".to_owned(), "docs\\guide.md".to_owned()],
+        "ValidTwoPaths" => vec!["src/lib.rs".to_owned(), "docs/guide.md".to_owned()],
+        "EmptyPathSet" => Vec::new(),
+        "EmptyPath" => vec!["".to_owned()],
+        "EscapingPath" => vec!["../outside".to_owned()],
+        "ControlCharacterPath" => vec!["src/\u{0007}bad.rs".to_owned()],
+        "DuplicateAfterNormalization" => vec!["./src/lib.rs".to_owned(), "src/lib.rs".to_owned()],
+        _ => vec!["src/lib.rs".to_owned()],
+    }
+}
+
+fn repoops_snapshot_request_actual_shape(state: &RepoopsSnapshotRequestShapeState) -> (bool, bool) {
+    let Ok(req) = RepoopsAuthoritySnapshotReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.claim_id_valid {
+            "claim-1"
+        } else {
+            "claim 1"
+        },
+        if state.fence_seq_positive { 1 } else { 0 },
+        repoops_snapshot_request_paths(state),
+    ) else {
+        return (false, false);
+    };
+    let serialized = serde_json::to_value(&req)
+        .expect("valid repoops authority snapshot request should serialize");
+    let paths = serialized
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .expect("serialized snapshot request should carry path array");
+    let normalized = paths.iter().all(|path| {
+        path.as_str()
+            .is_some_and(|path| !path.starts_with("./") && !path.contains('\\') && !path.is_empty())
+    });
+    (true, normalized)
+}
+
+fn replay_repoops_snapshot_request_shape_trace(
+    trace: &RepoopsSnapshotRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: repoops snapshot request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = repoops_snapshot_request_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot request outcome disagrees with validation facts"
+            ));
+        }
+        let (actual_accepted, actual_normalized) = repoops_snapshot_request_actual_shape(state);
+        if actual_accepted != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid || !state.claim_id_valid || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted repoops snapshot request has invalid identity or fence"
+            ));
+        }
+        if expected_accepted
+            && (!state.path_set_non_empty
+                || !state.every_path_valid
+                || state.duplicate_after_normalization)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted repoops snapshot request has invalid path set"
+            ));
+        }
+        if expected_accepted && state.serialized_paths_normalized && !actual_normalized {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot request serialization kept unnormalized paths"
+            ));
+        }
+        if state.normalizes_path_syntax && expected_accepted && !actual_normalized {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot request did not normalize accepted paths"
+            ));
+        }
+    }
+    violations
+}
+
 fn transition_matrix_expected_allowed(state: &TransitionMatrixState) -> bool {
     match state.object.as_str() {
         "WorkSubtask" => matches!(
@@ -4583,6 +4756,12 @@ fn repoops_snapshot_trace() -> RepoopsSnapshotItfTrace {
 }
 
 #[fixture]
+fn repoops_snapshot_request_shape_trace() -> RepoopsSnapshotRequestShapeItfTrace {
+    serde_json::from_str(COVEY_REPOOPS_SNAPSHOT_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn transition_matrix_trace() -> TransitionMatrixItfTrace {
     serde_json::from_str(COVEY_TRANSITION_MATRIX_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -4959,6 +5138,49 @@ fn covey_replays_quint_repoops_snapshot_itf_trace(repoops_snapshot_trace: Repoop
     );
     assert_eq!(
         replay_repoops_snapshot_trace(&repoops_snapshot_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_repoops_snapshot_request_shape_itf_trace(
+    repoops_snapshot_request_shape_trace: RepoopsSnapshotRequestShapeItfTrace,
+) {
+    assert!(
+        !repoops_snapshot_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidSinglePath",
+        "ValidNormalizedPath",
+        "ValidTwoPaths",
+        "InvalidSessionToken",
+        "InvalidClaimId",
+        "NonPositiveFence",
+        "EmptyPathSet",
+        "EmptyPath",
+        "EscapingPath",
+        "ControlCharacterPath",
+        "DuplicateAfterNormalization",
+    ] {
+        assert!(
+            repoops_snapshot_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        repoops_snapshot_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidNormalizedPath"
+                && state.s.serialized_paths_normalized),
+        "fixture should cover normalized path serialization"
+    );
+    assert_eq!(
+        replay_repoops_snapshot_request_shape_trace(&repoops_snapshot_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -5912,6 +6134,37 @@ fn covey_repoops_snapshot_replay_reports_token_leak_counterexample_shape() {
             "state[0]: repoops snapshot accepted with failed gate",
             "state[0]: in-progress repoops claim lacks token reference",
             "state[0]: repoops snapshot exposed raw session token",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_repoops_snapshot_request_shape_replay_reports_counterexample_shape() {
+    let state = RepoopsSnapshotRequestShapeState {
+        case_index: 11,
+        case: "DuplicateAfterNormalization".to_owned(),
+        session_token_valid: true,
+        claim_id_valid: true,
+        fence_seq_positive: true,
+        path_set_non_empty: true,
+        every_path_valid: true,
+        duplicate_after_normalization: true,
+        normalizes_path_syntax: true,
+        serialized_paths_normalized: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = RepoopsSnapshotRequestShapeItfTrace {
+        states: vec![RepoopsSnapshotRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_repoops_snapshot_request_shape_trace(&trace),
+        vec![
+            "state[0]: repoops snapshot request reject reason does not match validation facts",
+            "state[0]: repoops snapshot request outcome disagrees with validation facts",
         ]
     );
 }
