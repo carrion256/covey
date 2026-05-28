@@ -27,6 +27,8 @@ const COVEY_CLAIM_DEPENDENCY_GATE_ITF: &str =
 const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
     include_str!("fixtures/quint/CoveyMutationIdempotency.itf.json");
 const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
+const COVEY_REPOOPS_SNAPSHOT_ITF: &str =
+    include_str!("fixtures/quint/CoveyRepoopsSnapshot.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -76,6 +78,16 @@ struct QueueReservationItfTrace {
 #[derive(Debug, Deserialize)]
 struct QueueReservationItfState {
     s: QueueReservationState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoopsSnapshotItfTrace {
+    states: Vec<RepoopsSnapshotItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoopsSnapshotItfState {
+    s: RepoopsSnapshotState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,6 +258,58 @@ struct QueueReservationState {
         deserialize_with = "deserialize_itf_bigint"
     )]
     conflict_rank_floor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoopsSnapshotState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "currentClaimValid")]
+    current_claim_valid: bool,
+    #[serde(rename = "requestedPathValid")]
+    requested_path_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    subtask: String,
+    #[serde(rename = "ownerReservationActive")]
+    owner_reservation_active: bool,
+    #[serde(rename = "foreignReservationActive")]
+    foreign_reservation_active: bool,
+    #[serde(rename = "reservationCoversRequestedPath")]
+    reservation_covers_requested_path: bool,
+    #[serde(rename = "ownerReservationInScope")]
+    owner_reservation_in_scope: bool,
+    #[serde(
+        rename = "claimFactStatus",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    claim_fact_status: String,
+    #[serde(
+        rename = "activeOwnershipToken",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    active_ownership_token: String,
+    #[serde(
+        rename = "callerOwnershipToken",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    caller_ownership_token: String,
+    #[serde(rename = "scopeIncludesOwnerReservation")]
+    scope_includes_owner_reservation: bool,
+    #[serde(rename = "lockKind", deserialize_with = "deserialize_itf_variant")]
+    lock_kind: String,
+    #[serde(rename = "lockOwnerMatchesSession")]
+    lock_owner_matches_session: bool,
+    #[serde(rename = "lockClaimRefMatchesClaim")]
+    lock_claim_ref_matches_claim: bool,
+    #[serde(rename = "factSourcesUseTokenRefs")]
+    fact_sources_use_token_refs: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1361,6 +1425,154 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
     violations
 }
 
+fn repoops_snapshot_expected_claim_status(state: &RepoopsSnapshotState) -> &'static str {
+    if state.subtask == "InProgress" {
+        "ClaimInProgress"
+    } else {
+        "ClaimOpen"
+    }
+}
+
+fn repoops_snapshot_claim_fact_ok(state: &RepoopsSnapshotState) -> bool {
+    state.claim_fact_status == repoops_snapshot_expected_claim_status(state)
+        && ((state.claim_fact_status == "ClaimInProgress"
+            && state.active_ownership_token != "NoToken")
+            || (state.claim_fact_status == "ClaimOpen"
+                && state.active_ownership_token == "NoToken"))
+}
+
+fn repoops_snapshot_scope_ok(state: &RepoopsSnapshotState) -> bool {
+    !state.owner_reservation_active
+        || (state.owner_reservation_in_scope && state.scope_includes_owner_reservation)
+}
+
+fn repoops_snapshot_lock_ok(state: &RepoopsSnapshotState) -> bool {
+    if !state.reservation_covers_requested_path {
+        state.lock_kind == "NoLock"
+    } else if state.owner_reservation_active {
+        state.lock_kind == "OwnedLock"
+            && state.lock_owner_matches_session
+            && state.lock_claim_ref_matches_claim
+    } else if state.foreign_reservation_active {
+        state.lock_kind == "ForeignLock"
+            && !state.lock_owner_matches_session
+            && !state.lock_claim_ref_matches_claim
+    } else {
+        state.lock_kind == "NoLock"
+    }
+}
+
+fn repoops_snapshot_ownership_token_ok(state: &RepoopsSnapshotState) -> bool {
+    state.active_ownership_token != "RawToken"
+        && state.caller_ownership_token != "RawToken"
+        && state.fact_sources_use_token_refs
+}
+
+fn repoops_snapshot_expected_reject(state: &RepoopsSnapshotState) -> &'static str {
+    if !state.current_claim_valid {
+        "CurrentClaimInvalid"
+    } else if !state.requested_path_valid {
+        "PathInvalid"
+    } else if !repoops_snapshot_claim_fact_ok(state) {
+        "ClaimFactInvalid"
+    } else if !repoops_snapshot_scope_ok(state) {
+        "ScopeFactInvalid"
+    } else if !repoops_snapshot_lock_ok(state) {
+        "LockFactInvalid"
+    } else if !repoops_snapshot_ownership_token_ok(state) {
+        "OwnershipTokenInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn replay_repoops_snapshot_trace(trace: &RepoopsSnapshotItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: repoops snapshot scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.outcome == "NotEvaluated" {
+            continue;
+        }
+        let expected_reject = repoops_snapshot_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot reject reason does not match first failed gate"
+            ));
+        }
+        if state.accepted && expected_reject != "NoReject" {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot accepted with failed gate"
+            ));
+        }
+        if state.accepted && state.outcome != "Accepted" {
+            violations.push(format!(
+                "state[{index}]: repoops accepted flag disagrees with outcome"
+            ));
+        }
+        if state.accepted && !(state.current_claim_valid && state.requested_path_valid) {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot accepted without current claim or valid path"
+            ));
+        }
+        if state.accepted
+            && state.claim_fact_status != repoops_snapshot_expected_claim_status(state)
+        {
+            violations.push(format!(
+                "state[{index}]: repoops claim fact status disagrees with subtask state"
+            ));
+        }
+        if state.accepted
+            && state.claim_fact_status == "ClaimInProgress"
+            && state.active_ownership_token != "TokenRef"
+        {
+            violations.push(format!(
+                "state[{index}]: in-progress repoops claim lacks token reference"
+            ));
+        }
+        if state.accepted
+            && state.claim_fact_status == "ClaimOpen"
+            && state.active_ownership_token != "NoToken"
+        {
+            violations.push(format!(
+                "state[{index}]: open repoops claim carried active token"
+            ));
+        }
+        if state.accepted && state.lock_kind == "OwnedLock" && !state.owner_reservation_active {
+            violations.push(format!(
+                "state[{index}]: owned lock lacks owner reservation"
+            ));
+        }
+        if state.accepted && state.lock_kind == "ForeignLock" && !state.foreign_reservation_active {
+            violations.push(format!(
+                "state[{index}]: foreign lock lacks foreign reservation"
+            ));
+        }
+        if state.accepted
+            && state.owner_reservation_active
+            && !(state.owner_reservation_in_scope && state.scope_includes_owner_reservation)
+        {
+            violations.push(format!(
+                "state[{index}]: owner reservation missing from repoops scope"
+            ));
+        }
+        if state.accepted && !repoops_snapshot_ownership_token_ok(state) {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot exposed raw session token"
+            ));
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -2440,6 +2652,11 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
 }
 
 #[fixture]
+fn repoops_snapshot_trace() -> RepoopsSnapshotItfTrace {
+    serde_json::from_str(COVEY_REPOOPS_SNAPSHOT_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -2648,6 +2865,49 @@ fn covey_replays_quint_queue_reservation_itf_trace(
     );
     assert_eq!(
         replay_queue_reservation_trace(&queue_reservation_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_repoops_snapshot_itf_trace(repoops_snapshot_trace: RepoopsSnapshotItfTrace) {
+    assert!(
+        !repoops_snapshot_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "CurrentClaimInvalid",
+        "PathInvalid",
+        "ClaimFactInvalid",
+        "ScopeFactInvalid",
+        "OwnershipTokenInvalid",
+    ] {
+        assert!(
+            repoops_snapshot_trace
+                .states
+                .iter()
+                .any(|state| state.s.reject_reason == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        repoops_snapshot_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidInProgressOwnedLock" && state.s.accepted),
+        "fixture should cover accepted in-progress owned lock snapshot"
+    );
+    assert!(
+        repoops_snapshot_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ForeignReservationLock"
+                && state.s.lock_kind == "ForeignLock"
+                && state.s.accepted),
+        "fixture should cover accepted foreign reservation lock fact"
+    );
+    assert_eq!(
+        replay_repoops_snapshot_trace(&repoops_snapshot_trace),
         Vec::<String>::new()
     );
 }
@@ -3211,6 +3471,45 @@ fn covey_queue_reservation_replay_reports_stale_queued_evidence_counterexample()
         vec![
             "state[0]: queue claim liveness disagrees with queue state",
             "state[0]: queued item retained stale claim or verification",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_repoops_snapshot_replay_reports_token_leak_counterexample_shape() {
+    let state = RepoopsSnapshotState {
+        case_index: 1,
+        case: "ValidInProgressOwnedLock".to_owned(),
+        current_claim_valid: true,
+        requested_path_valid: true,
+        subtask: "InProgress".to_owned(),
+        owner_reservation_active: true,
+        foreign_reservation_active: false,
+        reservation_covers_requested_path: true,
+        owner_reservation_in_scope: true,
+        claim_fact_status: "ClaimInProgress".to_owned(),
+        active_ownership_token: "RawToken".to_owned(),
+        caller_ownership_token: "RawToken".to_owned(),
+        scope_includes_owner_reservation: true,
+        lock_kind: "OwnedLock".to_owned(),
+        lock_owner_matches_session: true,
+        lock_claim_ref_matches_claim: true,
+        fact_sources_use_token_refs: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+    };
+    let trace = RepoopsSnapshotItfTrace {
+        states: vec![RepoopsSnapshotItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_repoops_snapshot_trace(&trace),
+        vec![
+            "state[0]: repoops snapshot reject reason does not match first failed gate",
+            "state[0]: repoops snapshot accepted with failed gate",
+            "state[0]: in-progress repoops claim lacks token reference",
+            "state[0]: repoops snapshot exposed raw session token",
         ]
     );
 }
