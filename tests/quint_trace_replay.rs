@@ -26,6 +26,8 @@ const COVEY_APPLY_GATE_EVIDENCE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyGateEvidence.itf.json");
 const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
+const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
@@ -157,6 +159,16 @@ struct SessionMetaTaskItfTrace {
 #[derive(Debug, Deserialize)]
 struct SessionMetaTaskItfState {
     s: SessionMetaTaskState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewAttachmentShapeItfTrace {
+    states: Vec<ViewAttachmentShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewAttachmentShapeItfState {
+    s: ViewAttachmentShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -606,6 +618,45 @@ struct SessionMetaTaskState {
     queue: String,
     #[serde(rename = "heartbeatFresh")]
     heartbeat_fresh: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewAttachmentShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionHasActiveSubtaskId")]
+    session_has_active_subtask_id: bool,
+    #[serde(rename = "activeSubtaskViewPresent")]
+    active_subtask_view_present: bool,
+    #[serde(rename = "activeSubtaskMatchesSession")]
+    active_subtask_matches_session: bool,
+    #[serde(rename = "subtaskHasActiveClaimId")]
+    subtask_has_active_claim_id: bool,
+    #[serde(rename = "claimRowPresent")]
+    claim_row_present: bool,
+    #[serde(rename = "claimIdMatchesActive")]
+    claim_id_matches_active: bool,
+    #[serde(rename = "claimBelongsToSubtask")]
+    claim_belongs_to_subtask: bool,
+    #[serde(rename = "subtaskHasArtifactDigest")]
+    subtask_has_artifact_digest: bool,
+    #[serde(rename = "artifactRowPresent")]
+    artifact_row_present: bool,
+    #[serde(rename = "artifactDigestMatches")]
+    artifact_digest_matches: bool,
+    #[serde(rename = "artifactBelongsToSubtask")]
+    artifact_belongs_to_subtask: bool,
+    #[serde(rename = "reviewsBelongToSubtask")]
+    reviews_belong_to_subtask: bool,
+    #[serde(rename = "readyQueueBelongsToSubtask")]
+    ready_queue_belongs_to_subtask: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1686,6 +1737,124 @@ fn replay_session_meta_task_trace(trace: &SessionMetaTaskItfTrace) -> Vec<String
         {
             violations.push(format!(
                 "state[{index}]: missing meta-task still has work state"
+            ));
+        }
+    }
+    violations
+}
+
+fn view_attachment_expected_reject(state: &ViewAttachmentShapeState) -> &'static str {
+    if state.session_has_active_subtask_id && !state.active_subtask_view_present {
+        "SessionRequiresActiveSubtask"
+    } else if state.session_has_active_subtask_id
+        && state.active_subtask_view_present
+        && !state.active_subtask_matches_session
+    {
+        "SessionActiveSubtaskMismatch"
+    } else if !state.session_has_active_subtask_id && state.active_subtask_view_present {
+        "SessionUnexpectedActiveSubtask"
+    } else if state.subtask_has_active_claim_id && !state.claim_row_present {
+        "SubtaskRequiresActiveClaim"
+    } else if state.subtask_has_active_claim_id
+        && state.claim_row_present
+        && !state.claim_id_matches_active
+    {
+        "SubtaskClaimMismatch"
+    } else if state.subtask_has_active_claim_id
+        && state.claim_row_present
+        && state.claim_id_matches_active
+        && !state.claim_belongs_to_subtask
+    {
+        "SubtaskClaimForeign"
+    } else if !state.subtask_has_active_claim_id && state.claim_row_present {
+        "SubtaskUnexpectedClaimReject"
+    } else if state.subtask_has_artifact_digest && !state.artifact_row_present {
+        "SubtaskRequiresArtifact"
+    } else if state.subtask_has_artifact_digest
+        && state.artifact_row_present
+        && !state.artifact_digest_matches
+    {
+        "SubtaskArtifactMismatch"
+    } else if state.subtask_has_artifact_digest
+        && state.artifact_row_present
+        && state.artifact_digest_matches
+        && !state.artifact_belongs_to_subtask
+    {
+        "SubtaskArtifactForeign"
+    } else if !state.subtask_has_artifact_digest && state.artifact_row_present {
+        "SubtaskUnexpectedArtifactReject"
+    } else if !state.reviews_belong_to_subtask {
+        "SubtaskReviewForeign"
+    } else if !state.ready_queue_belongs_to_subtask {
+        "SubtaskReadyQueueForeign"
+    } else {
+        "NoReject"
+    }
+}
+
+fn replay_view_attachment_shape_trace(trace: &ViewAttachmentShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: view attachment scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = view_attachment_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: view attachment reject reason does not match first failed binding"
+            ));
+        }
+        let accepted = state.outcome == "Accepted";
+        if accepted != (expected_reject == "NoReject") {
+            violations.push(format!(
+                "state[{index}]: view attachment outcome disagrees with binding checks"
+            ));
+        }
+        if accepted
+            && !((state.session_has_active_subtask_id
+                && state.active_subtask_view_present
+                && state.active_subtask_matches_session)
+                || (!state.session_has_active_subtask_id && !state.active_subtask_view_present))
+        {
+            violations.push(format!(
+                "state[{index}]: accepted session status has invalid active subtask attachment"
+            ));
+        }
+        if accepted
+            && !((state.subtask_has_active_claim_id
+                && state.claim_row_present
+                && state.claim_id_matches_active
+                && state.claim_belongs_to_subtask)
+                || (!state.subtask_has_active_claim_id && !state.claim_row_present))
+        {
+            violations.push(format!(
+                "state[{index}]: accepted subtask status has invalid claim attachment"
+            ));
+        }
+        if accepted
+            && !((state.subtask_has_artifact_digest
+                && state.artifact_row_present
+                && state.artifact_digest_matches
+                && state.artifact_belongs_to_subtask)
+                || (!state.subtask_has_artifact_digest && !state.artifact_row_present))
+        {
+            violations.push(format!(
+                "state[{index}]: accepted subtask status has invalid artifact attachment"
+            ));
+        }
+        if accepted && !(state.reviews_belong_to_subtask && state.ready_queue_belongs_to_subtask) {
+            violations.push(format!(
+                "state[{index}]: accepted subtask status has foreign collection attachment"
             ));
         }
     }
@@ -3685,6 +3854,11 @@ fn session_meta_task_trace() -> SessionMetaTaskItfTrace {
 }
 
 #[fixture]
+fn view_attachment_shape_trace() -> ViewAttachmentShapeItfTrace {
+    serde_json::from_str(COVEY_VIEW_ATTACHMENT_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn landing_receipt_trace() -> LandingReceiptItfTrace {
     serde_json::from_str(COVEY_LANDING_RECEIPT_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -4125,6 +4299,59 @@ fn covey_replays_quint_session_meta_task_itf_trace(
     );
     assert_eq!(
         replay_session_meta_task_trace(&session_meta_task_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_view_attachment_shape_itf_trace(
+    view_attachment_shape_trace: ViewAttachmentShapeItfTrace,
+) {
+    assert!(
+        !view_attachment_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidSessionNoActiveDetached",
+        "ValidSessionActiveClaimArtifact",
+        "SessionMissingActiveView",
+        "SessionMismatchedActiveView",
+        "SessionUnexpectedActiveView",
+        "SubtaskMissingClaim",
+        "SubtaskMismatchedClaim",
+        "SubtaskForeignClaim",
+        "SubtaskUnexpectedClaimCase",
+        "SubtaskMissingArtifact",
+        "SubtaskMismatchedArtifact",
+        "SubtaskForeignArtifact",
+        "SubtaskUnexpectedArtifactCase",
+        "SubtaskForeignReview",
+        "SubtaskForeignReadyQueue",
+    ] {
+        assert!(
+            view_attachment_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        view_attachment_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.outcome == "Accepted"),
+        "fixture should cover accepted view attachments"
+    );
+    assert!(
+        view_attachment_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.outcome == "Rejected"),
+        "fixture should cover rejected view attachments"
+    );
+    assert_eq!(
+        replay_view_attachment_shape_trace(&view_attachment_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -4960,6 +5187,45 @@ fn covey_bd_import_replay_reports_counterexample_shape() {
             "state[0]: imported BD rows did not become available work subtasks",
             "state[0]: BD import created live claim state",
             "state[0]: BD import counts do not match source eligibility",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_view_attachment_shape_replay_reports_counterexample_shape() {
+    let state = ViewAttachmentShapeState {
+        case_index: 6,
+        case: "SubtaskMissingClaim".to_owned(),
+        session_has_active_subtask_id: true,
+        active_subtask_view_present: false,
+        active_subtask_matches_session: true,
+        subtask_has_active_claim_id: true,
+        claim_row_present: false,
+        claim_id_matches_active: true,
+        claim_belongs_to_subtask: true,
+        subtask_has_artifact_digest: true,
+        artifact_row_present: false,
+        artifact_digest_matches: true,
+        artifact_belongs_to_subtask: true,
+        reviews_belong_to_subtask: false,
+        ready_queue_belongs_to_subtask: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        evaluated: true,
+    };
+    let trace = ViewAttachmentShapeItfTrace {
+        states: vec![ViewAttachmentShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_view_attachment_shape_trace(&trace),
+        vec![
+            "state[0]: view attachment reject reason does not match first failed binding",
+            "state[0]: view attachment outcome disagrees with binding checks",
+            "state[0]: accepted session status has invalid active subtask attachment",
+            "state[0]: accepted subtask status has invalid claim attachment",
+            "state[0]: accepted subtask status has invalid artifact attachment",
+            "state[0]: accepted subtask status has foreign collection attachment",
         ]
     );
 }
