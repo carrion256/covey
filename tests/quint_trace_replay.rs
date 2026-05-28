@@ -17,6 +17,8 @@ const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
 const COVEY_READY_QUEUE_CLAIM_SELECTION_ITF: &str =
     include_str!("fixtures/quint/CoveyReadyQueueClaimSelection.itf.json");
+const COVEY_READY_QUEUE_METRICS_ITF: &str =
+    include_str!("fixtures/quint/CoveyReadyQueueMetrics.itf.json");
 const COVEY_RESERVATION_OVERLAP_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationOverlap.itf.json");
 const COVEY_APPLY_GATE_EVIDENCE_ITF: &str =
@@ -94,6 +96,16 @@ struct ReadyQueueClaimSelectionItfTrace {
 #[derive(Debug, Deserialize)]
 struct ReadyQueueClaimSelectionItfState {
     s: ReadyQueueClaimSelectionState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueMetricsItfTrace {
+    states: Vec<ReadyQueueMetricsItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueMetricsItfState {
+    s: ReadyQueueMetricsState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -342,6 +354,35 @@ struct ReadyQueueClaimSelectionState {
     tail_fence_after: i64,
     #[serde(rename = "eventEmitted")]
     event_emitted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueMetricsState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "queuedCount", deserialize_with = "deserialize_itf_bigint")]
+    queued_count: i64,
+    #[serde(rename = "inFlightCount", deserialize_with = "deserialize_itf_bigint")]
+    in_flight_count: i64,
+    #[serde(rename = "queuedAgePresent")]
+    queued_age_present: bool,
+    #[serde(rename = "inFlightAgePresent")]
+    in_flight_age_present: bool,
+    #[serde(rename = "queuedAgeNonNegative")]
+    queued_age_non_negative: bool,
+    #[serde(rename = "inFlightAgeNonNegative")]
+    in_flight_age_non_negative: bool,
+    #[serde(rename = "queuedShape", deserialize_with = "deserialize_itf_variant")]
+    queued_shape: String,
+    #[serde(rename = "inFlightShape", deserialize_with = "deserialize_itf_variant")]
+    in_flight_shape: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
     evaluated: bool,
 }
 
@@ -1652,6 +1693,112 @@ fn replay_ready_queue_claim_selection_trace(
         if state.result == "ClaimTail" && !(state.tail_present && state.tail_claimable) {
             violations.push(format!(
                 "{prefix}: tail claim was returned without a claimable tail"
+            ));
+        }
+    }
+    violations
+}
+
+fn ready_queue_metrics_expected_reject(state: &ReadyQueueMetricsState) -> &'static str {
+    if state.queued_count == 0 && state.queued_age_present {
+        "EmptyQueuedHasAge"
+    } else if state.queued_count > 0 && !state.queued_age_present {
+        "NonEmptyQueuedMissingAge"
+    } else if state.queued_age_present && !state.queued_age_non_negative {
+        "NegativeQueuedAge"
+    } else if state.in_flight_count == 0 && state.in_flight_age_present {
+        "EmptyInFlightHasAge"
+    } else if state.in_flight_count > 0 && !state.in_flight_age_present {
+        "NonEmptyInFlightMissingAge"
+    } else if state.in_flight_age_present && !state.in_flight_age_non_negative {
+        "NegativeInFlightAge"
+    } else {
+        "NoReject"
+    }
+}
+
+fn ready_queue_metrics_bucket_shape(
+    count: i64,
+    age_present: bool,
+    age_non_negative: bool,
+) -> &'static str {
+    if count == 0 && !age_present {
+        "EmptyBucket"
+    } else if count > 0 && age_present && age_non_negative {
+        "NonEmptyBucket"
+    } else {
+        "InvalidBucket"
+    }
+}
+
+fn replay_ready_queue_metrics_trace(trace: &ReadyQueueMetricsItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: ready-queue metrics scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+
+        let expected_reject = ready_queue_metrics_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "{prefix}: ready-queue metrics reject reason does not match bucket shape"
+            ));
+        }
+        let queued_shape = ready_queue_metrics_bucket_shape(
+            state.queued_count,
+            state.queued_age_present,
+            state.queued_age_non_negative,
+        );
+        let in_flight_shape = ready_queue_metrics_bucket_shape(
+            state.in_flight_count,
+            state.in_flight_age_present,
+            state.in_flight_age_non_negative,
+        );
+        if state.queued_shape != queued_shape || state.in_flight_shape != in_flight_shape {
+            violations.push(format!(
+                "{prefix}: ready-queue metric bucket projection disagrees with count and age"
+            ));
+        }
+        if (state.outcome == "Accepted")
+            != (queued_shape != "InvalidBucket" && in_flight_shape != "InvalidBucket")
+        {
+            violations.push(format!(
+                "{prefix}: ready-queue metrics acceptance disagrees with bucket validity"
+            ));
+        }
+        if state.outcome == "Accepted"
+            && ((state.queued_count == 0 && state.queued_age_present)
+                || (state.in_flight_count == 0 && state.in_flight_age_present))
+        {
+            violations.push(format!(
+                "{prefix}: empty ready-queue metric bucket retained oldest age"
+            ));
+        }
+        if state.outcome == "Accepted"
+            && ((state.queued_count > 0 && !state.queued_age_present)
+                || (state.in_flight_count > 0 && !state.in_flight_age_present))
+        {
+            violations.push(format!(
+                "{prefix}: non-empty ready-queue metric bucket lacked oldest age"
+            ));
+        }
+        if state.outcome == "Accepted"
+            && ((state.queued_age_present && !state.queued_age_non_negative)
+                || (state.in_flight_age_present && !state.in_flight_age_non_negative))
+        {
+            violations.push(format!(
+                "{prefix}: accepted ready-queue metrics had negative age"
             ));
         }
     }
@@ -3130,6 +3277,11 @@ fn ready_queue_claim_selection_trace() -> ReadyQueueClaimSelectionItfTrace {
 }
 
 #[fixture]
+fn ready_queue_metrics_trace() -> ReadyQueueMetricsItfTrace {
+    serde_json::from_str(COVEY_READY_QUEUE_METRICS_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_overlap_trace() -> ReservationOverlapItfTrace {
     serde_json::from_str(COVEY_RESERVATION_OVERLAP_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -3382,6 +3534,43 @@ fn covey_replays_quint_ready_queue_claim_selection_itf_trace(
     }
     assert_eq!(
         replay_ready_queue_claim_selection_trace(&ready_queue_claim_selection_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_ready_queue_metrics_itf_trace(
+    ready_queue_metrics_trace: ReadyQueueMetricsItfTrace,
+) {
+    assert!(
+        !ready_queue_metrics_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "EmptyQueuedHasAge",
+        "NonEmptyQueuedMissingAge",
+        "NegativeQueuedAge",
+        "EmptyInFlightHasAge",
+        "NonEmptyInFlightMissingAge",
+        "NegativeInFlightAge",
+    ] {
+        assert!(
+            ready_queue_metrics_trace
+                .states
+                .iter()
+                .any(|state| state.s.reject_reason == expected),
+            "fixture should cover {expected:?}"
+        );
+    }
+    assert!(
+        ready_queue_metrics_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "BothNonEmpty" && state.s.outcome == "Accepted"),
+        "fixture should cover both ready-queue metric buckets populated"
+    );
+    assert_eq!(
+        replay_ready_queue_metrics_trace(&ready_queue_metrics_trace),
         Vec::<String>::new()
     );
 }
@@ -3949,6 +4138,40 @@ fn covey_ready_queue_claim_selection_replay_reports_counterexample_shape() {
             "state[0]: ready-queue in-flight event emission disagrees with claim result",
             "state[0]: ready-queue fence advancement did not match selected queue",
             "state[0]: ready-queue selected both head and tail",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_ready_queue_metrics_replay_reports_counterexample_shape() {
+    let state = ReadyQueueMetricsState {
+        case_index: 1,
+        case: "BothNonEmpty".to_owned(),
+        queued_count: 0,
+        in_flight_count: 1,
+        queued_age_present: true,
+        in_flight_age_present: false,
+        queued_age_non_negative: false,
+        in_flight_age_non_negative: true,
+        queued_shape: "NonEmptyBucket".to_owned(),
+        in_flight_shape: "EmptyBucket".to_owned(),
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        evaluated: true,
+    };
+    let trace = ReadyQueueMetricsItfTrace {
+        states: vec![ReadyQueueMetricsItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_ready_queue_metrics_trace(&trace),
+        vec![
+            "state[0]: ready-queue metrics reject reason does not match bucket shape",
+            "state[0]: ready-queue metric bucket projection disagrees with count and age",
+            "state[0]: ready-queue metrics acceptance disagrees with bucket validity",
+            "state[0]: empty ready-queue metric bucket retained oldest age",
+            "state[0]: non-empty ready-queue metric bucket lacked oldest age",
+            "state[0]: accepted ready-queue metrics had negative age",
         ]
     );
 }
