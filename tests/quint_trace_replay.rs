@@ -1309,6 +1309,13 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
                 "state[{index}]: queued item is not bound to a ready matching artifact"
             ));
         }
+        if state.queue == "Queued"
+            && (state.queue_claim_live || state.queue_lease_live || state.apply_verified)
+        {
+            violations.push(format!(
+                "state[{index}]: queued item retained stale claim or verification"
+            ));
+        }
         if state.queue == "InFlight"
             && (!state.subtask_ready || !state.artifact_matches || !state.meta_schedulable)
         {
@@ -3173,6 +3180,37 @@ fn covey_queue_reservation_replay_reports_counterexample_shape() {
             "state[0]: conflict exists without recorded overlap binding",
             "state[0]: conflict resolution moved below recorded floor",
             "state[0]: resolved conflict floor was downgraded",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_queue_reservation_replay_reports_stale_queued_evidence_counterexample() {
+    let state = QueueReservationState {
+        queue: "Queued".to_owned(),
+        reservation: "NoReservation".to_owned(),
+        conflict: "NoConflict".to_owned(),
+        queue_fence: "F1".to_owned(),
+        queue_claim_live: true,
+        queue_lease_live: true,
+        apply_verified: true,
+        subtask_ready: true,
+        artifact_matches: true,
+        meta_schedulable: true,
+        reservation_lease_live: false,
+        overlap_detected: false,
+        conflict_bound: false,
+        conflict_rank_floor: 0,
+    };
+    let trace = QueueReservationItfTrace {
+        states: vec![QueueReservationItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_queue_reservation_trace(&trace),
+        vec![
+            "state[0]: queue claim liveness disagrees with queue state",
+            "state[0]: queued item retained stale claim or verification",
         ]
     );
 }

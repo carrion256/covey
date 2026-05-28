@@ -210,6 +210,15 @@ module CoveyQueueReservation {
   val inFlightQueueHasLeaseAndFence = s.queue != InFlight or (s.queueLeaseLive and s.queueFence != F0)
   val terminalQueueHasNoLiveClaim = not(terminalQueue(s)) or (not(s.queueClaimLive) and not(s.queueLeaseLive))
   val appliedQueueRequiresVerification = s.queue != Applied or s.applyVerified
+  val queuedQueueIsClaimableWithoutStaleApplyEvidence =
+    s.queue != Queued
+    or (
+      s.subtaskReady
+      and s.artifactMatches
+      and not(s.queueClaimLive)
+      and not(s.queueLeaseLive)
+      and not(s.applyVerified)
+    )
   val cancelledQueueIsTerminal = s.queue != Cancelled or (not(s.queueClaimLive) and not(s.queueLeaseLive))
   val supersededQueueIsTerminal = s.queue != Superseded or (not(s.queueClaimLive) and not(s.queueLeaseLive))
   val activeReservationHasLiveLease = s.reservation != Active or s.reservationLeaseLive
