@@ -1,15 +1,16 @@
 use covey::{
-    AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, ClaimId, ClaimNextReq,
-    ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState, CreateSubtaskRequest,
-    DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq, MarkAppliedReq,
-    MarkInFlightReq, MetaTaskId, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
+    AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
+    ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, ConflictResolutionState,
+    CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, FenceSeq,
+    HeartbeatReq, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask, MetaTaskId,
+    MetaTaskState, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
     RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
     RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
-    ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, SessionHandle,
-    SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle,
-    SubtaskPriority, SupersedeQueueItemReq, TimestampMs, VerifyLandingAuthorizationReq,
-    WorkSubtask,
+    ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
+    SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
+    SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
+    VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
@@ -107,6 +108,8 @@ const COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySubtaskDomainLifecycleShape.itf.json");
 const COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyProofRowLifecycle.itf.json");
+const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -236,6 +239,16 @@ struct ApplyProofRowLifecycleItfTrace {
 #[derive(Debug, Deserialize)]
 struct ApplyProofRowLifecycleItfState {
     s: ApplyProofRowLifecycleState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordLifecycleShapeItfTrace {
+    states: Vec<RecordLifecycleShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordLifecycleShapeItfState {
+    s: RecordLifecycleShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -909,6 +922,48 @@ struct ApplyProofRowLifecycleState {
     claim_fence: String,
     #[serde(rename = "claimLeaseDeadlinePresent")]
     claim_lease_deadline_present: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordLifecycleShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "rowKind", deserialize_with = "deserialize_itf_variant")]
+    row_kind: String,
+    #[serde(
+        rename = "sessionLifecycle",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    session_lifecycle: String,
+    #[serde(
+        rename = "metaTaskLifecycle",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    meta_task_lifecycle: String,
+    #[serde(
+        rename = "claimLifecycle",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    claim_lifecycle: String,
+    #[serde(rename = "activeSubtaskPresent")]
+    active_subtask_present: bool,
+    #[serde(
+        rename = "timestampShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    timestamp_shape: String,
+    #[serde(rename = "textShape", deserialize_with = "deserialize_itf_variant")]
+    text_shape: String,
+    #[serde(rename = "tickShape", deserialize_with = "deserialize_itf_variant")]
+    tick_shape: String,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -6703,6 +6758,197 @@ fn replay_apply_proof_row_lifecycle_trace(trace: &ApplyProofRowLifecycleItfTrace
     violations
 }
 
+fn record_lifecycle_session_state(state: &RecordLifecycleShapeState) -> SessionState {
+    match state.session_lifecycle.as_str() {
+        "Active" => SessionState::Active,
+        "Stale" => SessionState::Stale,
+        "Exited" => SessionState::Exited,
+        other => panic!("unexpected session lifecycle {other}"),
+    }
+}
+
+fn record_lifecycle_meta_task_state(state: &RecordLifecycleShapeState) -> MetaTaskState {
+    match state.meta_task_lifecycle.as_str() {
+        "Planning" => MetaTaskState::Planning,
+        "MetaActiveState" => MetaTaskState::Active,
+        "Completed" => MetaTaskState::Completed,
+        "Cancelled" => MetaTaskState::Cancelled,
+        other => panic!("unexpected meta-task lifecycle {other}"),
+    }
+}
+
+fn record_lifecycle_claim_state(state: &RecordLifecycleShapeState) -> ClaimState {
+    match state.claim_lifecycle.as_str() {
+        "Held" => ClaimState::Held,
+        "Released" => ClaimState::Released,
+        "Expired" => ClaimState::Expired,
+        "Revoked" => ClaimState::Revoked,
+        other => panic!("unexpected claim lifecycle {other}"),
+    }
+}
+
+fn record_lifecycle_timestamps(
+    state: &RecordLifecycleShapeState,
+) -> (TimestampMs, TimestampMs, TimestampMs) {
+    let created_at = TimestampMs::parse(10).expect("valid created_at");
+    let last_heartbeat_at =
+        TimestampMs::parse(if state.timestamp_shape == "HeartbeatBeforeCreated" {
+            5
+        } else {
+            20
+        })
+        .expect("valid heartbeat timestamp");
+    let updated_at = TimestampMs::parse(if state.timestamp_shape == "UpdatedBeforeCreated" {
+        5
+    } else {
+        20
+    })
+    .expect("valid updated_at");
+    (created_at, last_heartbeat_at, updated_at)
+}
+
+fn record_lifecycle_expected_reject(state: &RecordLifecycleShapeState) -> &'static str {
+    if state.row_kind == "SessionRow"
+        && state.session_lifecycle != "Active"
+        && state.active_subtask_present
+    {
+        "TerminalSessionCarriesActiveSubtask"
+    } else if state.row_kind == "SessionRow" && state.timestamp_shape == "HeartbeatBeforeCreated" {
+        "SessionHeartbeatBeforeCreatedReject"
+    } else if state.timestamp_shape == "UpdatedBeforeCreated" {
+        "UpdatedBeforeCreatedReject"
+    } else if state.row_kind == "SessionRow" && state.tick_shape == "NegativeTick" {
+        "NegativeHeartbeatTickReject"
+    } else if state.row_kind == "SessionRow" && state.text_shape == "InvalidPrincipal" {
+        "InvalidPrincipalReject"
+    } else if state.row_kind == "SessionRow" && state.text_shape == "InvalidInstance" {
+        "InvalidInstanceReject"
+    } else if state.row_kind == "MetaTaskRow" && state.text_shape == "BlankPrompt" {
+        "BlankPromptReject"
+    } else {
+        "NoReject"
+    }
+}
+
+fn record_lifecycle_actual_accepts(state: &RecordLifecycleShapeState) -> bool {
+    let (created_at, last_heartbeat_at, updated_at) = record_lifecycle_timestamps(state);
+    match state.row_kind.as_str() {
+        "SessionRow" => Session::try_from_parts(
+            SessionToken::parse("session-1").expect("valid session token"),
+            if state.text_shape == "InvalidPrincipal" {
+                "bad principal"
+            } else {
+                "principal-1"
+            },
+            if state.text_shape == "InvalidInstance" {
+                "bad instance"
+            } else {
+                "instance-1"
+            },
+            SessionRole::Executor,
+            record_lifecycle_session_state(state),
+            state
+                .active_subtask_present
+                .then(|| SubtaskId::parse("subtask-1").expect("valid subtask id")),
+            last_heartbeat_at,
+            if state.tick_shape == "NegativeTick" {
+                -1
+            } else {
+                1
+            },
+            created_at,
+            updated_at,
+        )
+        .is_ok(),
+        "MetaTaskRow" => MetaTask::try_from_parts(
+            MetaTaskId::parse("meta-1").expect("valid meta task id"),
+            if state.text_shape == "BlankPrompt" {
+                " ".to_owned()
+            } else {
+                "do work".to_owned()
+            },
+            record_lifecycle_meta_task_state(state),
+            SessionToken::parse("session-1").expect("valid session token"),
+            created_at,
+            updated_at,
+        )
+        .is_ok(),
+        "ClaimRow" => Claim::try_from_parts(
+            ClaimId::parse("claim-1").expect("valid claim id"),
+            SubtaskId::parse("subtask-1").expect("valid subtask id"),
+            SessionToken::parse("session-1").expect("valid session token"),
+            FenceSeq::parse(1).expect("valid fence"),
+            LeaseDeadlineMs::parse(20).expect("valid lease deadline"),
+            record_lifecycle_claim_state(state),
+            created_at,
+            updated_at,
+        )
+        .is_ok(),
+        other => panic!("unexpected record lifecycle row kind {other}"),
+    }
+}
+
+fn replay_record_lifecycle_shape_trace(trace: &RecordLifecycleShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: record lifecycle scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = record_lifecycle_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: record lifecycle reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: record lifecycle outcome disagrees with row facts"
+            ));
+        }
+        if record_lifecycle_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: record lifecycle constructor disagrees with model"
+            ));
+        }
+        if state.accepted
+            && state.row_kind == "SessionRow"
+            && state.session_lifecycle != "Active"
+            && state.active_subtask_present
+        {
+            violations.push(format!(
+                "state[{index}]: terminal session accepted with active subtask"
+            ));
+        }
+        if state.accepted
+            && state.row_kind == "SessionRow"
+            && (state.timestamp_shape != "Monotonic" || state.tick_shape != "NonNegativeTick")
+        {
+            violations.push(format!(
+                "state[{index}]: session accepted non-monotonic timestamps or negative heartbeat tick"
+            ));
+        }
+        if state.accepted && state.row_kind != "SessionRow" && state.timestamp_shape != "Monotonic"
+        {
+            violations.push(format!(
+                "state[{index}]: meta-task or claim accepted non-monotonic timestamps"
+            ));
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -7941,6 +8187,11 @@ fn apply_proof_row_lifecycle_trace() -> ApplyProofRowLifecycleItfTrace {
 }
 
 #[fixture]
+fn record_lifecycle_shape_trace() -> RecordLifecycleShapeItfTrace {
+    serde_json::from_str(COVEY_RECORD_LIFECYCLE_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -8599,6 +8850,62 @@ fn covey_replays_quint_apply_proof_row_lifecycle_itf_trace(
     }
     assert_eq!(
         replay_apply_proof_row_lifecycle_trace(&apply_proof_row_lifecycle_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_record_lifecycle_shape_itf_trace(
+    record_lifecycle_shape_trace: RecordLifecycleShapeItfTrace,
+) {
+    assert!(
+        !record_lifecycle_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "SessionActiveIdle",
+        "SessionActiveWithSubtask",
+        "SessionStaleIdle",
+        "SessionExitedIdle",
+        "MetaPlanning",
+        "MetaActive",
+        "MetaCompleted",
+        "MetaCancelled",
+        "ClaimHeld",
+        "ClaimReleased",
+        "ClaimExpired",
+        "ClaimRevoked",
+    ] {
+        assert!(
+            record_lifecycle_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "SessionStaleWithSubtask",
+        "SessionExitedWithSubtask",
+        "SessionHeartbeatBeforeCreated",
+        "SessionUpdatedBeforeCreated",
+        "SessionNegativeHeartbeatTick",
+        "SessionInvalidPrincipal",
+        "SessionInvalidInstance",
+        "MetaUpdatedBeforeCreated",
+        "MetaBlankPrompt",
+        "ClaimUpdatedBeforeCreated",
+    ] {
+        assert!(
+            record_lifecycle_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_record_lifecycle_shape_trace(&record_lifecycle_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -10378,6 +10685,38 @@ fn covey_apply_proof_row_lifecycle_replay_reports_counterexample_shape() {
             "state[0]: apply-proof row lifecycle reject reason disagrees with row facts",
             "state[0]: apply-proof row lifecycle outcome disagrees with row facts",
             "state[0]: in-flight queue row accepted without complete active claim evidence",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_record_lifecycle_shape_replay_reports_counterexample_shape() {
+    let state = RecordLifecycleShapeState {
+        case_index: 5,
+        case: "SessionStaleWithSubtask".to_owned(),
+        row_kind: "SessionRow".to_owned(),
+        session_lifecycle: "Stale".to_owned(),
+        meta_task_lifecycle: "Planning".to_owned(),
+        claim_lifecycle: "Held".to_owned(),
+        active_subtask_present: true,
+        timestamp_shape: "Monotonic".to_owned(),
+        text_shape: "ValidText".to_owned(),
+        tick_shape: "NonNegativeTick".to_owned(),
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = RecordLifecycleShapeItfTrace {
+        states: vec![RecordLifecycleShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_record_lifecycle_shape_trace(&trace),
+        vec![
+            "state[0]: record lifecycle reject reason disagrees with row facts",
+            "state[0]: record lifecycle outcome disagrees with row facts",
+            "state[0]: terminal session accepted with active subtask",
         ]
     );
 }
