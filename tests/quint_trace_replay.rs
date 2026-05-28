@@ -15,6 +15,8 @@ const COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryExit.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
+const COVEY_RESERVATION_OVERLAP_ITF: &str =
+    include_str!("fixtures/quint/CoveyReservationOverlap.itf.json");
 const COVEY_APPLY_GATE_EVIDENCE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyGateEvidence.itf.json");
 const COVEY_SESSION_META_TASK_ITF: &str =
@@ -80,6 +82,16 @@ struct QueueReservationItfTrace {
 #[derive(Debug, Deserialize)]
 struct QueueReservationItfState {
     s: QueueReservationState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationOverlapItfTrace {
+    states: Vec<ReservationOverlapItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationOverlapItfState {
+    s: ReservationOverlapState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +282,36 @@ struct QueueReservationState {
         deserialize_with = "deserialize_itf_bigint"
     )]
     conflict_rank_floor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationOverlapState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "candidateScope",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    candidate_scope: String,
+    #[serde(rename = "existingScope", deserialize_with = "deserialize_itf_variant")]
+    existing_scope: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    relation: String,
+    #[serde(rename = "existingActive")]
+    existing_active: bool,
+    #[serde(rename = "candidatePathValid")]
+    candidate_path_valid: bool,
+    #[serde(rename = "candidateMembersPresent")]
+    candidate_members_present: bool,
+    #[serde(rename = "overlapReturned")]
+    overlap_returned: bool,
+    #[serde(rename = "conflictRecorded")]
+    conflict_recorded: bool,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1454,6 +1496,102 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
         }
     }
     violations
+}
+
+fn replay_reservation_overlap_trace(trace: &ReservationOverlapItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: reservation overlap scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = reservation_overlap_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: reservation overlap reject reason disagrees with candidate validity"
+            ));
+        }
+        let expected_overlap = reservation_overlap_expected_overlap(state);
+        if state.overlap_returned != expected_overlap {
+            violations.push(format!(
+                "state[{index}]: reservation overlap result disagrees with scope semantics"
+            ));
+        }
+        if matches!(state.candidate_scope.as_str(), "RepoGlobal")
+            || matches!(state.existing_scope.as_str(), "RepoGlobal")
+        {
+            if state.reject_reason == "NoReject" && state.existing_active && !state.overlap_returned
+            {
+                violations.push(format!(
+                    "state[{index}]: repo-global scope did not overlap an active reservation"
+                ));
+            }
+        }
+        if !state.existing_active && state.overlap_returned {
+            violations.push(format!(
+                "state[{index}]: expired reservation was returned as an overlap"
+            ));
+        }
+        if state.reject_reason != "NoReject" && (state.overlap_returned || state.conflict_recorded)
+        {
+            violations.push(format!(
+                "state[{index}]: invalid overlap candidate returned overlap or conflict"
+            ));
+        }
+        if state.conflict_recorded && !state.overlap_returned {
+            violations.push(format!(
+                "state[{index}]: conflict recorded without returned overlap"
+            ));
+        }
+    }
+    violations
+}
+
+fn reservation_overlap_expected_reject(state: &ReservationOverlapState) -> &'static str {
+    if !state.candidate_path_valid {
+        "InvalidPath"
+    } else if state.candidate_scope == "GeneratedSet" && !state.candidate_members_present {
+        "EmptyGeneratedMembers"
+    } else {
+        "NoReject"
+    }
+}
+
+fn reservation_overlap_scopes_intersect(state: &ReservationOverlapState) -> bool {
+    state.candidate_scope == "RepoGlobal"
+        || state.existing_scope == "RepoGlobal"
+        || (state.candidate_scope == "ExactPath"
+            && ((state.existing_scope == "ExactPath" && state.relation == "SamePath")
+                || (state.existing_scope == "Subtree"
+                    && state.relation == "CandidateUnderExisting")
+                || (state.existing_scope == "GeneratedSet"
+                    && state.relation == "SharedGeneratedMember")))
+        || (state.candidate_scope == "Subtree"
+            && matches!(
+                state.relation.as_str(),
+                "SamePath" | "CandidateUnderExisting" | "ExistingUnderCandidate"
+            ))
+        || (state.candidate_scope == "GeneratedSet"
+            && ((state.existing_scope == "ExactPath" && state.relation == "SharedGeneratedMember")
+                || (state.existing_scope == "Subtree"
+                    && state.relation == "CandidateUnderExisting")
+                || (state.existing_scope == "GeneratedSet"
+                    && state.relation == "SharedGeneratedMember")))
+}
+
+fn reservation_overlap_expected_overlap(state: &ReservationOverlapState) -> bool {
+    reservation_overlap_expected_reject(state) == "NoReject"
+        && state.existing_active
+        && reservation_overlap_scopes_intersect(state)
 }
 
 fn repoops_snapshot_expected_claim_status(state: &RepoopsSnapshotState) -> &'static str {
@@ -2826,6 +2964,11 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
 }
 
 #[fixture]
+fn reservation_overlap_trace() -> ReservationOverlapItfTrace {
+    serde_json::from_str(COVEY_RESERVATION_OVERLAP_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn repoops_snapshot_trace() -> RepoopsSnapshotItfTrace {
     serde_json::from_str(COVEY_REPOOPS_SNAPSHOT_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -3044,6 +3187,30 @@ fn covey_replays_quint_queue_reservation_itf_trace(
     );
     assert_eq!(
         replay_queue_reservation_trace(&queue_reservation_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_reservation_overlap_itf_trace(
+    reservation_overlap_trace: ReservationOverlapItfTrace,
+) {
+    assert!(
+        reservation_overlap_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "GeneratedMatchesGeneratedMember"),
+        "fixture should cover generated-set member intersections"
+    );
+    assert!(
+        reservation_overlap_trace
+            .states
+            .iter()
+            .any(|state| state.s.reject_reason == "EmptyGeneratedMembers"),
+        "fixture should cover generated-set requests without members"
+    );
+    assert_eq!(
+        replay_reservation_overlap_trace(&reservation_overlap_trace),
         Vec::<String>::new()
     );
 }
