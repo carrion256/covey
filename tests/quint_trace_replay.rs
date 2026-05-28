@@ -1,4 +1,7 @@
-use covey::{OverlapQueryReq, RecordRuntimeAttestationReq, RequestReservationReq, ScopeClass};
+use covey::{
+    ConflictResolutionState, OverlapQueryReq, RecordRuntimeAttestationReq, RequestReservationReq,
+    ResolveConflictReq, ScopeClass,
+};
 use rstest::{fixture, rstest};
 use serde::Deserialize;
 use std::fmt;
@@ -33,6 +36,8 @@ const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
+const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
+    include_str!("fixtures/quint/CoveyConflictResolutionRequest.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
@@ -196,6 +201,16 @@ struct ReservationRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ReservationRequestShapeItfState {
     s: ReservationRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConflictResolutionRequestItfTrace {
+    states: Vec<ConflictResolutionRequestItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConflictResolutionRequestItfState {
+    s: ConflictResolutionRequestState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -777,6 +792,36 @@ struct ReservationRequestShapeState {
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
     reject_reason: String,
     accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConflictResolutionRequestState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "currentState", deserialize_with = "deserialize_itf_variant")]
+    current_state: String,
+    #[serde(
+        rename = "requestedState",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    requested_state: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "conflictIdValid")]
+    conflict_id_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(rename = "requestShapeAccepted")]
+    request_shape_accepted: bool,
+    #[serde(rename = "transitionAllowed")]
+    transition_allowed: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
     evaluated: bool,
 }
 
@@ -2341,6 +2386,139 @@ fn replay_reservation_request_shape_trace(trace: &ReservationRequestShapeItfTrac
         {
             violations.push(format!(
                 "state[{index}]: accepted generated-set reservation has invalid members"
+            ));
+        }
+    }
+    violations
+}
+
+fn conflict_resolution_expected_reject(state: &ConflictResolutionRequestState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.conflict_id_valid {
+        "ConflictIdInvalid"
+    } else if state.requested_state == "Open" {
+        "OpenResolutionForbidden"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else if !conflict_resolution_transition_allowed(state) {
+        "ResolutionDowngradeForbidden"
+    } else {
+        "NoReject"
+    }
+}
+
+fn conflict_resolution_transition_allowed(state: &ConflictResolutionRequestState) -> bool {
+    matches!(
+        (state.current_state.as_str(), state.requested_state.as_str()),
+        ("Open", "Acknowledged")
+            | ("Open", "Resolved")
+            | ("Acknowledged", "Acknowledged")
+            | ("Acknowledged", "Resolved")
+            | ("Resolved", "Resolved")
+    )
+}
+
+fn conflict_resolution_requested_state(
+    state: &ConflictResolutionRequestState,
+) -> ConflictResolutionState {
+    match state.requested_state.as_str() {
+        "Open" => ConflictResolutionState::Open,
+        "Acknowledged" => ConflictResolutionState::Acknowledged,
+        "Resolved" => ConflictResolutionState::Resolved,
+        requested => {
+            panic!("unexpected conflict resolution request state from ITF trace: {requested}")
+        }
+    }
+}
+
+fn conflict_resolution_request_actual_accepts(state: &ConflictResolutionRequestState) -> bool {
+    ResolveConflictReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.conflict_id_valid {
+            "conflict-1"
+        } else {
+            "conflict 1"
+        },
+        conflict_resolution_requested_state(state),
+        if state.idempotency_key_valid {
+            "idem-resolve"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_conflict_resolution_request_trace(
+    trace: &ConflictResolutionRequestItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: conflict resolution scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = conflict_resolution_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: conflict resolution reject reason does not match validation facts"
+            ));
+        }
+        let expected_request_accepted = !matches!(
+            expected_reject,
+            "SessionTokenInvalid"
+                | "ConflictIdInvalid"
+                | "OpenResolutionForbidden"
+                | "IdempotencyKeyInvalid"
+        );
+        if state.request_shape_accepted != expected_request_accepted {
+            violations.push(format!(
+                "state[{index}]: conflict resolution request-shape acceptance disagrees with validation facts"
+            ));
+        }
+        let actual_request_accepted = conflict_resolution_request_actual_accepts(state);
+        if actual_request_accepted != expected_request_accepted {
+            violations.push(format!(
+                "state[{index}]: conflict resolution request parser disagrees with model"
+            ));
+        }
+        let expected_transition_allowed = conflict_resolution_transition_allowed(state);
+        if state.transition_allowed != expected_transition_allowed {
+            violations.push(format!(
+                "state[{index}]: conflict resolution transition flag disagrees with transition matrix"
+            ));
+        }
+        let expected_outcome = if !expected_request_accepted {
+            "Rejected"
+        } else if expected_transition_allowed {
+            "Accepted"
+        } else {
+            "IllegalTransition"
+        };
+        if state.outcome != expected_outcome {
+            violations.push(format!(
+                "state[{index}]: conflict resolution outcome disagrees with request and transition facts"
+            ));
+        }
+        if state.outcome == "Accepted"
+            && (!state.request_shape_accepted || !state.transition_allowed)
+        {
+            violations.push(format!(
+                "state[{index}]: conflict resolution accepted without valid request and transition"
             ));
         }
     }
@@ -4437,6 +4615,12 @@ fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
 }
 
 #[fixture]
+fn conflict_resolution_request_trace() -> ConflictResolutionRequestItfTrace {
+    serde_json::from_str(COVEY_CONFLICT_RESOLUTION_REQUEST_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn landing_receipt_trace() -> LandingReceiptItfTrace {
     serde_json::from_str(COVEY_LANDING_RECEIPT_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -5040,6 +5224,47 @@ fn covey_replays_quint_reservation_request_shape_itf_trace(
     );
     assert_eq!(
         replay_reservation_request_shape_trace(&reservation_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_conflict_resolution_request_itf_trace(
+    conflict_resolution_request_trace: ConflictResolutionRequestItfTrace,
+) {
+    assert!(
+        !conflict_resolution_request_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidAcknowledgeOpen",
+        "ValidResolveOpen",
+        "ValidAcknowledgeAcknowledged",
+        "ValidResolveAcknowledged",
+        "ValidResolveResolved",
+        "InvalidSessionToken",
+        "InvalidConflictId",
+        "OpenResolutionRequest",
+        "BlankIdempotencyKey",
+        "DowngradeResolvedToAcknowledged",
+    ] {
+        assert!(
+            conflict_resolution_request_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        conflict_resolution_request_trace
+            .states
+            .iter()
+            .any(|state| state.s.outcome == "IllegalTransition"),
+        "fixture should cover valid request shapes rejected by conflict transition"
+    );
+    assert_eq!(
+        replay_conflict_resolution_request_trace(&conflict_resolution_request_trace),
         Vec::<String>::new()
     );
 }
@@ -6032,6 +6257,36 @@ fn covey_reservation_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: reservation request reject reason does not match validation facts",
             "state[0]: reservation request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_conflict_resolution_request_replay_reports_counterexample_shape() {
+    let state = ConflictResolutionRequestState {
+        case_index: 10,
+        case: "DowngradeResolvedToAcknowledged".to_owned(),
+        current_state: "Resolved".to_owned(),
+        requested_state: "Acknowledged".to_owned(),
+        session_token_valid: true,
+        conflict_id_valid: true,
+        idempotency_key_valid: true,
+        request_shape_accepted: true,
+        transition_allowed: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        evaluated: true,
+    };
+    let trace = ConflictResolutionRequestItfTrace {
+        states: vec![ConflictResolutionRequestItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_conflict_resolution_request_trace(&trace),
+        vec![
+            "state[0]: conflict resolution reject reason does not match validation facts",
+            "state[0]: conflict resolution transition flag disagrees with transition matrix",
+            "state[0]: conflict resolution outcome disagrees with request and transition facts",
         ]
     );
 }
