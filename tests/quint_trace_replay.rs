@@ -1,3 +1,4 @@
+use covey::RecordRuntimeAttestationReq;
 use rstest::{fixture, rstest};
 use serde::Deserialize;
 use std::fmt;
@@ -28,6 +29,8 @@ const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
+const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyRuntimeAttestationRequestShape.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
@@ -171,6 +174,16 @@ struct ViewAttachmentShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ViewAttachmentShapeItfState {
     s: ViewAttachmentShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationRequestShapeItfTrace {
+    states: Vec<RuntimeAttestationRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationRequestShapeItfState {
+    s: RuntimeAttestationRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -668,6 +681,50 @@ struct ViewAttachmentShapeState {
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
     reject_reason: String,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "providerValid")]
+    provider_valid: bool,
+    #[serde(rename = "modelValid")]
+    model_valid: bool,
+    #[serde(rename = "providerRunIdValid")]
+    provider_run_id_valid: bool,
+    #[serde(rename = "providerRunIdIssuerValid")]
+    provider_run_id_issuer_valid: bool,
+    #[serde(rename = "processIdPresent")]
+    process_id_present: bool,
+    #[serde(rename = "processIdValid")]
+    process_id_valid: bool,
+    #[serde(rename = "containerIdPresent")]
+    container_id_present: bool,
+    #[serde(rename = "containerIdValid")]
+    container_id_valid: bool,
+    #[serde(rename = "commandTranscriptDigestValid")]
+    command_transcript_digest_valid: bool,
+    #[serde(rename = "startedAtNonNegative")]
+    started_at_non_negative: bool,
+    #[serde(rename = "endedAtNonNegative")]
+    ended_at_non_negative: bool,
+    #[serde(rename = "timestampsOrdered")]
+    timestamps_ordered: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(rename = "flatSerializationPreservesIdentity")]
+    flat_serialization_preserves_identity: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
     evaluated: bool,
 }
 
@@ -1884,6 +1941,175 @@ fn replay_view_attachment_shape_trace(trace: &ViewAttachmentShapeItfTrace) -> Ve
         if accepted && !(state.reviews_belong_to_subtask && state.ready_queue_belongs_to_subtask) {
             violations.push(format!(
                 "state[{index}]: accepted subtask status has foreign collection attachment"
+            ));
+        }
+    }
+    violations
+}
+
+fn runtime_attestation_expected_reject(
+    state: &RuntimeAttestationRequestShapeState,
+) -> &'static str {
+    if state.process_id_present && !state.process_id_valid {
+        "InvalidProcessId"
+    } else if state.container_id_present && !state.container_id_valid {
+        "InvalidContainerId"
+    } else if !state.process_id_present && !state.container_id_present {
+        "MissingRuntimeIdentity"
+    } else if !state.started_at_non_negative {
+        "InvalidStartedAt"
+    } else if !state.ended_at_non_negative {
+        "InvalidEndedAt"
+    } else if !state.timestamps_ordered {
+        "InvertedTimeRange"
+    } else if !state.provider_run_id_valid {
+        "InvalidProviderRunId"
+    } else if !state.provider_run_id_issuer_valid {
+        "InvalidProviderRunIdIssuer"
+    } else if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.provider_valid {
+        "ProviderInvalid"
+    } else if !state.model_valid {
+        "ModelInvalid"
+    } else if !state.command_transcript_digest_valid {
+        "CommandTranscriptDigestInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn runtime_attestation_actual_shape(state: &RuntimeAttestationRequestShapeState) -> (bool, bool) {
+    let started_at = if state.started_at_non_negative {
+        if state.timestamps_ordered { 100 } else { 102 }
+    } else {
+        -1
+    };
+    let ended_at = if state.ended_at_non_negative { 101 } else { -1 };
+    let process_id = if state.process_id_present {
+        Some(if state.process_id_valid {
+            "process-1"
+        } else {
+            " "
+        })
+    } else {
+        None
+    };
+    let container_id = if state.container_id_present {
+        Some(if state.container_id_valid {
+            "container-1"
+        } else {
+            "container-1 "
+        })
+    } else {
+        None
+    };
+    let raw = serde_json::json!({
+        "session_token": if state.session_token_valid { "session-1" } else { "" },
+        "provider": if state.provider_valid { "provider-1" } else { "provider 1" },
+        "model": if state.model_valid { "model-1" } else { "model 1" },
+        "provider_run_id": if state.provider_run_id_valid { "run-1" } else { " " },
+        "provider_run_id_issuer": if state.provider_run_id_issuer_valid { "issuer-1" } else { " issuer-1" },
+        "process_id": process_id,
+        "container_id": container_id,
+        "command_transcript_digest": if state.command_transcript_digest_valid { "blake3:transcript" } else { "transcript" },
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "idempotency_key": if state.idempotency_key_valid { "idem-1" } else { " " },
+    });
+    let Ok(req) = serde_json::from_value::<RecordRuntimeAttestationReq>(raw) else {
+        return (false, false);
+    };
+    let serialized =
+        serde_json::to_value(req).expect("valid runtime attestation request should serialize");
+    let expected_process_id = if state.process_id_present {
+        serde_json::json!("process-1")
+    } else {
+        serde_json::Value::Null
+    };
+    let expected_container_id = if state.container_id_present {
+        serde_json::json!("container-1")
+    } else {
+        serde_json::Value::Null
+    };
+    let flat_identity_preserved = serialized["process_id"] == expected_process_id
+        && serialized["container_id"] == expected_container_id;
+    (true, flat_identity_preserved)
+}
+
+fn replay_runtime_attestation_request_shape_trace(
+    trace: &RuntimeAttestationRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: runtime attestation request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = runtime_attestation_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: runtime attestation request reject reason does not match parser order"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: runtime attestation request outcome disagrees with validation facts"
+            ));
+        }
+        let (actual_accepted, actual_flat_identity_preserved) =
+            runtime_attestation_actual_shape(state);
+        if actual_accepted != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: runtime attestation request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && state.flat_serialization_preserves_identity
+            && !actual_flat_identity_preserved
+        {
+            violations.push(format!(
+                "state[{index}]: runtime attestation request serialization lost flat identity"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.provider_valid
+                || !state.model_valid
+                || !state.provider_run_id_valid
+                || !state.provider_run_id_issuer_valid
+                || !state.command_transcript_digest_valid
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted runtime attestation request has invalid scalar field"
+            ));
+        }
+        if expected_accepted
+            && (!state.started_at_non_negative
+                || !state.ended_at_non_negative
+                || !state.timestamps_ordered)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted runtime attestation request has invalid time range"
+            ));
+        }
+        if expected_accepted && !state.process_id_present && !state.container_id_present {
+            violations.push(format!(
+                "state[{index}]: accepted runtime attestation request lacks runtime identity"
             ));
         }
     }
@@ -3968,6 +4194,12 @@ fn view_attachment_shape_trace() -> ViewAttachmentShapeItfTrace {
 }
 
 #[fixture]
+fn runtime_attestation_request_shape_trace() -> RuntimeAttestationRequestShapeItfTrace {
+    serde_json::from_str(COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn landing_receipt_trace() -> LandingReceiptItfTrace {
     serde_json::from_str(COVEY_LANDING_RECEIPT_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -4467,6 +4699,54 @@ fn covey_replays_quint_view_attachment_shape_itf_trace(
     );
     assert_eq!(
         replay_view_attachment_shape_trace(&view_attachment_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_runtime_attestation_request_shape_itf_trace(
+    runtime_attestation_request_shape_trace: RuntimeAttestationRequestShapeItfTrace,
+) {
+    assert!(
+        !runtime_attestation_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidProcessOnly",
+        "ValidContainerOnly",
+        "ValidProcessAndContainer",
+        "MissingIdentity",
+        "BlankProcess",
+        "PaddedContainer",
+        "NegativeStartedAt",
+        "NegativeEndedAt",
+        "InvertedTimestamps",
+        "BlankProviderRunId",
+        "PaddedProviderRunIdIssuer",
+        "InvalidSessionToken",
+        "InvalidProviderToken",
+        "InvalidModelToken",
+        "InvalidTranscriptDigest",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            runtime_attestation_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        runtime_attestation_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidProcessAndContainer"
+                && state.s.flat_serialization_preserves_identity),
+        "fixture should cover flat serialization preserving both runtime identities"
+    );
+    assert_eq!(
+        replay_runtime_attestation_request_shape_trace(&runtime_attestation_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -5385,6 +5665,44 @@ fn covey_view_attachment_shape_replay_reports_counterexample_shape() {
             "state[0]: accepted subtask status has invalid claim attachment",
             "state[0]: accepted subtask status has invalid artifact attachment",
             "state[0]: accepted subtask status has foreign collection attachment",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_runtime_attestation_request_shape_replay_reports_counterexample_shape() {
+    let state = RuntimeAttestationRequestShapeState {
+        case_index: 4,
+        case: "MissingIdentity".to_owned(),
+        session_token_valid: true,
+        provider_valid: true,
+        model_valid: true,
+        provider_run_id_valid: true,
+        provider_run_id_issuer_valid: true,
+        process_id_present: false,
+        process_id_valid: true,
+        container_id_present: false,
+        container_id_valid: true,
+        command_transcript_digest_valid: true,
+        started_at_non_negative: true,
+        ended_at_non_negative: true,
+        timestamps_ordered: true,
+        idempotency_key_valid: true,
+        flat_serialization_preserves_identity: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = RuntimeAttestationRequestShapeItfTrace {
+        states: vec![RuntimeAttestationRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_runtime_attestation_request_shape_trace(&trace),
+        vec![
+            "state[0]: runtime attestation request reject reason does not match parser order",
+            "state[0]: runtime attestation request outcome disagrees with validation facts",
         ]
     );
 }
