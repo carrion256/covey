@@ -2,13 +2,18 @@ use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, ClaimId, ClaimNextReq,
     ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState, CreateSubtaskRequest,
     DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq, MarkAppliedReq,
-    MarkInFlightReq, MetaTaskId, OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq,
-    RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewSubtask, ReviewTarget,
-    ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SettlementTarget, StartSubtaskReq,
-    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
-    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
+    MarkInFlightReq, MetaTaskId, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
+    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
+    ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, SessionHandle,
+    SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle,
+    SubtaskPriority, SupersedeQueueItemReq, TimestampMs, VerifyLandingAuthorizationReq,
+    WorkSubtask,
+    proof_apply::{
+        ready_queue_proof_row_lifecycle_accepts_for_model,
+        review_proof_row_lifecycle_accepts_for_model,
+    },
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -100,6 +105,8 @@ const COVEY_TRANSITION_MATRIX_ITF: &str =
     include_str!("fixtures/quint/CoveyTransitionMatrix.itf.json");
 const COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySubtaskDomainLifecycleShape.itf.json");
+const COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF: &str =
+    include_str!("fixtures/quint/CoveyApplyProofRowLifecycle.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -219,6 +226,16 @@ struct SubtaskDomainLifecycleShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct SubtaskDomainLifecycleShapeItfState {
     s: SubtaskDomainLifecycleShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyProofRowLifecycleItfTrace {
+    states: Vec<ApplyProofRowLifecycleItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyProofRowLifecycleItfState {
+    s: ApplyProofRowLifecycleState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -859,6 +876,39 @@ struct SubtaskDomainLifecycleShapeState {
     carries_artifact: bool,
     #[serde(rename = "carriesActiveClaim")]
     carries_active_claim: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyProofRowLifecycleState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "rowKind", deserialize_with = "deserialize_itf_variant")]
+    row_kind: String,
+    #[serde(rename = "reviewState", deserialize_with = "deserialize_itf_variant")]
+    review_state: String,
+    #[serde(
+        rename = "readyQueueState",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    ready_queue_state: String,
+    #[serde(rename = "verdictPresent")]
+    verdict_present: bool,
+    #[serde(rename = "findingsDigestPresent")]
+    findings_digest_present: bool,
+    #[serde(rename = "claimedBySessionPresent")]
+    claimed_by_session_present: bool,
+    #[serde(rename = "claimFence", deserialize_with = "deserialize_itf_variant")]
+    claim_fence: String,
+    #[serde(rename = "claimLeaseDeadlinePresent")]
+    claim_lease_deadline_present: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -6471,6 +6521,188 @@ fn replay_subtask_domain_lifecycle_shape_trace(
     violations
 }
 
+fn apply_proof_review_state(state: &ApplyProofRowLifecycleState) -> ReviewState {
+    match state.review_state.as_str() {
+        "Requested" => ReviewState::Requested,
+        "InProgress" => ReviewState::InProgress,
+        "Decided" => ReviewState::Decided,
+        "Superseded" => ReviewState::Superseded,
+        other => panic!("unexpected review proof state {other}"),
+    }
+}
+
+fn apply_proof_ready_queue_state(state: &ApplyProofRowLifecycleState) -> ReadyQueueState {
+    match state.ready_queue_state.as_str() {
+        "Queued" => ReadyQueueState::Queued,
+        "QueueInFlight" => ReadyQueueState::InFlight,
+        "Applied" => ReadyQueueState::Applied,
+        "QueueSuperseded" => ReadyQueueState::Superseded,
+        "Cancelled" => ReadyQueueState::Cancelled,
+        other => panic!("unexpected ready queue proof state {other}"),
+    }
+}
+
+fn apply_proof_verdict(state: &ApplyProofRowLifecycleState) -> Option<ReviewVerdict> {
+    if !state.verdict_present {
+        return None;
+    }
+    if state.case == "ReviewDecidedBlockedFindings" {
+        Some(ReviewVerdict::Blocked)
+    } else {
+        Some(ReviewVerdict::Approve)
+    }
+}
+
+fn apply_proof_claim_fence(state: &ApplyProofRowLifecycleState) -> Option<i64> {
+    match state.claim_fence.as_str() {
+        "NoFence" => None,
+        "ZeroFence" => Some(0),
+        "PositiveFence" => Some(7),
+        other => panic!("unexpected claim fence shape {other}"),
+    }
+}
+
+fn apply_proof_terminal_queue_state(state: &ApplyProofRowLifecycleState) -> bool {
+    matches!(
+        state.ready_queue_state.as_str(),
+        "Queued" | "QueueSuperseded" | "Cancelled"
+    )
+}
+
+fn apply_proof_row_lifecycle_expected_reject(state: &ApplyProofRowLifecycleState) -> &'static str {
+    if state.row_kind == "ReviewProofRow" {
+        if state.review_state == "Decided" && !state.verdict_present {
+            "DecidedMissingVerdict"
+        } else if state.review_state == "Decided" && !state.findings_digest_present {
+            "DecidedMissingFindingsDigest"
+        } else if state.review_state != "Decided"
+            && (state.verdict_present || state.findings_digest_present)
+        {
+            "NonDecidedReviewCarriesDecisionEvidence"
+        } else {
+            "NoReject"
+        }
+    } else if apply_proof_terminal_queue_state(state)
+        && (state.claimed_by_session_present || state.claim_lease_deadline_present)
+    {
+        "TerminalQueueCarriesActiveClaimFields"
+    } else if apply_proof_terminal_queue_state(state) && state.claim_fence == "ZeroFence" {
+        "InvalidClaimFence"
+    } else if state.ready_queue_state == "QueueInFlight" && !state.claimed_by_session_present {
+        "InFlightMissingClaimedSession"
+    } else if state.ready_queue_state == "QueueInFlight" && state.claim_fence == "NoFence" {
+        "InFlightMissingClaimFence"
+    } else if state.ready_queue_state == "QueueInFlight" && state.claim_fence == "ZeroFence" {
+        "InvalidClaimFence"
+    } else if state.ready_queue_state == "QueueInFlight" && !state.claim_lease_deadline_present {
+        "InFlightMissingLeaseDeadline"
+    } else if state.ready_queue_state == "Applied"
+        && (state.claimed_by_session_present || state.claim_lease_deadline_present)
+    {
+        "AppliedCarriesActiveClaimFields"
+    } else if state.ready_queue_state == "Applied" && state.claim_fence == "NoFence" {
+        "AppliedMissingClaimFence"
+    } else if state.ready_queue_state == "Applied" && state.claim_fence == "ZeroFence" {
+        "InvalidClaimFence"
+    } else {
+        "NoReject"
+    }
+}
+
+fn apply_proof_row_lifecycle_actual_accepts(state: &ApplyProofRowLifecycleState) -> bool {
+    if state.row_kind == "ReviewProofRow" {
+        return review_proof_row_lifecycle_accepts_for_model(
+            apply_proof_review_state(state),
+            apply_proof_verdict(state),
+            state.findings_digest_present,
+        );
+    }
+    ready_queue_proof_row_lifecycle_accepts_for_model(
+        apply_proof_ready_queue_state(state),
+        state.claimed_by_session_present,
+        apply_proof_claim_fence(state),
+        state.claim_lease_deadline_present,
+    )
+}
+
+fn replay_apply_proof_row_lifecycle_trace(trace: &ApplyProofRowLifecycleItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: apply-proof row lifecycle scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = apply_proof_row_lifecycle_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: apply-proof row lifecycle reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: apply-proof row lifecycle outcome disagrees with row facts"
+            ));
+        }
+        if apply_proof_row_lifecycle_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: apply-proof row lifecycle constructor disagrees with model"
+            ));
+        }
+        if state.accepted
+            && state.row_kind == "ReviewProofRow"
+            && state.review_state == "Decided"
+            && !(state.verdict_present && state.findings_digest_present)
+        {
+            violations.push(format!(
+                "state[{index}]: decided review row accepted without complete decision evidence"
+            ));
+        }
+        if state.accepted
+            && state.row_kind == "ReviewProofRow"
+            && state.review_state != "Decided"
+            && (state.verdict_present || state.findings_digest_present)
+        {
+            violations.push(format!(
+                "state[{index}]: non-decided review row accepted decision evidence"
+            ));
+        }
+        if state.accepted
+            && state.row_kind == "ReadyQueueProofRow"
+            && state.ready_queue_state == "QueueInFlight"
+            && !(state.claimed_by_session_present
+                && state.claim_fence == "PositiveFence"
+                && state.claim_lease_deadline_present)
+        {
+            violations.push(format!(
+                "state[{index}]: in-flight queue row accepted without complete active claim evidence"
+            ));
+        }
+        if state.accepted
+            && state.row_kind == "ReadyQueueProofRow"
+            && state.ready_queue_state == "Applied"
+            && (state.claimed_by_session_present
+                || state.claim_fence != "PositiveFence"
+                || state.claim_lease_deadline_present)
+        {
+            violations.push(format!(
+                "state[{index}]: applied queue row accepted without fence-only evidence"
+            ));
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -7703,6 +7935,12 @@ fn subtask_domain_lifecycle_shape_trace() -> SubtaskDomainLifecycleShapeItfTrace
 }
 
 #[fixture]
+fn apply_proof_row_lifecycle_trace() -> ApplyProofRowLifecycleItfTrace {
+    serde_json::from_str(COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -8309,6 +8547,58 @@ fn covey_replays_quint_subtask_domain_lifecycle_shape_itf_trace(
     }
     assert_eq!(
         replay_subtask_domain_lifecycle_shape_trace(&subtask_domain_lifecycle_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_apply_proof_row_lifecycle_itf_trace(
+    apply_proof_row_lifecycle_trace: ApplyProofRowLifecycleItfTrace,
+) {
+    assert!(
+        !apply_proof_row_lifecycle_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ReviewDecidedMissingVerdict",
+        "ReviewDecidedMissingFindings",
+        "ReviewRequestedWithVerdict",
+        "QueueInFlightMissingSession",
+        "QueueInFlightMissingFence",
+        "QueueInFlightMissingLease",
+        "QueueAppliedMissingFence",
+        "QueueAppliedActiveSession",
+        "QueueQueuedInvalidLastFence",
+    ] {
+        assert!(
+            apply_proof_row_lifecycle_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    for expected in [
+        "ReviewRequestedNoDecision",
+        "ReviewInProgressNoDecision",
+        "ReviewSupersededNoDecision",
+        "ReviewDecidedApproveFindings",
+        "QueueQueuedNoClaim",
+        "QueueInFlightComplete",
+        "QueueAppliedFence",
+        "QueueSupersededLastFence",
+        "QueueCancelledLastFence",
+    ] {
+        assert!(
+            apply_proof_row_lifecycle_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    assert_eq!(
+        replay_apply_proof_row_lifecycle_trace(&apply_proof_row_lifecycle_trace),
         Vec::<String>::new()
     );
 }
@@ -10056,6 +10346,38 @@ fn covey_subtask_domain_lifecycle_shape_replay_reports_counterexample_shape() {
             "state[0]: subtask domain lifecycle reject reason disagrees with kind/lifecycle facts",
             "state[0]: subtask domain lifecycle outcome disagrees with kind/lifecycle facts",
             "state[0]: review subtask accepted work-only lifecycle",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_apply_proof_row_lifecycle_replay_reports_counterexample_shape() {
+    let state = ApplyProofRowLifecycleState {
+        case_index: 16,
+        case: "QueueInFlightComplete".to_owned(),
+        row_kind: "ReadyQueueProofRow".to_owned(),
+        review_state: "Decided".to_owned(),
+        ready_queue_state: "QueueInFlight".to_owned(),
+        verdict_present: false,
+        findings_digest_present: false,
+        claimed_by_session_present: false,
+        claim_fence: "NoFence".to_owned(),
+        claim_lease_deadline_present: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ApplyProofRowLifecycleItfTrace {
+        states: vec![ApplyProofRowLifecycleItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_apply_proof_row_lifecycle_trace(&trace),
+        vec![
+            "state[0]: apply-proof row lifecycle reject reason disagrees with row facts",
+            "state[0]: apply-proof row lifecycle outcome disagrees with row facts",
+            "state[0]: in-flight queue row accepted without complete active claim evidence",
         ]
     );
 }

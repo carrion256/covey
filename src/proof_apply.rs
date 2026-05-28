@@ -925,6 +925,71 @@ fn parse_lease_deadline(value: i64) -> Result<LeaseDeadlineMs, ApplyProofError> 
     })
 }
 
+/// Replays review proof row lifecycle parsing for external formal-model tests.
+///
+/// This is not a scheduling or settlement API. It exists so integration tests
+/// can bind Quint traces to the same private row constructors used by apply
+/// proof verification.
+#[doc(hidden)]
+#[must_use]
+pub fn review_proof_row_lifecycle_accepts_for_model(
+    state: ReviewState,
+    verdict: Option<ReviewVerdict>,
+    findings_digest_present: bool,
+) -> bool {
+    let decision_evidence = ReviewProofDecisionEvidence::from_raw_for_state(
+        state,
+        verdict.map(|verdict| verdict.to_string()),
+        findings_digest_present.then(|| "blake3:findings".to_owned()),
+    );
+    let Ok(decision_evidence) = decision_evidence else {
+        return false;
+    };
+    ReviewRow::from_db_parts(
+        "review-1".into(),
+        "subtask-1".into(),
+        "blake3:artifact".into(),
+        "reviewer-session-1".into(),
+        "review-subtask-1".into(),
+        state,
+        decision_evidence,
+    )
+    .is_ok()
+}
+
+/// Replays ready-queue proof row lifecycle parsing for external formal-model
+/// tests.
+///
+/// This is not a scheduling or settlement API. It exists so integration tests
+/// can bind Quint traces to the same private row constructors used by apply
+/// proof verification.
+#[doc(hidden)]
+#[must_use]
+pub fn ready_queue_proof_row_lifecycle_accepts_for_model(
+    state: ReadyQueueState,
+    claimed_by_session_present: bool,
+    claim_fence_seq: Option<i64>,
+    claim_lease_deadline_present: bool,
+) -> bool {
+    let claim_evidence = ReadyQueueProofClaimEvidence::from_raw_for_state(
+        state,
+        claimed_by_session_present.then(|| "session-apply".to_owned()),
+        claim_fence_seq,
+        claim_lease_deadline_present.then_some(10_000),
+    );
+    let Ok(claim_evidence) = claim_evidence else {
+        return false;
+    };
+    ReadyQueueRow::from_db_parts(
+        "queue-1".into(),
+        "blake3:artifact".into(),
+        "subtask-1".into(),
+        state,
+        claim_evidence,
+    )
+    .is_ok()
+}
+
 impl Serialize for ReadyQueueRow {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
