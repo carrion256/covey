@@ -11,6 +11,7 @@ const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
+const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
 const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
     include_str!("fixtures/quint/CoveyMutationIdempotency.itf.json");
 const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
@@ -83,6 +84,16 @@ struct OpenSpecImportItfTrace {
 #[derive(Debug, Deserialize)]
 struct OpenSpecImportItfState {
     s: OpenSpecImportState,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportItfTrace {
+    states: Vec<BdImportItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportItfState {
+    s: BdImportState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,6 +295,46 @@ struct OpenSpecImportState {
     claim_live: bool,
     #[serde(rename = "claimCreatedByImport")]
     claim_created_by_import: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    destination: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    role: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    source: String,
+    #[serde(
+        rename = "conflictReason",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    conflict_reason: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "metaWritten")]
+    meta_written: bool,
+    #[serde(rename = "subtaskWritten")]
+    subtask_written: bool,
+    #[serde(rename = "eventWritten")]
+    event_written: bool,
+    #[serde(rename = "importedCount", deserialize_with = "deserialize_itf_bigint")]
+    imported_count: i64,
+    #[serde(rename = "skippedCount", deserialize_with = "deserialize_itf_bigint")]
+    skipped_count: i64,
+    #[serde(rename = "subtaskShape", deserialize_with = "deserialize_itf_variant")]
+    subtask_shape: String,
+    #[serde(rename = "itemOrder", deserialize_with = "deserialize_itf_variant")]
+    item_order: String,
+    #[serde(rename = "duplicateSkipHasSubtask")]
+    duplicate_skip_has_subtask: bool,
+    #[serde(rename = "invalidSkipHasSubtask")]
+    invalid_skip_has_subtask: bool,
+    #[serde(rename = "claimCreated")]
+    claim_created: bool,
+    #[serde(rename = "sessionActiveSubtaskSet")]
+    session_active_subtask_set: bool,
     evaluated: bool,
 }
 
@@ -1166,6 +1217,161 @@ fn replay_openspec_import_trace(trace: &OpenSpecImportItfTrace) -> Vec<String> {
     violations
 }
 
+fn bd_import_expected_conflict(state: &BdImportState) -> &'static str {
+    match (
+        state.destination.as_str(),
+        state.role.as_str(),
+        state.source.as_str(),
+    ) {
+        ("NoDestination" | "BothDestinations", _, _) => "InvalidDestination",
+        ("ExistingTerminalMeta", _, _) => "MetaUnavailable",
+        (_, _, "MissingDb") => "SourceUnavailable",
+        (_, _, "BadSchema") => "SourceSchemaInvalid",
+        (_, role, _) if role != "Orchestrator" => "RoleNotOrchestrator",
+        (_, _, "DuplicateDifferentMeta") => "DuplicateDifferentMetaConflict",
+        _ => "NoConflict",
+    }
+}
+
+fn bd_import_expected_imported_count(source: &str) -> i64 {
+    match source {
+        "OneImportable" => 1,
+        "MixedValidInvalid" => 2,
+        "OrderedByPriorityDependencyId" => 3,
+        _ => 0,
+    }
+}
+
+fn bd_import_expected_skipped_count(source: &str) -> i64 {
+    match source {
+        "MixedValidInvalid" => 3,
+        "DuplicateSameMeta" => 1,
+        _ => 0,
+    }
+}
+
+fn replay_bd_import_trace(trace: &BdImportItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if !state.evaluated {
+            continue;
+        }
+        let any_write = state.meta_written || state.subtask_written || state.event_written;
+        let expected_conflict = bd_import_expected_conflict(state);
+        if state.conflict_reason != expected_conflict {
+            violations.push(format!(
+                "{prefix}: BD import conflict reason does not match inputs"
+            ));
+        }
+        if matches!(
+            state.destination.as_str(),
+            "NoDestination" | "BothDestinations"
+        ) && !(state.outcome == "Rejected" && !any_write)
+        {
+            violations.push(format!(
+                "{prefix}: invalid BD import destination wrote state"
+            ));
+        }
+        if state.destination == "ExistingTerminalMeta"
+            && !(state.conflict_reason == "MetaUnavailable"
+                && state.outcome == "Rejected"
+                && !any_write)
+        {
+            violations.push(format!(
+                "{prefix}: terminal BD import destination did not reject atomically"
+            ));
+        }
+        if matches!(state.source.as_str(), "MissingDb" | "BadSchema")
+            && !(state.outcome == "Rejected" && !any_write)
+        {
+            violations.push(format!(
+                "{prefix}: failed BD import source wrote destination or subtasks"
+            ));
+        }
+        if state.role != "Orchestrator"
+            && !(state.outcome == "Rejected"
+                && state.conflict_reason == "RoleNotOrchestrator"
+                && !any_write)
+        {
+            violations.push(format!(
+                "{prefix}: non-orchestrator BD import mutated state"
+            ));
+        }
+        if state.source == "DuplicateDifferentMeta"
+            && !(state.outcome == "Rejected"
+                && state.conflict_reason == "DuplicateDifferentMetaConflict"
+                && !any_write)
+        {
+            violations.push(format!(
+                "{prefix}: duplicate-different-meta BD import was not atomic"
+            ));
+        }
+        if state.source == "DuplicateSameMeta"
+            && !(state.outcome == "Applied"
+                && state.imported_count == 0
+                && state.skipped_count == 1
+                && state.duplicate_skip_has_subtask)
+        {
+            violations.push(format!(
+                "{prefix}: duplicate-same-meta BD import was not a deterministic skip"
+            ));
+        }
+        if state.invalid_skip_has_subtask {
+            violations.push(format!(
+                "{prefix}: invalid BD import skip item carried subtask id"
+            ));
+        }
+        if state.imported_count > 0
+            && !(state.subtask_written && state.subtask_shape == "AvailableWorkOnly")
+        {
+            violations.push(format!(
+                "{prefix}: imported BD rows did not become available work subtasks"
+            ));
+        }
+        if state.source == "EmptySource"
+            && !(state.outcome == "Applied"
+                && state.meta_written == (state.destination == "NewMeta")
+                && !state.subtask_written
+                && state.imported_count == 0
+                && state.skipped_count == 0)
+        {
+            violations.push(format!(
+                "{prefix}: empty BD import created unexpected subtasks or counts"
+            ));
+        }
+        if state.source == "OrderedByPriorityDependencyId"
+            && !(state.outcome == "Applied"
+                && state.item_order == "PriorityDependencyId"
+                && state.imported_count == 3)
+        {
+            violations.push(format!(
+                "{prefix}: BD import ordering did not follow priority/dependency/id"
+            ));
+        }
+        if state.claim_created || state.session_active_subtask_set {
+            violations.push(format!("{prefix}: BD import created live claim state"));
+        }
+        if state.outcome == "Applied"
+            && (state.imported_count != bd_import_expected_imported_count(&state.source)
+                || state.skipped_count != bd_import_expected_skipped_count(&state.source))
+        {
+            violations.push(format!(
+                "{prefix}: BD import counts do not match source eligibility"
+            ));
+        }
+        if state.outcome == "Rejected"
+            && (state.imported_count != 0
+                || state.skipped_count != 0
+                || state.item_order != "NoItems")
+        {
+            violations.push(format!("{prefix}: rejected BD import reported items"));
+        }
+    }
+    violations
+}
+
 fn mutation_idempotency_valid_key(key: &str) -> bool {
     matches!(key, "Key1" | "Key2")
 }
@@ -1492,6 +1698,11 @@ fn openspec_import_trace() -> OpenSpecImportItfTrace {
 }
 
 #[fixture]
+fn bd_import_trace() -> BdImportItfTrace {
+    serde_json::from_str(COVEY_BD_IMPORT_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn mutation_idempotency_trace() -> MutationIdempotencyItfTrace {
     serde_json::from_str(COVEY_MUTATION_IDEMPOTENCY_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -1622,6 +1833,48 @@ fn covey_replays_quint_openspec_import_itf_trace(openspec_import_trace: OpenSpec
     );
     assert_eq!(
         replay_openspec_import_trace(&openspec_import_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_bd_import_itf_trace(bd_import_trace: BdImportItfTrace) {
+    assert!(
+        !bd_import_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "InvalidDestination",
+        "MetaUnavailable",
+        "SourceUnavailable",
+        "SourceSchemaInvalid",
+        "RoleNotOrchestrator",
+        "DuplicateDifferentMetaConflict",
+    ] {
+        assert!(
+            bd_import_trace
+                .states
+                .iter()
+                .any(|state| state.s.conflict_reason == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        bd_import_trace.states.iter().any(
+            |state| state.s.source == "DuplicateSameMeta" && state.s.duplicate_skip_has_subtask
+        ),
+        "fixture should cover deterministic duplicate skip"
+    );
+    assert!(
+        bd_import_trace
+            .states
+            .iter()
+            .any(|state| state.s.source == "OrderedByPriorityDependencyId"
+                && state.s.item_order == "PriorityDependencyId"),
+        "fixture should cover deterministic import ordering"
+    );
+    assert_eq!(
+        replay_bd_import_trace(&bd_import_trace),
         Vec::<String>::new()
     );
 }
@@ -1929,6 +2182,46 @@ fn covey_openspec_import_replay_reports_counterexample_shape() {
             "state[0]: active claimed OpenSpec task update did not conflict",
             "state[0]: OpenSpec import updated a live-claimed task",
             "state[0]: OpenSpec import created a live claim",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_bd_import_replay_reports_counterexample_shape() {
+    let state = BdImportState {
+        destination: "NoDestination".to_owned(),
+        role: "Executor".to_owned(),
+        source: "DuplicateDifferentMeta".to_owned(),
+        conflict_reason: "NoConflict".to_owned(),
+        outcome: "Applied".to_owned(),
+        meta_written: true,
+        subtask_written: true,
+        event_written: true,
+        imported_count: 1,
+        skipped_count: 1,
+        subtask_shape: "InvalidSkipOnly".to_owned(),
+        item_order: "SingleItem".to_owned(),
+        duplicate_skip_has_subtask: false,
+        invalid_skip_has_subtask: true,
+        claim_created: true,
+        session_active_subtask_set: true,
+        evaluated: true,
+    };
+    let trace = BdImportItfTrace {
+        states: vec![BdImportItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_bd_import_trace(&trace),
+        vec![
+            "state[0]: BD import conflict reason does not match inputs",
+            "state[0]: invalid BD import destination wrote state",
+            "state[0]: non-orchestrator BD import mutated state",
+            "state[0]: duplicate-different-meta BD import was not atomic",
+            "state[0]: invalid BD import skip item carried subtask id",
+            "state[0]: imported BD rows did not become available work subtasks",
+            "state[0]: BD import created live claim state",
+            "state[0]: BD import counts do not match source eligibility",
         ]
     );
 }
