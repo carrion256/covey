@@ -1,13 +1,14 @@
 use covey::{
-    AbandonSubtaskReq, ArtifactKind, CancelMetaTaskReq, ClaimNextReq, ClaimReadyQueueReq,
-    ClaimSubtaskReq, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
-    EnqueueForApplyReq, ExitSessionReq, HeartbeatReq, MarkAppliedReq, MarkInFlightReq,
-    OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass, SessionHandle, SessionRole,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SupersedeQueueItemReq,
-    VerifyLandingAuthorizationReq,
+    AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, ClaimId, ClaimNextReq,
+    ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState, CreateSubtaskRequest,
+    DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq, MarkAppliedReq,
+    MarkInFlightReq, MetaTaskId, OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq,
+    RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewSubtask, ReviewTarget,
+    ReviewVerdict, ScopeClass, SessionHandle, SessionRole, SettlementTarget, StartSubtaskReq,
+    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
+    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -97,6 +98,8 @@ const COVEY_REPOOPS_SNAPSHOT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRepoopsSnapshotRequestShape.itf.json");
 const COVEY_TRANSITION_MATRIX_ITF: &str =
     include_str!("fixtures/quint/CoveyTransitionMatrix.itf.json");
+const COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveySubtaskDomainLifecycleShape.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -206,6 +209,16 @@ struct TransitionMatrixItfTrace {
 #[derive(Debug, Deserialize)]
 struct TransitionMatrixItfState {
     s: TransitionMatrixState,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtaskDomainLifecycleShapeItfTrace {
+    states: Vec<SubtaskDomainLifecycleShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtaskDomainLifecycleShapeItfState {
+    s: SubtaskDomainLifecycleShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -829,6 +842,28 @@ struct TransitionMatrixState {
     allowed_by_matrix: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtaskDomainLifecycleShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    kind: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    lifecycle: String,
+    #[serde(rename = "carriesArtifact")]
+    carries_artifact: bool,
+    #[serde(rename = "carriesActiveClaim")]
+    carries_active_claim: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
     evaluated: bool,
 }
 
@@ -6237,6 +6272,205 @@ fn replay_transition_matrix_trace(trace: &TransitionMatrixItfTrace) -> Vec<Strin
     violations
 }
 
+fn subtask_domain_lifecycle_expected_reject(
+    state: &SubtaskDomainLifecycleShapeState,
+) -> &'static str {
+    if state.kind == "Work" && state.lifecycle == "Decided" {
+        "WorkCannotUseDecided"
+    } else if state.kind == "Review" && state.lifecycle == "Blocked" {
+        "ReviewCannotUseBlocked"
+    } else if state.kind == "Review"
+        && matches!(
+            state.lifecycle.as_str(),
+            "ArtifactPublished"
+                | "ReviewPending"
+                | "ChangesRequested"
+                | "Approved"
+                | "ReadyForApply"
+                | "Applied"
+        )
+    {
+        "ReviewCannotUseWorkArtifactState"
+    } else {
+        "NoReject"
+    }
+}
+
+fn subtask_domain_lifecycle_value(state: &SubtaskDomainLifecycleShapeState) -> SubtaskLifecycle {
+    let claim_id = || ClaimId::parse("claim-1").expect("valid claim id");
+    let artifact_digest =
+        || ArtifactDigest::parse("blake3:aaaaaaaa").expect("valid artifact digest");
+    match state.lifecycle.as_str() {
+        "Blocked" => SubtaskLifecycle::Blocked {
+            artifact_digest: artifact_digest(),
+        },
+        "Claimed" => SubtaskLifecycle::Claimed {
+            active_claim_id: claim_id(),
+        },
+        "InProgress" => SubtaskLifecycle::InProgress {
+            active_claim_id: claim_id(),
+        },
+        "ArtifactPublished" => SubtaskLifecycle::ArtifactPublished {
+            active_claim_id: Some(claim_id()),
+            artifact_digest: artifact_digest(),
+        },
+        "ReviewPending" => SubtaskLifecycle::ReviewPending {
+            active_claim_id: Some(claim_id()),
+            artifact_digest: artifact_digest(),
+        },
+        "ChangesRequested" => SubtaskLifecycle::ChangesRequested {
+            active_claim_id: None,
+            artifact_digest: artifact_digest(),
+        },
+        "Approved" => SubtaskLifecycle::Approved {
+            active_claim_id: None,
+            artifact_digest: artifact_digest(),
+        },
+        "Decided" => SubtaskLifecycle::Decided,
+        "ReadyForApply" => SubtaskLifecycle::ReadyForApply {
+            active_claim_id: None,
+            artifact_digest: artifact_digest(),
+        },
+        "Applied" => SubtaskLifecycle::Applied {
+            active_claim_id: None,
+            artifact_digest: artifact_digest(),
+        },
+        "Abandoned" => SubtaskLifecycle::Abandoned {
+            artifact_digest: None,
+        },
+        _ => SubtaskLifecycle::Available,
+    }
+}
+
+fn subtask_domain_lifecycle_actual_accepts(state: &SubtaskDomainLifecycleShapeState) -> bool {
+    let subtask_id = SubtaskId::parse("subtask-1").expect("valid subtask id");
+    let meta_task_id = MetaTaskId::parse("meta-1").expect("valid meta-task id");
+    let priority = SubtaskPriority::parse(10).expect("valid subtask priority");
+    let created_at = TimestampMs::parse(100).expect("valid created timestamp");
+    let updated_at = TimestampMs::parse(101).expect("valid updated timestamp");
+    let lifecycle = subtask_domain_lifecycle_value(state);
+    match state.kind.as_str() {
+        "Work" => WorkSubtask::new(
+            subtask_id,
+            meta_task_id,
+            "ship it".to_owned(),
+            lifecycle,
+            priority,
+            created_at,
+            updated_at,
+        )
+        .is_ok(),
+        "Review" => {
+            let review_target = ReviewTarget::new(
+                SubtaskId::parse("work-subtask-1").expect("valid target subtask id"),
+                ArtifactDigest::parse("blake3:bbbbbbbb").expect("valid target artifact digest"),
+            );
+            ReviewSubtask::new(
+                subtask_id,
+                meta_task_id,
+                "review it".to_owned(),
+                review_target,
+                lifecycle,
+                priority,
+                created_at,
+                updated_at,
+            )
+            .is_ok()
+        }
+        _ => false,
+    }
+}
+
+fn replay_subtask_domain_lifecycle_shape_trace(
+    trace: &SubtaskDomainLifecycleShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: subtask domain lifecycle scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = subtask_domain_lifecycle_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: subtask domain lifecycle reject reason disagrees with kind/lifecycle facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: subtask domain lifecycle outcome disagrees with kind/lifecycle facts"
+            ));
+        }
+        if subtask_domain_lifecycle_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: subtask domain lifecycle constructor disagrees with model"
+            ));
+        }
+        if state.accepted && state.kind == "Work" && state.lifecycle == "Decided" {
+            violations.push(format!(
+                "state[{index}]: work subtask accepted review-only decided lifecycle"
+            ));
+        }
+        if state.accepted
+            && state.kind == "Review"
+            && matches!(
+                state.lifecycle.as_str(),
+                "Blocked"
+                    | "ArtifactPublished"
+                    | "ReviewPending"
+                    | "ChangesRequested"
+                    | "Approved"
+                    | "ReadyForApply"
+                    | "Applied"
+            )
+        {
+            violations.push(format!(
+                "state[{index}]: review subtask accepted work-only lifecycle"
+            ));
+        }
+        if state.accepted
+            && state.carries_artifact
+                != matches!(
+                    state.lifecycle.as_str(),
+                    "Blocked"
+                        | "ArtifactPublished"
+                        | "ReviewPending"
+                        | "ChangesRequested"
+                        | "Approved"
+                        | "ReadyForApply"
+                        | "Applied"
+                )
+        {
+            violations.push(format!(
+                "state[{index}]: artifact carrier flag disagrees with lifecycle"
+            ));
+        }
+        if state.accepted
+            && state.carries_active_claim
+                != matches!(
+                    state.lifecycle.as_str(),
+                    "Claimed" | "InProgress" | "ArtifactPublished" | "ReviewPending"
+                )
+        {
+            violations.push(format!(
+                "state[{index}]: active-claim carrier flag disagrees with lifecycle"
+            ));
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -7463,6 +7697,12 @@ fn transition_matrix_trace() -> TransitionMatrixItfTrace {
 }
 
 #[fixture]
+fn subtask_domain_lifecycle_shape_trace() -> SubtaskDomainLifecycleShapeItfTrace {
+    serde_json::from_str(COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -8013,6 +8253,62 @@ fn covey_replays_quint_transition_matrix_itf_trace(
     }
     assert_eq!(
         replay_transition_matrix_trace(&transition_matrix_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_subtask_domain_lifecycle_shape_itf_trace(
+    subtask_domain_lifecycle_shape_trace: SubtaskDomainLifecycleShapeItfTrace,
+) {
+    assert!(
+        !subtask_domain_lifecycle_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "WorkDecided",
+        "ReviewBlocked",
+        "ReviewArtifactPublished",
+        "ReviewReviewPending",
+        "ReviewChangesRequested",
+        "ReviewApproved",
+        "ReviewReadyForApply",
+        "ReviewApplied",
+    ] {
+        assert!(
+            subtask_domain_lifecycle_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    for expected in [
+        "WorkAvailable",
+        "WorkBlocked",
+        "WorkArtifactPublished",
+        "WorkReviewPending",
+        "WorkChangesRequested",
+        "WorkApproved",
+        "WorkReadyForApply",
+        "WorkApplied",
+        "WorkAbandoned",
+        "ReviewAvailable",
+        "ReviewClaimed",
+        "ReviewInProgress",
+        "ReviewDecided",
+        "ReviewAbandoned",
+    ] {
+        assert!(
+            subtask_domain_lifecycle_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    assert_eq!(
+        replay_subtask_domain_lifecycle_shape_trace(&subtask_domain_lifecycle_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -9732,6 +10028,34 @@ fn covey_transition_matrix_replay_reports_counterexample_shape() {
             "state[0]: transition matrix allowed flag disagrees with expected edge set",
             "state[0]: transition matrix outcome disagrees with expected edge set",
             "state[0]: work subtask bypassed ready_for_apply before applied",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_subtask_domain_lifecycle_shape_replay_reports_counterexample_shape() {
+    let state = SubtaskDomainLifecycleShapeState {
+        case_index: 15,
+        case: "ReviewBlocked".to_owned(),
+        kind: "Review".to_owned(),
+        lifecycle: "Blocked".to_owned(),
+        carries_artifact: true,
+        carries_active_claim: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = SubtaskDomainLifecycleShapeItfTrace {
+        states: vec![SubtaskDomainLifecycleShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_subtask_domain_lifecycle_shape_trace(&trace),
+        vec![
+            "state[0]: subtask domain lifecycle reject reason disagrees with kind/lifecycle facts",
+            "state[0]: subtask domain lifecycle outcome disagrees with kind/lifecycle facts",
+            "state[0]: review subtask accepted work-only lifecycle",
         ]
     );
 }
