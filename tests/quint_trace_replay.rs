@@ -4,7 +4,7 @@ use covey::{
     ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     ExitSessionReq, FenceSeq, HeartbeatReq, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq,
     MetaTask, MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq, ProviderId, PublishArtifactReq,
-    ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
     RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
     RequestReviewReq, Reservation, ReservationState, ResolveConflictReq, Review, ReviewState,
@@ -115,6 +115,8 @@ const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRecordShape.itf.json");
 const COVEY_REVIEW_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReviewRecordShape.itf.json");
+const COVEY_READY_QUEUE_RECORD_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReadyQueueRecordShape.itf.json");
 const COVEY_RESERVATION_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRecordShape.itf.json");
 
@@ -276,6 +278,16 @@ struct ReviewRecordShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ReviewRecordShapeItfState {
     s: ReviewRecordShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueRecordShapeItfTrace {
+    states: Vec<ReadyQueueRecordShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueRecordShapeItfState {
+    s: ReadyQueueRecordShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1072,6 +1084,37 @@ struct ReviewRecordShapeState {
     verdict_present: bool,
     #[serde(rename = "findingsDigestPresent")]
     findings_digest_present: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueRecordShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    lifecycle: String,
+    #[serde(rename = "identityShape", deserialize_with = "deserialize_itf_variant")]
+    identity_shape: String,
+    #[serde(rename = "claimShape", deserialize_with = "deserialize_itf_variant")]
+    claim_shape: String,
+    #[serde(
+        rename = "timestampShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    timestamp_shape: String,
+    #[serde(rename = "claimedBySessionPresent")]
+    claimed_by_session_present: bool,
+    #[serde(rename = "claimFencePresent")]
+    claim_fence_present: bool,
+    #[serde(rename = "claimLeaseDeadlinePresent")]
+    claim_lease_deadline_present: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -7591,6 +7634,186 @@ fn replay_review_record_shape_trace(trace: &ReviewRecordShapeItfTrace) -> Vec<St
     violations
 }
 
+fn ready_queue_record_expected_reject(state: &ReadyQueueRecordShapeState) -> &'static str {
+    match state.identity_shape.as_str() {
+        "InvalidQueueIdShape" => "QueueIdentityInvalid",
+        "InvalidArtifactDigestShape" => "ArtifactDigestInvalid",
+        "InvalidSubtaskIdShape" => "SubtaskIdInvalid",
+        _ if state.timestamp_shape == "UpdatedBeforeEnqueuedShape" => "UpdatedBeforeEnqueuedReject",
+        _ if state.claim_shape == "NonPositiveFenceShape" => "ClaimFenceInvalid",
+        _ if state.claim_shape == "NegativeLeaseShape" => "ClaimLeaseInvalid",
+        _ if matches!(
+            state.lifecycle.as_str(),
+            "Queued" | "Applied" | "Superseded" | "Cancelled"
+        ) && (state.claimed_by_session_present || state.claim_lease_deadline_present) =>
+        {
+            "ActiveClaimNotAllowed"
+        }
+        _ if state.lifecycle == "InFlight"
+            && matches!(
+                state.claim_shape.as_str(),
+                "MissingSession" | "BlankSession"
+            ) =>
+        {
+            "InFlightMissingSessionReject"
+        }
+        _ if state.lifecycle == "InFlight" && state.claim_shape == "MissingFence" => {
+            "InFlightMissingFenceReject"
+        }
+        _ if state.lifecycle == "InFlight" && state.claim_shape == "MissingLease" => {
+            "InFlightMissingLeaseReject"
+        }
+        _ if state.lifecycle == "InFlight" && state.claim_shape == "InvalidSession" => {
+            "InFlightInvalidSessionReject"
+        }
+        _ if state.lifecycle == "Applied" && !state.claim_fence_present => {
+            "AppliedMissingFenceReject"
+        }
+        _ => "NoReject",
+    }
+}
+
+fn ready_queue_record_state(state: &ReadyQueueRecordShapeState) -> &'static str {
+    match state.lifecycle.as_str() {
+        "Queued" => "queued",
+        "InFlight" => "in_flight",
+        "Applied" => "applied",
+        "Superseded" => "superseded",
+        "Cancelled" => "cancelled",
+        other => panic!("unexpected ready-queue lifecycle from ITF trace: {other}"),
+    }
+}
+
+fn ready_queue_record_queue_id(state: &ReadyQueueRecordShapeState) -> &'static str {
+    if state.identity_shape == "InvalidQueueIdShape" {
+        "queue id"
+    } else {
+        "queue-1"
+    }
+}
+
+fn ready_queue_record_artifact_digest(state: &ReadyQueueRecordShapeState) -> &'static str {
+    if state.identity_shape == "InvalidArtifactDigestShape" {
+        "artifact"
+    } else {
+        "blake3:artifact"
+    }
+}
+
+fn ready_queue_record_subtask_id(state: &ReadyQueueRecordShapeState) -> &'static str {
+    if state.identity_shape == "InvalidSubtaskIdShape" {
+        "subtask id"
+    } else {
+        "subtask-1"
+    }
+}
+
+fn ready_queue_record_session_token(state: &ReadyQueueRecordShapeState) -> serde_json::Value {
+    match state.claim_shape.as_str() {
+        "MissingSession" => serde_json::Value::Null,
+        "BlankSession" => serde_json::json!(" "),
+        "InvalidSession" => serde_json::json!("session token"),
+        _ if state.claimed_by_session_present => serde_json::json!("session-1"),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn ready_queue_record_claim_fence(state: &ReadyQueueRecordShapeState) -> serde_json::Value {
+    match state.claim_shape.as_str() {
+        "NonPositiveFenceShape" => serde_json::json!(0),
+        _ if state.claim_fence_present => serde_json::json!(1),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn ready_queue_record_claim_lease(state: &ReadyQueueRecordShapeState) -> serde_json::Value {
+    match state.claim_shape.as_str() {
+        "NegativeLeaseShape" => serde_json::json!(-1),
+        _ if state.claim_lease_deadline_present => serde_json::json!(300),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn ready_queue_record_json(state: &ReadyQueueRecordShapeState) -> serde_json::Value {
+    serde_json::json!({
+        "queue_id": ready_queue_record_queue_id(state),
+        "artifact_digest": ready_queue_record_artifact_digest(state),
+        "subtask_id": ready_queue_record_subtask_id(state),
+        "settlement_target": "canonical",
+        "state": ready_queue_record_state(state),
+        "claimed_by_session_token": ready_queue_record_session_token(state),
+        "claim_fence_seq": ready_queue_record_claim_fence(state),
+        "claim_lease_deadline": ready_queue_record_claim_lease(state),
+        "enqueued_at": if state.timestamp_shape == "UpdatedBeforeEnqueuedShape" { 200 } else { 100 },
+        "updated_at": 100,
+    })
+}
+
+fn ready_queue_record_actual(state: &ReadyQueueRecordShapeState) -> Option<ReadyQueueItem> {
+    serde_json::from_value::<ReadyQueueItem>(ready_queue_record_json(state)).ok()
+}
+
+fn replay_ready_queue_record_shape_trace(trace: &ReadyQueueRecordShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: ready-queue record scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = ready_queue_record_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: ready-queue record reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: ready-queue record outcome disagrees with row facts"
+            ));
+        }
+        let actual = ready_queue_record_actual(state);
+        if actual.is_some() != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: ready-queue record constructor disagrees with model"
+            ));
+        }
+        if let Some(item) = actual {
+            if item.state().to_string() != ready_queue_record_state(state) {
+                violations.push(format!(
+                    "state[{index}]: ready-queue lifecycle projection disagrees with model"
+                ));
+            }
+            if item.claimed_by_session_token().is_some() != state.claimed_by_session_present {
+                violations.push(format!(
+                    "state[{index}]: ready-queue session projection disagrees with model"
+                ));
+            }
+            if item.claim_fence_seq().is_some() != state.claim_fence_present {
+                violations.push(format!(
+                    "state[{index}]: ready-queue fence projection disagrees with model"
+                ));
+            }
+            if item.claim_lease_deadline().is_some() != state.claim_lease_deadline_present {
+                violations.push(format!(
+                    "state[{index}]: ready-queue lease projection disagrees with model"
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -8842,6 +9065,12 @@ fn runtime_attestation_record_shape_trace() -> RuntimeAttestationRecordShapeItfT
 #[fixture]
 fn review_record_shape_trace() -> ReviewRecordShapeItfTrace {
     serde_json::from_str(COVEY_REVIEW_RECORD_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn ready_queue_record_shape_trace() -> ReadyQueueRecordShapeItfTrace {
+    serde_json::from_str(COVEY_READY_QUEUE_RECORD_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -10643,6 +10872,66 @@ fn covey_replays_quint_review_record_shape_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_ready_queue_record_shape_itf_trace(
+    ready_queue_record_shape_trace: ReadyQueueRecordShapeItfTrace,
+) {
+    assert!(
+        !ready_queue_record_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidQueuedNoFence",
+        "ValidQueuedWithFence",
+        "ValidInFlight",
+        "ValidApplied",
+        "ValidSupersededNoFence",
+        "ValidSupersededWithFence",
+        "ValidCancelledNoFence",
+        "ValidCancelledWithFence",
+    ] {
+        assert!(
+            ready_queue_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "QueuedWithActiveSession",
+        "QueuedWithLease",
+        "InFlightMissingSession",
+        "InFlightBlankSession",
+        "InFlightInvalidSession",
+        "InFlightMissingFence",
+        "InFlightMissingLease",
+        "AppliedMissingFence",
+        "AppliedWithActiveSession",
+        "AppliedWithLease",
+        "SupersededWithActiveSession",
+        "CancelledWithLease",
+        "UpdatedBeforeEnqueued",
+        "InvalidQueueId",
+        "InvalidArtifactDigest",
+        "InvalidSubtaskId",
+        "NonPositiveFence",
+        "NegativeLease",
+    ] {
+        assert!(
+            ready_queue_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_ready_queue_record_shape_trace(&ready_queue_record_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_reservation_record_shape_itf_trace(
     reservation_record_shape_trace: ReservationRecordShapeItfTrace,
 ) {
@@ -11581,6 +11870,36 @@ fn covey_review_record_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: review record reject reason disagrees with row facts",
             "state[0]: review record outcome disagrees with row facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_ready_queue_record_shape_replay_reports_counterexample_shape() {
+    let state = ReadyQueueRecordShapeState {
+        case_index: 8,
+        case: "QueuedWithActiveSession".to_owned(),
+        lifecycle: "Queued".to_owned(),
+        identity_shape: "ValidIdentity".to_owned(),
+        claim_shape: "ActiveSessionOnly".to_owned(),
+        timestamp_shape: "Monotonic".to_owned(),
+        claimed_by_session_present: true,
+        claim_fence_present: false,
+        claim_lease_deadline_present: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ReadyQueueRecordShapeItfTrace {
+        states: vec![ReadyQueueRecordShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_ready_queue_record_shape_trace(&trace),
+        vec![
+            "state[0]: ready-queue record reject reason disagrees with row facts",
+            "state[0]: ready-queue record outcome disagrees with row facts",
         ]
     );
 }
