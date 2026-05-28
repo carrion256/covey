@@ -6,7 +6,7 @@ use covey::{
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, RenewClaimReq,
     RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
     ReviewVerdict, ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    VerifyLandingAuthorizationReq,
+    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -44,6 +44,8 @@ const COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyCreateSubtaskRequestShape.itf.json");
 const COVEY_CLAIM_ACQUISITION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyClaimAcquisitionRequestShape.itf.json");
+const COVEY_SUPERSEDE_QUEUE_ITEM_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveySupersedeQueueItemRequestShape.itf.json");
 const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
@@ -259,6 +261,16 @@ struct ClaimAcquisitionRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ClaimAcquisitionRequestShapeItfState {
     s: ClaimAcquisitionRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupersedeQueueItemRequestShapeItfTrace {
+    states: Vec<SupersedeQueueItemRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupersedeQueueItemRequestShapeItfState {
+    s: SupersedeQueueItemRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -994,6 +1006,26 @@ struct ClaimAcquisitionRequestShapeState {
     meta_task_id_valid: bool,
     #[serde(rename = "subtaskIdValid")]
     subtask_id_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupersedeQueueItemRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "queueIdValid")]
+    queue_id_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -3030,6 +3062,84 @@ fn replay_claim_acquisition_request_shape_trace(
         if expected_accepted && state.operation == "ClaimSubtask" && !state.subtask_id_valid {
             violations.push(format!(
                 "state[{index}]: accepted claim-subtask request lacks subtask id"
+            ));
+        }
+    }
+    violations
+}
+
+fn supersede_queue_item_expected_reject(
+    state: &SupersedeQueueItemRequestShapeState,
+) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.queue_id_valid {
+        "QueueIdInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn supersede_queue_item_actual_accepts(state: &SupersedeQueueItemRequestShapeState) -> bool {
+    SupersedeQueueItemReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        },
+        if state.queue_id_valid { "queue-1" } else { "" },
+        if state.idempotency_key_valid {
+            "idem-supersede"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_supersede_queue_item_request_shape_trace(
+    trace: &SupersedeQueueItemRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: supersede queue item request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = supersede_queue_item_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: supersede queue item request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: supersede queue item request outcome disagrees with validation facts"
+            ));
+        }
+        if supersede_queue_item_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: supersede queue item request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid || !state.queue_id_valid || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted supersede queue item request lacks session, queue, or idempotency key"
             ));
         }
     }
@@ -7110,6 +7220,12 @@ fn claim_acquisition_request_shape_trace() -> ClaimAcquisitionRequestShapeItfTra
 }
 
 #[fixture]
+fn supersede_queue_item_request_shape_trace() -> SupersedeQueueItemRequestShapeItfTrace {
+    serde_json::from_str(COVEY_SUPERSEDE_QUEUE_ITEM_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn view_attachment_shape_trace() -> ViewAttachmentShapeItfTrace {
     serde_json::from_str(COVEY_VIEW_ATTACHMENT_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -7866,6 +7982,41 @@ fn covey_replays_quint_claim_acquisition_request_shape_itf_trace(
     }
     assert_eq!(
         replay_claim_acquisition_request_shape_trace(&claim_acquisition_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_supersede_queue_item_request_shape_itf_trace(
+    supersede_queue_item_request_shape_trace: SupersedeQueueItemRequestShapeItfTrace,
+) {
+    assert!(
+        !supersede_queue_item_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidSupersede",
+        "InvalidSessionToken",
+        "InvalidQueueId",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            supersede_queue_item_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        supersede_queue_item_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidSupersede" && state.s.accepted),
+        "fixture should cover accepted supersede request"
+    );
+    assert_eq!(
+        replay_supersede_queue_item_request_shape_trace(&supersede_queue_item_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -9536,6 +9687,32 @@ fn covey_claim_acquisition_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: claim acquisition request reject reason does not match validation facts",
             "state[0]: claim acquisition request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_supersede_queue_item_request_shape_replay_reports_counterexample_shape() {
+    let state = SupersedeQueueItemRequestShapeState {
+        case_index: 3,
+        case: "InvalidQueueId".to_owned(),
+        session_token_valid: true,
+        queue_id_valid: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = SupersedeQueueItemRequestShapeItfTrace {
+        states: vec![SupersedeQueueItemRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_supersede_queue_item_request_shape_trace(&trace),
+        vec![
+            "state[0]: supersede queue item request reject reason does not match validation facts",
+            "state[0]: supersede queue item request outcome disagrees with validation facts",
         ]
     );
 }

@@ -1941,6 +1941,14 @@ fn ready_queue_mutation_payloads_reject_invalid_ids_and_leases() {
     });
     serde_json::from_value::<SupersedeQueueItemReq>(invalid_supersede_queue)
         .expect_err("supersede request should reject invalid queue ids");
+
+    let invalid_supersede_idempotency = serde_json::json!({
+        "session_token": "session-1",
+        "queue_id": "queue-1",
+        "idempotency_key": " "
+    });
+    serde_json::from_value::<SupersedeQueueItemReq>(invalid_supersede_idempotency)
+        .expect_err("supersede request should reject blank idempotency keys");
 }
 
 #[test]
