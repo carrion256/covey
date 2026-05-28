@@ -15,6 +15,8 @@ const COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryExit.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
+const COVEY_APPLY_GATE_EVIDENCE_ITF: &str =
+    include_str!("fixtures/quint/CoveyApplyGateEvidence.itf.json");
 const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
@@ -74,6 +76,16 @@ struct QueueReservationItfTrace {
 #[derive(Debug, Deserialize)]
 struct QueueReservationItfState {
     s: QueueReservationState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyGateEvidenceItfTrace {
+    states: Vec<ApplyGateEvidenceItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyGateEvidenceItfState {
+    s: ApplyGateEvidenceState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +246,95 @@ struct QueueReservationState {
         deserialize_with = "deserialize_itf_bigint"
     )]
     conflict_rank_floor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyGateEvidenceState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    queue: String,
+    #[serde(rename = "queueOwnerIsApplyGate")]
+    queue_owner_is_apply_gate: bool,
+    #[serde(rename = "queueFenceMatches")]
+    queue_fence_matches: bool,
+    #[serde(rename = "queueLeaseLive")]
+    queue_lease_live: bool,
+    #[serde(rename = "queueArtifactMatchesRequest")]
+    queue_artifact_matches_request: bool,
+    #[serde(rename = "subtaskReadyForApply")]
+    subtask_ready_for_apply: bool,
+    #[serde(rename = "reviewExists")]
+    review_exists: bool,
+    #[serde(rename = "reviewDecided")]
+    review_decided: bool,
+    #[serde(rename = "reviewApproved")]
+    review_approved: bool,
+    #[serde(rename = "findingsDigestPresent")]
+    findings_digest_present: bool,
+    #[serde(rename = "artifactBoundToReview")]
+    artifact_bound_to_review: bool,
+    #[serde(rename = "producerReviewerPrincipalSeparated")]
+    producer_reviewer_principal_separated: bool,
+    #[serde(rename = "applyGateSeparatedFromProducer")]
+    apply_gate_separated_from_producer: bool,
+    #[serde(rename = "applyGateSeparatedFromReviewer")]
+    apply_gate_separated_from_reviewer: bool,
+    #[serde(rename = "producerAttested")]
+    producer_attested: bool,
+    #[serde(rename = "reviewerAttested")]
+    reviewer_attested: bool,
+    #[serde(rename = "applyGateAttested")]
+    apply_gate_attested: bool,
+    #[serde(rename = "producerReviewerRuntimeSeparated")]
+    producer_reviewer_runtime_separated: bool,
+    #[serde(rename = "producerApplyGateRuntimeSeparated")]
+    producer_apply_gate_runtime_separated: bool,
+    #[serde(rename = "reviewerApplyGateRuntimeSeparated")]
+    reviewer_apply_gate_runtime_separated: bool,
+    #[serde(rename = "producerReviewerProviderRunSeparated")]
+    producer_reviewer_provider_run_separated: bool,
+    #[serde(rename = "producerApplyGateProviderRunSeparated")]
+    producer_apply_gate_provider_run_separated: bool,
+    #[serde(rename = "reviewerApplyGateProviderRunSeparated")]
+    reviewer_apply_gate_provider_run_separated: bool,
+    #[serde(rename = "producerReviewerTranscriptSeparated")]
+    producer_reviewer_transcript_separated: bool,
+    #[serde(rename = "producerApplyGateTranscriptSeparated")]
+    producer_apply_gate_transcript_separated: bool,
+    #[serde(rename = "reviewerApplyGateTranscriptSeparated")]
+    reviewer_apply_gate_transcript_separated: bool,
+    #[serde(rename = "verificationAttempted")]
+    verification_attempted: bool,
+    #[serde(rename = "verificationRecorded")]
+    verification_recorded: bool,
+    #[serde(rename = "verificationReviewMatches")]
+    verification_review_matches: bool,
+    #[serde(rename = "markAppliedAttempted")]
+    mark_applied_attempted: bool,
+    #[serde(rename = "landingAuthorizationAccepted")]
+    landing_authorization_accepted: bool,
+    #[serde(rename = "landingAuthorizationArtifactMatches")]
+    landing_authorization_artifact_matches: bool,
+    #[serde(rename = "landingAuthorizationFenceMatches")]
+    landing_authorization_fence_matches: bool,
+    #[serde(rename = "landingAuthorizationVerificationMatches")]
+    landing_authorization_verification_matches: bool,
+    #[serde(rename = "receiptRecorded")]
+    receipt_recorded: bool,
+    #[serde(rename = "receiptArtifactMatches")]
+    receipt_artifact_matches: bool,
+    #[serde(rename = "receiptFenceMatches")]
+    receipt_fence_matches: bool,
+    #[serde(rename = "duplicateReceiptDivergent")]
+    duplicate_receipt_divergent: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1253,6 +1354,185 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
     violations
 }
 
+fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
+    state.review_exists
+        && state.review_decided
+        && state.review_approved
+        && state.findings_digest_present
+        && state.artifact_bound_to_review
+}
+
+fn apply_gate_principal_separation_ok(state: &ApplyGateEvidenceState) -> bool {
+    state.producer_reviewer_principal_separated
+        && state.apply_gate_separated_from_producer
+        && state.apply_gate_separated_from_reviewer
+}
+
+fn apply_gate_attestations_ok(state: &ApplyGateEvidenceState) -> bool {
+    state.producer_attested && state.reviewer_attested && state.apply_gate_attested
+}
+
+fn apply_gate_runtime_separation_ok(state: &ApplyGateEvidenceState) -> bool {
+    state.producer_reviewer_runtime_separated
+        && state.producer_apply_gate_runtime_separated
+        && state.reviewer_apply_gate_runtime_separated
+        && state.producer_reviewer_provider_run_separated
+        && state.producer_apply_gate_provider_run_separated
+        && state.reviewer_apply_gate_provider_run_separated
+        && state.producer_reviewer_transcript_separated
+        && state.producer_apply_gate_transcript_separated
+        && state.reviewer_apply_gate_transcript_separated
+}
+
+fn apply_gate_verification_ok(state: &ApplyGateEvidenceState) -> bool {
+    !state.verification_attempted
+        || (state.queue == "InFlight"
+            && state.queue_artifact_matches_request
+            && state.queue_fence_matches
+            && state.verification_review_matches)
+}
+
+fn apply_gate_mark_applied_ok(state: &ApplyGateEvidenceState) -> bool {
+    !state.mark_applied_attempted
+        || (state.queue == "InFlight"
+            && state.queue_owner_is_apply_gate
+            && state.queue_fence_matches
+            && state.queue_lease_live
+            && state.subtask_ready_for_apply
+            && state.queue_artifact_matches_request
+            && state.verification_recorded
+            && apply_gate_verification_ok(state))
+}
+
+fn apply_gate_landing_authorization_ok(state: &ApplyGateEvidenceState) -> bool {
+    !state.landing_authorization_accepted
+        || (state.queue == "Applied"
+            && state.landing_authorization_artifact_matches
+            && state.landing_authorization_fence_matches
+            && state.landing_authorization_verification_matches
+            && state.verification_recorded)
+}
+
+fn apply_gate_receipt_ok(state: &ApplyGateEvidenceState) -> bool {
+    !state.receipt_recorded
+        || (state.queue == "Applied"
+            && state.receipt_artifact_matches
+            && state.receipt_fence_matches
+            && !state.duplicate_receipt_divergent)
+}
+
+fn apply_gate_expected_reject(state: &ApplyGateEvidenceState) -> &'static str {
+    if !apply_gate_live_review_ok(state) {
+        "LiveReviewInvalid"
+    } else if !apply_gate_principal_separation_ok(state) {
+        "PrincipalSeparationInvalid"
+    } else if !apply_gate_attestations_ok(state) {
+        "RuntimeAttestationInvalid"
+    } else if !apply_gate_runtime_separation_ok(state) {
+        "RuntimeSeparationInvalid"
+    } else if !apply_gate_verification_ok(state) {
+        "ApplyVerificationInvalid"
+    } else if !apply_gate_mark_applied_ok(state) {
+        "MarkAppliedInvalid"
+    } else if !apply_gate_landing_authorization_ok(state) {
+        "LandingAuthorizationInvalid"
+    } else if !apply_gate_receipt_ok(state) {
+        "LandingReceiptInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn replay_apply_gate_evidence_trace(trace: &ApplyGateEvidenceItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: apply-gate evidence scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.outcome == "NotEvaluated" {
+            continue;
+        }
+        let expected_reject = apply_gate_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: apply-gate evidence reject reason does not match first failed gate"
+            ));
+        }
+        if state.accepted && expected_reject != "NoReject" {
+            violations.push(format!(
+                "state[{index}]: apply-gate evidence accepted with failed gate"
+            ));
+        }
+        if state.accepted && state.outcome != "Accepted" {
+            violations.push(format!(
+                "state[{index}]: apply-gate accepted flag disagrees with outcome"
+            ));
+        }
+        if state.accepted
+            && !(apply_gate_live_review_ok(state)
+                && apply_gate_principal_separation_ok(state)
+                && apply_gate_attestations_ok(state)
+                && apply_gate_runtime_separation_ok(state))
+        {
+            violations.push(format!(
+                "state[{index}]: apply-gate evidence lacks live approved review or separation"
+            ));
+        }
+        if state.verification_attempted
+            && state.accepted
+            && !(state.queue == "InFlight"
+                && state.queue_fence_matches
+                && state.queue_artifact_matches_request
+                && state.verification_review_matches)
+        {
+            violations.push(format!(
+                "state[{index}]: apply verification was not bound to current in-flight queue fence"
+            ));
+        }
+        if state.mark_applied_attempted
+            && state.accepted
+            && !(state.verification_recorded
+                && state.queue_owner_is_apply_gate
+                && state.queue_lease_live
+                && state.subtask_ready_for_apply)
+        {
+            violations.push(format!(
+                "state[{index}]: mark-applied accepted without current verification and queue ownership"
+            ));
+        }
+        if state.landing_authorization_accepted
+            && state.accepted
+            && !(state.queue == "Applied"
+                && state.landing_authorization_artifact_matches
+                && state.landing_authorization_fence_matches
+                && state.landing_authorization_verification_matches)
+        {
+            violations.push(format!(
+                "state[{index}]: landing authorization accepted without applied queue binding"
+            ));
+        }
+        if state.receipt_recorded
+            && state.accepted
+            && !(state.queue == "Applied"
+                && state.receipt_artifact_matches
+                && state.receipt_fence_matches
+                && !state.duplicate_receipt_divergent)
+        {
+            violations.push(format!(
+                "state[{index}]: landing receipt recorded without applied artifact/fence binding"
+            ));
+        }
+    }
+    violations
+}
+
 fn replay_landing_receipt_trace(trace: &LandingReceiptItfTrace) -> Vec<String> {
     let mut violations = Vec::new();
     for (index, wrapped_state) in trace.states.iter().enumerate() {
@@ -2153,6 +2433,11 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
 }
 
 #[fixture]
+fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
+    serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn session_meta_task_trace() -> SessionMetaTaskItfTrace {
     serde_json::from_str(COVEY_SESSION_META_TASK_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -2356,6 +2641,69 @@ fn covey_replays_quint_queue_reservation_itf_trace(
     );
     assert_eq!(
         replay_queue_reservation_trace(&queue_reservation_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_apply_gate_evidence_itf_trace(
+    apply_gate_evidence_trace: ApplyGateEvidenceItfTrace,
+) {
+    assert!(
+        !apply_gate_evidence_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "LiveReviewInvalid",
+        "PrincipalSeparationInvalid",
+        "RuntimeAttestationInvalid",
+        "RuntimeSeparationInvalid",
+        "ApplyVerificationInvalid",
+        "MarkAppliedInvalid",
+        "LandingAuthorizationInvalid",
+        "LandingReceiptInvalid",
+    ] {
+        assert!(
+            apply_gate_evidence_trace
+                .states
+                .iter()
+                .any(|state| state.s.reject_reason == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        apply_gate_evidence_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidApplyGateEvidence" && state.s.accepted),
+        "fixture should cover accepted apply-gate evidence"
+    );
+    assert!(
+        apply_gate_evidence_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ProducerReviewerSamePrincipal"
+                && state.s.reject_reason == "PrincipalSeparationInvalid"),
+        "fixture should cover producer/reviewer principal separation"
+    );
+    assert!(
+        apply_gate_evidence_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "MarkAppliedStaleFence"
+                && state.s.reject_reason == "MarkAppliedInvalid"),
+        "fixture should cover stale-fence mark-applied rejection"
+    );
+    assert!(
+        apply_gate_evidence_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "DuplicateReceiptDivergent"
+                && state.s.reject_reason == "LandingReceiptInvalid"),
+        "fixture should cover divergent duplicate landing receipts"
+    );
+    assert_eq!(
+        replay_apply_gate_evidence_trace(&apply_gate_evidence_trace),
         Vec::<String>::new()
     );
 }
@@ -2825,6 +3173,71 @@ fn covey_queue_reservation_replay_reports_counterexample_shape() {
             "state[0]: conflict exists without recorded overlap binding",
             "state[0]: conflict resolution moved below recorded floor",
             "state[0]: resolved conflict floor was downgraded",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_apply_gate_evidence_replay_reports_counterexample_shape() {
+    let state = ApplyGateEvidenceState {
+        case_index: 1,
+        case: "ValidApplyGateEvidence".to_owned(),
+        queue: "InFlight".to_owned(),
+        queue_owner_is_apply_gate: false,
+        queue_fence_matches: false,
+        queue_lease_live: false,
+        queue_artifact_matches_request: false,
+        subtask_ready_for_apply: false,
+        review_exists: false,
+        review_decided: false,
+        review_approved: false,
+        findings_digest_present: false,
+        artifact_bound_to_review: false,
+        producer_reviewer_principal_separated: false,
+        apply_gate_separated_from_producer: false,
+        apply_gate_separated_from_reviewer: false,
+        producer_attested: false,
+        reviewer_attested: false,
+        apply_gate_attested: false,
+        producer_reviewer_runtime_separated: false,
+        producer_apply_gate_runtime_separated: false,
+        reviewer_apply_gate_runtime_separated: false,
+        producer_reviewer_provider_run_separated: false,
+        producer_apply_gate_provider_run_separated: false,
+        reviewer_apply_gate_provider_run_separated: false,
+        producer_reviewer_transcript_separated: false,
+        producer_apply_gate_transcript_separated: false,
+        reviewer_apply_gate_transcript_separated: false,
+        verification_attempted: true,
+        verification_recorded: false,
+        verification_review_matches: false,
+        mark_applied_attempted: true,
+        landing_authorization_accepted: true,
+        landing_authorization_artifact_matches: false,
+        landing_authorization_fence_matches: false,
+        landing_authorization_verification_matches: false,
+        receipt_recorded: true,
+        receipt_artifact_matches: false,
+        receipt_fence_matches: false,
+        duplicate_receipt_divergent: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+    };
+    let trace = ApplyGateEvidenceItfTrace {
+        states: vec![ApplyGateEvidenceItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_apply_gate_evidence_trace(&trace),
+        vec![
+            "state[0]: apply-gate evidence reject reason does not match first failed gate",
+            "state[0]: apply-gate evidence accepted with failed gate",
+            "state[0]: apply-gate evidence lacks live approved review or separation",
+            "state[0]: apply verification was not bound to current in-flight queue fence",
+            "state[0]: mark-applied accepted without current verification and queue ownership",
+            "state[0]: landing authorization accepted without applied queue binding",
+            "state[0]: landing receipt recorded without applied artifact/fence binding",
         ]
     );
 }
