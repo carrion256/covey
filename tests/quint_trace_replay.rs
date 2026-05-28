@@ -312,12 +312,15 @@ struct QueueReservationState {
 struct ReadyQueueClaimSelectionState {
     #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
     case_index: i64,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    case: String,
+    #[serde(deserialize_with = "deserialize_ready_queue_claim_selection_enum")]
+    case: ReadyQueueClaimSelectionCase,
     #[serde(rename = "roleApplyGate")]
     role_apply_gate: bool,
-    #[serde(rename = "headState", deserialize_with = "deserialize_itf_variant")]
-    head_state: String,
+    #[serde(
+        rename = "headState",
+        deserialize_with = "deserialize_ready_queue_claim_selection_enum"
+    )]
+    head_state: ReadyQueueClaimSelectionQueueState,
     #[serde(rename = "headExpired")]
     head_expired: bool,
     #[serde(rename = "headSubtaskReady")]
@@ -330,10 +333,13 @@ struct ReadyQueueClaimSelectionState {
     tail_present: bool,
     #[serde(rename = "tailClaimable")]
     tail_claimable: bool,
-    #[serde(rename = "headAction", deserialize_with = "deserialize_itf_variant")]
-    head_action: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    result: String,
+    #[serde(
+        rename = "headAction",
+        deserialize_with = "deserialize_ready_queue_claim_selection_enum"
+    )]
+    head_action: ReadyQueueClaimSelectionHeadAction,
+    #[serde(deserialize_with = "deserialize_ready_queue_claim_selection_enum")]
+    result: ReadyQueueClaimSelectionResult,
     #[serde(rename = "selectedHead")]
     selected_head: bool,
     #[serde(rename = "selectedTail")]
@@ -969,6 +975,10 @@ trait ReadyQueueMetricsEnum: Sized {
     fn from_itf_tag(tag: &str) -> Option<Self>;
 }
 
+trait ReadyQueueClaimSelectionEnum: Sized {
+    fn from_itf_tag(tag: &str) -> Option<Self>;
+}
+
 macro_rules! claim_dependency_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1004,6 +1014,56 @@ macro_rules! ready_queue_metrics_enum {
         }
     };
 }
+
+macro_rules! ready_queue_claim_selection_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum $name {
+            $($variant),+
+        }
+
+        impl ReadyQueueClaimSelectionEnum for $name {
+            fn from_itf_tag(tag: &str) -> Option<Self> {
+                match tag {
+                    $(stringify!($variant) => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+ready_queue_claim_selection_enum!(ReadyQueueClaimSelectionCase {
+    ValidHeadClaimed,
+    InvalidHeadSupersededTailClaimed,
+    MetaUnavailableHeadCancelledTailClaimed,
+    ExpiredHeadRequeuedThenClaimed,
+    ActiveInFlightHeadIgnoredTailClaimed,
+    OnlyInvalidHeadNoClaim,
+    OnlyMetaUnavailableHeadNoClaim,
+    EmptyQueueNoClaim,
+    WrongRoleRejected,
+});
+ready_queue_claim_selection_enum!(ReadyQueueClaimSelectionQueueState {
+    Missing,
+    Queued,
+    InFlight,
+});
+ready_queue_claim_selection_enum!(ReadyQueueClaimSelectionHeadAction {
+    NoHeadAction,
+    ClaimedHead,
+    SupersededHead,
+    CancelledHead,
+    RequeuedHead,
+    IgnoredHead,
+});
+ready_queue_claim_selection_enum!(ReadyQueueClaimSelectionResult {
+    NotEvaluated,
+    ClaimHead,
+    ClaimTail,
+    NoClaim,
+    Rejected,
+});
 
 ready_queue_metrics_enum!(ReadyQueueMetricsCase {
     EmptyBoth,
@@ -1144,6 +1204,17 @@ where
     let tag = ItfVariant::deserialize(deserializer)?.tag;
     T::from_itf_tag(&tag)
         .ok_or_else(|| serde::de::Error::custom(format!("unknown ready-queue metrics tag {tag}")))
+}
+
+fn deserialize_ready_queue_claim_selection_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: ReadyQueueClaimSelectionEnum,
+{
+    let tag = ItfVariant::deserialize(deserializer)?.tag;
+    T::from_itf_tag(&tag).ok_or_else(|| {
+        serde::de::Error::custom(format!("unknown ready-queue claim-selection tag {tag}"))
+    })
 }
 
 impl Block {
@@ -1795,12 +1866,16 @@ fn replay_ready_queue_claim_selection_trace(
             continue;
         }
 
-        if matches!(state.result.as_str(), "ClaimHead" | "ClaimTail") && !state.role_apply_gate {
+        if matches!(
+            state.result,
+            ReadyQueueClaimSelectionResult::ClaimHead | ReadyQueueClaimSelectionResult::ClaimTail
+        ) && !state.role_apply_gate
+        {
             violations.push(format!(
                 "{prefix}: ready-queue claim was granted to non-apply-gate role"
             ));
         }
-        if state.result == "ClaimHead"
+        if state.result == ReadyQueueClaimSelectionResult::ClaimHead
             && !(state.head_subtask_ready
                 && state.head_artifact_matches
                 && state.head_meta_schedulable)
@@ -1809,46 +1884,52 @@ fn replay_ready_queue_claim_selection_trace(
                 "{prefix}: head queue claim did not require ready artifact and schedulable meta-task"
             ));
         }
-        if state.case == "InvalidHeadSupersededTailClaimed"
-            && !(state.head_action == "SupersededHead"
-                && state.result == "ClaimTail"
+        if state.case == ReadyQueueClaimSelectionCase::InvalidHeadSupersededTailClaimed
+            && !(state.head_action == ReadyQueueClaimSelectionHeadAction::SupersededHead
+                && state.result == ReadyQueueClaimSelectionResult::ClaimTail
                 && !state.selected_head)
         {
             violations.push(format!(
                 "{prefix}: invalid head was not superseded before claiming tail"
             ));
         }
-        if state.case == "MetaUnavailableHeadCancelledTailClaimed"
-            && !(state.head_action == "CancelledHead"
-                && state.result == "ClaimTail"
+        if state.case == ReadyQueueClaimSelectionCase::MetaUnavailableHeadCancelledTailClaimed
+            && !(state.head_action == ReadyQueueClaimSelectionHeadAction::CancelledHead
+                && state.result == ReadyQueueClaimSelectionResult::ClaimTail
                 && !state.selected_head)
         {
             violations.push(format!(
                 "{prefix}: unavailable head was not cancelled before claiming tail"
             ));
         }
-        if state.case == "ExpiredHeadRequeuedThenClaimed"
+        if state.case == ReadyQueueClaimSelectionCase::ExpiredHeadRequeuedThenClaimed
             && !(state.head_expired
-                && state.head_action == "RequeuedHead"
-                && state.result == "ClaimHead"
+                && state.head_action == ReadyQueueClaimSelectionHeadAction::RequeuedHead
+                && state.result == ReadyQueueClaimSelectionResult::ClaimHead
                 && state.selected_head)
         {
             violations.push(format!(
                 "{prefix}: expired in-flight head was not requeued before claim"
             ));
         }
-        if state.case == "ActiveInFlightHeadIgnoredTailClaimed"
-            && !(state.head_state == "InFlight"
+        if state.case == ReadyQueueClaimSelectionCase::ActiveInFlightHeadIgnoredTailClaimed
+            && !(state.head_state == ReadyQueueClaimSelectionQueueState::InFlight
                 && !state.head_expired
-                && state.head_action == "IgnoredHead"
-                && state.result == "ClaimTail"
+                && state.head_action == ReadyQueueClaimSelectionHeadAction::IgnoredHead
+                && state.result == ReadyQueueClaimSelectionResult::ClaimTail
                 && state.selected_tail)
         {
             violations.push(format!(
                 "{prefix}: active in-flight head blocked or displaced tail claim"
             ));
         }
-        if state.event_emitted != matches!(state.result.as_str(), "ClaimHead" | "ClaimTail") {
+        if state.event_emitted
+            != matches!(
+                state.result,
+                ReadyQueueClaimSelectionResult::ClaimHead
+                    | ReadyQueueClaimSelectionResult::ClaimTail
+            )
+        {
             violations.push(format!(
                 "{prefix}: ready-queue in-flight event emission disagrees with claim result"
             ));
@@ -1865,7 +1946,9 @@ fn replay_ready_queue_claim_selection_trace(
         if state.selected_head && state.selected_tail {
             violations.push(format!("{prefix}: ready-queue selected both head and tail"));
         }
-        if state.result == "ClaimTail" && !(state.tail_present && state.tail_claimable) {
+        if state.result == ReadyQueueClaimSelectionResult::ClaimTail
+            && !(state.tail_present && state.tail_claimable)
+        {
             violations.push(format!(
                 "{prefix}: tail claim was returned without a claimable tail"
             ));
@@ -3731,11 +3814,11 @@ fn covey_replays_quint_ready_queue_claim_selection_itf_trace(
         "fixture should contain at least one state"
     );
     for expected in [
-        "InvalidHeadSupersededTailClaimed",
-        "MetaUnavailableHeadCancelledTailClaimed",
-        "ExpiredHeadRequeuedThenClaimed",
-        "ActiveInFlightHeadIgnoredTailClaimed",
-        "WrongRoleRejected",
+        ReadyQueueClaimSelectionCase::InvalidHeadSupersededTailClaimed,
+        ReadyQueueClaimSelectionCase::MetaUnavailableHeadCancelledTailClaimed,
+        ReadyQueueClaimSelectionCase::ExpiredHeadRequeuedThenClaimed,
+        ReadyQueueClaimSelectionCase::ActiveInFlightHeadIgnoredTailClaimed,
+        ReadyQueueClaimSelectionCase::WrongRoleRejected,
     ] {
         assert!(
             ready_queue_claim_selection_trace
@@ -4322,17 +4405,17 @@ fn covey_review_claim_reclaim_replay_reports_followup_binding_counterexample() {
 fn covey_ready_queue_claim_selection_replay_reports_counterexample_shape() {
     let state = ReadyQueueClaimSelectionState {
         case_index: 1,
-        case: "InvalidHeadSupersededTailClaimed".to_owned(),
+        case: ReadyQueueClaimSelectionCase::InvalidHeadSupersededTailClaimed,
         role_apply_gate: false,
-        head_state: "InFlight".to_owned(),
+        head_state: ReadyQueueClaimSelectionQueueState::InFlight,
         head_expired: false,
         head_subtask_ready: false,
         head_artifact_matches: false,
         head_meta_schedulable: false,
         tail_present: false,
         tail_claimable: false,
-        head_action: "ClaimedHead".to_owned(),
-        result: "ClaimHead".to_owned(),
+        head_action: ReadyQueueClaimSelectionHeadAction::ClaimedHead,
+        result: ReadyQueueClaimSelectionResult::ClaimHead,
         selected_head: true,
         selected_tail: true,
         head_fence_before: 0,
