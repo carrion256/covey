@@ -1,4 +1,4 @@
-use covey::RecordRuntimeAttestationReq;
+use covey::{OverlapQueryReq, RecordRuntimeAttestationReq, RequestReservationReq, ScopeClass};
 use rstest::{fixture, rstest};
 use serde::Deserialize;
 use std::fmt;
@@ -31,6 +31,8 @@ const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRequestShape.itf.json");
+const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
@@ -184,6 +186,16 @@ struct RuntimeAttestationRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct RuntimeAttestationRequestShapeItfState {
     s: RuntimeAttestationRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationRequestShapeItfTrace {
+    states: Vec<ReservationRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationRequestShapeItfState {
+    s: ReservationRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -720,6 +732,46 @@ struct RuntimeAttestationRequestShapeState {
     idempotency_key_valid: bool,
     #[serde(rename = "flatSerializationPreservesIdentity")]
     flat_serialization_preserves_identity: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    operation: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "ownerSubtaskIdValid")]
+    owner_subtask_id_valid: bool,
+    #[serde(rename = "leaseDurationPositive")]
+    lease_duration_positive: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    scope: String,
+    #[serde(rename = "scopeKeyPresent")]
+    scope_key_present: bool,
+    #[serde(rename = "scopeKeyNormalized")]
+    scope_key_normalized: bool,
+    #[serde(rename = "repoGlobalKeyCanonical")]
+    repo_global_key_canonical: bool,
+    #[serde(rename = "generatedMembersPresent")]
+    generated_members_present: bool,
+    #[serde(rename = "generatedMembersAllowed")]
+    generated_members_allowed: bool,
+    #[serde(rename = "generatedMembersNormalized")]
+    generated_members_normalized: bool,
+    #[serde(rename = "generatedMembersUnique")]
+    generated_members_unique: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -2110,6 +2162,185 @@ fn replay_runtime_attestation_request_shape_trace(
         if expected_accepted && !state.process_id_present && !state.container_id_present {
             violations.push(format!(
                 "state[{index}]: accepted runtime attestation request lacks runtime identity"
+            ));
+        }
+    }
+    violations
+}
+
+fn reservation_request_expected_reject(state: &ReservationRequestShapeState) -> &'static str {
+    let is_request = state.operation == "ReservationRequest";
+    if is_request && !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if is_request && !state.owner_subtask_id_valid {
+        "OwnerSubtaskIdInvalid"
+    } else if is_request && !state.lease_duration_positive {
+        "LeaseDurationInvalid"
+    } else if !state.scope_key_present {
+        "ScopeKeyMissing"
+    } else if !state.scope_key_normalized {
+        "ScopeKeyNotNormalized"
+    } else if state.scope != "GeneratedSet" && state.generated_members_present {
+        "GeneratedMembersForbidden"
+    } else if state.scope == "RepoGlobal" && !state.repo_global_key_canonical {
+        "RepoGlobalKeyInvalid"
+    } else if state.scope == "GeneratedSet" && !state.generated_members_present {
+        "GeneratedMembersMissing"
+    } else if state.scope == "GeneratedSet" && !state.generated_members_normalized {
+        "GeneratedMemberInvalid"
+    } else if state.scope == "GeneratedSet" && !state.generated_members_unique {
+        "GeneratedMemberDuplicate"
+    } else if is_request && !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn reservation_scope_class(state: &ReservationRequestShapeState) -> ScopeClass {
+    match state.scope.as_str() {
+        "ExactPath" => ScopeClass::ExactPath,
+        "Subtree" => ScopeClass::Subtree,
+        "RepoGlobal" => ScopeClass::RepoGlobal,
+        "GeneratedSet" => ScopeClass::GeneratedSet,
+        scope => panic!("unexpected reservation scope from ITF trace: {scope}"),
+    }
+}
+
+fn reservation_scope_key(state: &ReservationRequestShapeState) -> &'static str {
+    if !state.scope_key_present {
+        return " ";
+    }
+    if !state.scope_key_normalized {
+        return " src/lib.rs";
+    }
+    match state.scope.as_str() {
+        "ExactPath" => "src/lib.rs",
+        "Subtree" => "src",
+        "RepoGlobal" if state.repo_global_key_canonical => "repo",
+        "RepoGlobal" => "src",
+        "GeneratedSet" => "artifact-manifest",
+        scope => panic!("unexpected reservation scope from ITF trace: {scope}"),
+    }
+}
+
+fn reservation_generated_members(state: &ReservationRequestShapeState) -> Vec<String> {
+    if !state.generated_members_present {
+        Vec::new()
+    } else if !state.generated_members_normalized {
+        vec![" src/generated.rs".to_owned()]
+    } else if !state.generated_members_unique {
+        vec!["src/generated.rs".to_owned(), "src/generated.rs".to_owned()]
+    } else {
+        vec!["src/generated.rs".to_owned()]
+    }
+}
+
+fn reservation_request_actual_accepts(state: &ReservationRequestShapeState) -> bool {
+    let scope_class = reservation_scope_class(state);
+    let scope_key = reservation_scope_key(state);
+    let generated_members = reservation_generated_members(state);
+    if state.operation == "OverlapQuery" {
+        return OverlapQueryReq::try_from_parts(scope_class, scope_key, generated_members).is_ok();
+    }
+    RequestReservationReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.owner_subtask_id_valid {
+            "subtask-1"
+        } else {
+            "subtask 1"
+        },
+        scope_class,
+        scope_key,
+        generated_members,
+        if state.lease_duration_positive {
+            60_000
+        } else {
+            0
+        },
+        if state.idempotency_key_valid {
+            "idem-reservation"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_reservation_request_shape_trace(trace: &ReservationRequestShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: reservation request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = reservation_request_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: reservation request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: reservation request outcome disagrees with validation facts"
+            ));
+        }
+        let actual_accepted = reservation_request_actual_accepts(state);
+        if actual_accepted != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: reservation request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && state.operation == "ReservationRequest"
+            && (!state.session_token_valid
+                || !state.owner_subtask_id_valid
+                || !state.lease_duration_positive
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted reservation request has invalid request field"
+            ));
+        }
+        if expected_accepted && (!state.scope_key_present || !state.scope_key_normalized) {
+            violations.push(format!(
+                "state[{index}]: accepted reservation request has invalid scope key"
+            ));
+        }
+        if expected_accepted && state.scope != "GeneratedSet" && state.generated_members_present {
+            violations.push(format!(
+                "state[{index}]: accepted non-generated reservation carries generated members"
+            ));
+        }
+        if expected_accepted && state.scope == "RepoGlobal" && !state.repo_global_key_canonical {
+            violations.push(format!(
+                "state[{index}]: accepted repo-global reservation has non-canonical key"
+            ));
+        }
+        if expected_accepted
+            && state.scope == "GeneratedSet"
+            && (!state.generated_members_present
+                || !state.generated_members_allowed
+                || !state.generated_members_normalized
+                || !state.generated_members_unique)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted generated-set reservation has invalid members"
             ));
         }
     }
@@ -4200,6 +4431,12 @@ fn runtime_attestation_request_shape_trace() -> RuntimeAttestationRequestShapeIt
 }
 
 #[fixture]
+fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
+    serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn landing_receipt_trace() -> LandingReceiptItfTrace {
     serde_json::from_str(COVEY_LANDING_RECEIPT_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -4747,6 +4984,62 @@ fn covey_replays_quint_runtime_attestation_request_shape_itf_trace(
     );
     assert_eq!(
         replay_runtime_attestation_request_shape_trace(&runtime_attestation_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_reservation_request_shape_itf_trace(
+    reservation_request_shape_trace: ReservationRequestShapeItfTrace,
+) {
+    assert!(
+        !reservation_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidExactPathRequest",
+        "ValidSubtreeQuery",
+        "ValidRepoGlobalRequest",
+        "ValidGeneratedSetQuery",
+        "InvalidSessionToken",
+        "InvalidOwnerSubtaskId",
+        "NonPositiveLeaseDuration",
+        "BlankIdempotencyKey",
+        "ExactPathWithGeneratedMembers",
+        "SubtreeWithGeneratedMembers",
+        "RepoGlobalWrongKey",
+        "RepoGlobalWithGeneratedMembers",
+        "GeneratedSetWithoutMembers",
+        "GeneratedSetBlankMember",
+        "GeneratedSetPaddedMember",
+        "GeneratedSetDuplicateMembers",
+        "BlankScopeKey",
+        "PaddedScopeKey",
+    ] {
+        assert!(
+            reservation_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        reservation_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.operation == "ReservationRequest" && state.s.accepted),
+        "fixture should cover accepted reservation requests"
+    );
+    assert!(
+        reservation_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.operation == "OverlapQuery" && state.s.accepted),
+        "fixture should cover accepted overlap queries"
+    );
+    assert_eq!(
+        replay_reservation_request_shape_trace(&reservation_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -5703,6 +5996,42 @@ fn covey_runtime_attestation_request_shape_replay_reports_counterexample_shape()
         vec![
             "state[0]: runtime attestation request reject reason does not match parser order",
             "state[0]: runtime attestation request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_reservation_request_shape_replay_reports_counterexample_shape() {
+    let state = ReservationRequestShapeState {
+        case_index: 18,
+        case: "PaddedScopeKey".to_owned(),
+        operation: "ReservationRequest".to_owned(),
+        session_token_valid: true,
+        owner_subtask_id_valid: true,
+        lease_duration_positive: true,
+        idempotency_key_valid: true,
+        scope: "ExactPath".to_owned(),
+        scope_key_present: true,
+        scope_key_normalized: false,
+        repo_global_key_canonical: true,
+        generated_members_present: false,
+        generated_members_allowed: false,
+        generated_members_normalized: true,
+        generated_members_unique: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ReservationRequestShapeItfTrace {
+        states: vec![ReservationRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_reservation_request_shape_trace(&trace),
+        vec![
+            "state[0]: reservation request reject reason does not match validation facts",
+            "state[0]: reservation request outcome disagrees with validation facts",
         ]
     );
 }

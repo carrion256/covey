@@ -2471,6 +2471,10 @@ impl ReservationScopeKey {
     fn parse_for_scope(scope_class: ScopeClass, scope_key: String) -> Result<Self, String> {
         if scope_key.trim().is_empty() {
             Err(format!("{scope_class} reservations require scope_key"))
+        } else if scope_key.trim() != scope_key {
+            Err(format!(
+                "{scope_class} reservation scope_key must be normalized"
+            ))
         } else {
             Ok(Self(scope_key))
         }
@@ -2488,6 +2492,8 @@ impl TryFrom<String> for ReservationScopeKey {
     fn try_from(scope_key: String) -> Result<Self, Self::Error> {
         if scope_key.trim().is_empty() {
             Err("reservation scope_key must not be empty".to_owned())
+        } else if scope_key.trim() != scope_key {
+            Err("reservation scope_key must be normalized".to_owned())
         } else {
             Ok(Self(scope_key))
         }

@@ -4272,6 +4272,19 @@ fn reservation_scope_public_shape_rejects_invalid_variant_payloads() {
             .contains("reservation scope_key must not be empty"),
         "unexpected error: {err}"
     );
+
+    let padded_exact_scope_key = serde_json::json!({
+        "ExactPath": {
+            "scope_key": " src/lib.rs"
+        }
+    });
+    let err = serde_json::from_value::<ReservationScope>(padded_exact_scope_key)
+        .expect_err("exact-path scope variant should reject padded keys");
+    assert!(
+        err.to_string()
+            .contains("reservation scope_key must be normalized"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -4401,6 +4414,19 @@ fn reservation_request_and_overlap_query_reject_invalid_scope_shapes() {
     assert!(
         err.to_string()
             .contains("repo-global reservations require scope_key `repo`"),
+        "unexpected error: {err}"
+    );
+
+    let padded_exact_query_key = serde_json::json!({
+        "scope_class": "exact_path",
+        "scope_key": " src/lib.rs",
+        "generated_members": []
+    });
+    let err = serde_json::from_value::<OverlapQueryReq>(padded_exact_query_key)
+        .expect_err("overlap query should reject padded exact-path keys");
+    assert!(
+        err.to_string()
+            .contains("exact_path reservation scope_key must be normalized"),
         "unexpected error: {err}"
     );
 }
