@@ -29,6 +29,8 @@ const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
 const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
 const COVEY_REPOOPS_SNAPSHOT_ITF: &str =
     include_str!("fixtures/quint/CoveyRepoopsSnapshot.itf.json");
+const COVEY_TRANSITION_MATRIX_ITF: &str =
+    include_str!("fixtures/quint/CoveyTransitionMatrix.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -88,6 +90,16 @@ struct RepoopsSnapshotItfTrace {
 #[derive(Debug, Deserialize)]
 struct RepoopsSnapshotItfState {
     s: RepoopsSnapshotState,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransitionMatrixItfTrace {
+    states: Vec<TransitionMatrixItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransitionMatrixItfState {
+    s: TransitionMatrixState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,6 +322,25 @@ struct RepoopsSnapshotState {
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
     reject_reason: String,
     accepted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransitionMatrixState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    object: String,
+    #[serde(rename = "from", deserialize_with = "deserialize_itf_variant")]
+    from_state: String,
+    #[serde(rename = "to", deserialize_with = "deserialize_itf_variant")]
+    to_state: String,
+    #[serde(rename = "allowedByMatrix")]
+    allowed_by_matrix: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1573,6 +1604,149 @@ fn replay_repoops_snapshot_trace(trace: &RepoopsSnapshotItfTrace) -> Vec<String>
     violations
 }
 
+fn transition_matrix_expected_allowed(state: &TransitionMatrixState) -> bool {
+    match state.object.as_str() {
+        "WorkSubtask" => matches!(
+            (state.from_state.as_str(), state.to_state.as_str()),
+            ("Available", "Claimed")
+                | ("Claimed", "InProgress")
+                | ("InProgress", "ArtifactPublished")
+                | ("ArtifactPublished", "ArtifactPublished")
+                | ("ReviewPending", "ArtifactPublished")
+                | ("ArtifactPublished", "ReviewPending")
+                | ("ReviewPending", "ChangesRequested")
+                | ("ReviewPending", "Blocked")
+                | ("ReviewPending", "Approved")
+                | ("Approved", "ReadyForApply")
+                | ("ReadyForApply", "Applied")
+        ),
+        "ReviewSubtask" => matches!(
+            (state.from_state.as_str(), state.to_state.as_str()),
+            ("Available", "Claimed") | ("Claimed", "InProgress") | ("InProgress", "Decided")
+        ),
+        "ReviewObject" => matches!(
+            (state.from_state.as_str(), state.to_state.as_str()),
+            ("ReviewRequested", "ReviewInProgress")
+                | ("ReviewRequested", "ReviewSuperseded")
+                | ("ReviewInProgress", "ReviewDecided")
+                | ("ReviewInProgress", "ReviewSuperseded")
+        ),
+        "ReadyQueue" => matches!(
+            (state.from_state.as_str(), state.to_state.as_str()),
+            ("QueueQueued", "QueueInFlight")
+                | ("QueueInFlight", "QueueApplied")
+                | ("QueueQueued", "QueueSuperseded")
+                | ("QueueInFlight", "QueueSuperseded")
+                | ("QueueQueued", "QueueCancelled")
+                | ("QueueInFlight", "QueueCancelled")
+        ),
+        "Conflict" => matches!(
+            (state.from_state.as_str(), state.to_state.as_str()),
+            ("ConflictOpen", "ConflictAcknowledged")
+                | ("ConflictOpen", "ConflictResolved")
+                | ("ConflictAcknowledged", "ConflictAcknowledged")
+                | ("ConflictAcknowledged", "ConflictResolved")
+                | ("ConflictResolved", "ConflictResolved")
+        ),
+        "Reservation" => matches!(
+            (state.from_state.as_str(), state.to_state.as_str()),
+            ("ReservationActive", "ReservationReleased")
+                | ("ReservationActive", "ReservationExpired")
+        ),
+        _ => false,
+    }
+}
+
+fn replay_transition_matrix_trace(trace: &TransitionMatrixItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: transition matrix scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_allowed = transition_matrix_expected_allowed(state);
+        if state.allowed_by_matrix != expected_allowed {
+            violations.push(format!(
+                "state[{index}]: transition matrix allowed flag disagrees with expected edge set"
+            ));
+        }
+        let expected_outcome = if expected_allowed {
+            "Allowed"
+        } else {
+            "Rejected"
+        };
+        if state.outcome != expected_outcome {
+            violations.push(format!(
+                "state[{index}]: transition matrix outcome disagrees with expected edge set"
+            ));
+        }
+        if state.allowed_by_matrix
+            && state.object == "WorkSubtask"
+            && state.to_state == "Applied"
+            && state.from_state != "ReadyForApply"
+        {
+            violations.push(format!(
+                "state[{index}]: work subtask bypassed ready_for_apply before applied"
+            ));
+        }
+        if state.allowed_by_matrix
+            && state.object == "WorkSubtask"
+            && matches!(state.from_state.as_str(), "ChangesRequested" | "Blocked")
+        {
+            violations.push(format!(
+                "state[{index}]: failed work terminal state transitioned in place"
+            ));
+        }
+        if state.allowed_by_matrix
+            && state.object == "ReviewSubtask"
+            && state.to_state == "InProgress"
+            && state.from_state != "Claimed"
+        {
+            violations.push(format!(
+                "state[{index}]: review subtask bypassed claimed before in_progress"
+            ));
+        }
+        if state.allowed_by_matrix
+            && state.object == "ReviewObject"
+            && state.from_state == "ReviewDecided"
+        {
+            violations.push(format!("state[{index}]: decided review transitioned"));
+        }
+        if state.allowed_by_matrix
+            && state.object == "ReadyQueue"
+            && matches!(state.from_state.as_str(), "QueueApplied" | "QueueCancelled")
+        {
+            violations.push(format!("state[{index}]: terminal queue transitioned"));
+        }
+        if state.allowed_by_matrix
+            && state.object == "Conflict"
+            && state.from_state == "ConflictResolved"
+            && state.to_state != "ConflictResolved"
+        {
+            violations.push(format!("state[{index}]: resolved conflict downgraded"));
+        }
+        if state.allowed_by_matrix
+            && state.object == "Reservation"
+            && matches!(
+                state.from_state.as_str(),
+                "ReservationReleased" | "ReservationExpired"
+            )
+        {
+            violations.push(format!("state[{index}]: terminal reservation transitioned"));
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -2657,6 +2831,11 @@ fn repoops_snapshot_trace() -> RepoopsSnapshotItfTrace {
 }
 
 #[fixture]
+fn transition_matrix_trace() -> TransitionMatrixItfTrace {
+    serde_json::from_str(COVEY_TRANSITION_MATRIX_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -2908,6 +3087,37 @@ fn covey_replays_quint_repoops_snapshot_itf_trace(repoops_snapshot_trace: Repoop
     );
     assert_eq!(
         replay_repoops_snapshot_trace(&repoops_snapshot_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_transition_matrix_itf_trace(
+    transition_matrix_trace: TransitionMatrixItfTrace,
+) {
+    assert!(
+        !transition_matrix_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "WorkReadyForApplyApplied",
+        "IllegalWorkApprovedApplied",
+        "IllegalWorkChangesRequestedClaimed",
+        "IllegalReviewAvailableInProgress",
+        "IllegalQueueAppliedQueued",
+        "IllegalConflictResolvedAcknowledged",
+        "IllegalReservationReleasedExpired",
+    ] {
+        assert!(
+            transition_matrix_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert_eq!(
+        replay_transition_matrix_trace(&transition_matrix_trace),
         Vec::<String>::new()
     );
 }
@@ -3510,6 +3720,32 @@ fn covey_repoops_snapshot_replay_reports_token_leak_counterexample_shape() {
             "state[0]: repoops snapshot accepted with failed gate",
             "state[0]: in-progress repoops claim lacks token reference",
             "state[0]: repoops snapshot exposed raw session token",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_transition_matrix_replay_reports_counterexample_shape() {
+    let state = TransitionMatrixState {
+        case_index: 1,
+        case: "IllegalWorkApprovedApplied".to_owned(),
+        object: "WorkSubtask".to_owned(),
+        from_state: "Approved".to_owned(),
+        to_state: "Applied".to_owned(),
+        allowed_by_matrix: true,
+        outcome: "Allowed".to_owned(),
+        evaluated: true,
+    };
+    let trace = TransitionMatrixItfTrace {
+        states: vec![TransitionMatrixItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_transition_matrix_trace(&trace),
+        vec![
+            "state[0]: transition matrix allowed flag disagrees with expected edge set",
+            "state[0]: transition matrix outcome disagrees with expected edge set",
+            "state[0]: work subtask bypassed ready_for_apply before applied",
         ]
     );
 }
