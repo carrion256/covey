@@ -1,6 +1,6 @@
 use covey::{
-    ArtifactKind, ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq, OverlapQueryReq,
-    PublishArtifactReq, RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq,
+    ArtifactKind, ClaimReadyQueueReq, ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq,
+    OverlapQueryReq, PublishArtifactReq, RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq,
     RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
     SettlementTarget,
 };
@@ -44,6 +44,8 @@ const COVEY_REQUEST_REVIEW_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRequestReviewRequestShape.itf.json");
 const COVEY_ENQUEUE_FOR_APPLY_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyEnqueueForApplyRequestShape.itf.json");
+const COVEY_CLAIM_READY_QUEUE_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyClaimReadyQueueRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -253,6 +255,16 @@ struct EnqueueForApplyRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct EnqueueForApplyRequestShapeItfState {
     s: EnqueueForApplyRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimReadyQueueRequestShapeItfTrace {
+    states: Vec<ClaimReadyQueueRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimReadyQueueRequestShapeItfState {
+    s: ClaimReadyQueueRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -954,6 +966,26 @@ struct EnqueueForApplyRequestShapeState {
     artifact_digest_valid: bool,
     #[serde(rename = "subtaskIdValid")]
     subtask_id_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimReadyQueueRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "leaseDurationPositive")]
+    lease_duration_positive: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -2892,6 +2924,93 @@ fn replay_enqueue_for_apply_request_shape_trace(
         if expected_accepted && !state.idempotency_key_valid {
             violations.push(format!(
                 "state[{index}]: accepted enqueue for apply lacks idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn claim_ready_queue_expected_reject(state: &ClaimReadyQueueRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.lease_duration_positive {
+        "LeaseDurationInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn claim_ready_queue_lease_duration(state: &ClaimReadyQueueRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ZeroLeaseDuration" => 0,
+        "NegativeLeaseDuration" => -1,
+        _ => 30_000,
+    }
+}
+
+fn claim_ready_queue_actual_accepts(state: &ClaimReadyQueueRequestShapeState) -> bool {
+    ClaimReadyQueueReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        claim_ready_queue_lease_duration(state),
+        if state.idempotency_key_valid {
+            "idem-claim-ready"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_claim_ready_queue_request_shape_trace(
+    trace: &ClaimReadyQueueRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: claim ready queue scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = claim_ready_queue_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: claim ready queue reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: claim ready queue outcome disagrees with validation facts"
+            ));
+        }
+        if claim_ready_queue_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: claim ready queue parser disagrees with model"
+            ));
+        }
+        if expected_accepted && (!state.session_token_valid || !state.lease_duration_positive) {
+            violations.push(format!(
+                "state[{index}]: accepted claim ready queue has invalid session or lease"
+            ));
+        }
+        if expected_accepted && !state.idempotency_key_valid {
+            violations.push(format!(
+                "state[{index}]: accepted claim ready queue lacks idempotency key"
             ));
         }
     }
@@ -5455,6 +5574,12 @@ fn enqueue_for_apply_request_shape_trace() -> EnqueueForApplyRequestShapeItfTrac
 }
 
 #[fixture]
+fn claim_ready_queue_request_shape_trace() -> ClaimReadyQueueRequestShapeItfTrace {
+    serde_json::from_str(COVEY_CLAIM_READY_QUEUE_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
     serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -6221,6 +6346,42 @@ fn covey_replays_quint_enqueue_for_apply_request_shape_itf_trace(
     );
     assert_eq!(
         replay_enqueue_for_apply_request_shape_trace(&enqueue_for_apply_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_claim_ready_queue_request_shape_itf_trace(
+    claim_ready_queue_request_shape_trace: ClaimReadyQueueRequestShapeItfTrace,
+) {
+    assert!(
+        !claim_ready_queue_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidClaim",
+        "InvalidSessionToken",
+        "ZeroLeaseDuration",
+        "NegativeLeaseDuration",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            claim_ready_queue_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        claim_ready_queue_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidClaim" && state.s.accepted),
+        "fixture should cover accepted ready-queue claim"
+    );
+    assert_eq!(
+        replay_claim_ready_queue_request_shape_trace(&claim_ready_queue_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -7426,6 +7587,32 @@ fn covey_enqueue_for_apply_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: enqueue for apply reject reason does not match validation facts",
             "state[0]: enqueue for apply outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_claim_ready_queue_request_shape_replay_reports_counterexample_shape() {
+    let state = ClaimReadyQueueRequestShapeState {
+        case_index: 3,
+        case: "NegativeLeaseDuration".to_owned(),
+        session_token_valid: true,
+        lease_duration_positive: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ClaimReadyQueueRequestShapeItfTrace {
+        states: vec![ClaimReadyQueueRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_claim_ready_queue_request_shape_trace(&trace),
+        vec![
+            "state[0]: claim ready queue reject reason does not match validation facts",
+            "state[0]: claim ready queue outcome disagrees with validation facts",
         ]
     );
 }
