@@ -361,8 +361,8 @@ struct ReadyQueueClaimSelectionState {
 struct ReadyQueueMetricsState {
     #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
     case_index: i64,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    case: String,
+    #[serde(deserialize_with = "deserialize_ready_queue_metrics_enum")]
+    case: ReadyQueueMetricsCase,
     #[serde(rename = "queuedCount", deserialize_with = "deserialize_itf_bigint")]
     queued_count: i64,
     #[serde(rename = "inFlightCount", deserialize_with = "deserialize_itf_bigint")]
@@ -375,14 +375,23 @@ struct ReadyQueueMetricsState {
     queued_age_non_negative: bool,
     #[serde(rename = "inFlightAgeNonNegative")]
     in_flight_age_non_negative: bool,
-    #[serde(rename = "queuedShape", deserialize_with = "deserialize_itf_variant")]
-    queued_shape: String,
-    #[serde(rename = "inFlightShape", deserialize_with = "deserialize_itf_variant")]
-    in_flight_shape: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    outcome: String,
-    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
-    reject_reason: String,
+    #[serde(
+        rename = "queuedShape",
+        deserialize_with = "deserialize_ready_queue_metrics_enum"
+    )]
+    queued_shape: ReadyQueueMetricsBucketShape,
+    #[serde(
+        rename = "inFlightShape",
+        deserialize_with = "deserialize_ready_queue_metrics_enum"
+    )]
+    in_flight_shape: ReadyQueueMetricsBucketShape,
+    #[serde(deserialize_with = "deserialize_ready_queue_metrics_enum")]
+    outcome: ReadyQueueMetricsOutcome,
+    #[serde(
+        rename = "rejectReason",
+        deserialize_with = "deserialize_ready_queue_metrics_enum"
+    )]
+    reject_reason: ReadyQueueMetricsRejectReason,
     evaluated: bool,
 }
 
@@ -740,26 +749,34 @@ struct BdImportState {
 
 #[derive(Debug, Deserialize)]
 struct ClaimDependencyGateState {
-    #[serde(rename = "path", deserialize_with = "deserialize_itf_variant")]
-    claim_path: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    role: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    session: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    meta: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    kind: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    lineage: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    candidate: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    dependency: String,
-    #[serde(deserialize_with = "deserialize_itf_variant")]
-    decision: String,
-    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
-    reject_reason: String,
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(
+        rename = "path",
+        deserialize_with = "deserialize_claim_dependency_enum"
+    )]
+    claim_path: ClaimDependencyPath,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    role: ClaimDependencyRole,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    session: ClaimDependencySession,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    meta: ClaimDependencyMeta,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    kind: ClaimDependencyKind,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    lineage: ClaimDependencyLineage,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    candidate: ClaimDependencyCandidate,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    dependency: ClaimDependencyDependency,
+    #[serde(deserialize_with = "deserialize_claim_dependency_enum")]
+    decision: ClaimDependencyDecision,
+    #[serde(
+        rename = "rejectReason",
+        deserialize_with = "deserialize_claim_dependency_enum"
+    )]
+    reject_reason: ClaimDependencyRejectReason,
     #[serde(rename = "dependencySatisfied")]
     dependency_satisfied: bool,
     #[serde(rename = "candidateSelected")]
@@ -944,6 +961,144 @@ struct ItfBigInt {
     value: String,
 }
 
+trait ClaimDependencyEnum: Sized {
+    fn from_itf_tag(tag: &str) -> Option<Self>;
+}
+
+trait ReadyQueueMetricsEnum: Sized {
+    fn from_itf_tag(tag: &str) -> Option<Self>;
+}
+
+macro_rules! claim_dependency_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum $name {
+            $($variant),+
+        }
+
+        impl ClaimDependencyEnum for $name {
+            fn from_itf_tag(tag: &str) -> Option<Self> {
+                match tag {
+                    $(stringify!($variant) => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! ready_queue_metrics_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum $name {
+            $($variant),+
+        }
+
+        impl ReadyQueueMetricsEnum for $name {
+            fn from_itf_tag(tag: &str) -> Option<Self> {
+                match tag {
+                    $(stringify!($variant) => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+ready_queue_metrics_enum!(ReadyQueueMetricsCase {
+    EmptyBoth,
+    QueuedNonEmpty,
+    InFlightNonEmpty,
+    BothNonEmpty,
+    EmptyQueuedWithAge,
+    QueuedMissingAge,
+    QueuedNegativeAge,
+    EmptyInFlightWithAge,
+    InFlightMissingAge,
+    InFlightNegativeAge,
+});
+ready_queue_metrics_enum!(ReadyQueueMetricsBucketShape {
+    EmptyBucket,
+    NonEmptyBucket,
+    InvalidBucket,
+});
+ready_queue_metrics_enum!(ReadyQueueMetricsOutcome {
+    NotEvaluated,
+    Accepted,
+    Rejected,
+});
+ready_queue_metrics_enum!(ReadyQueueMetricsRejectReason {
+    NoReject,
+    EmptyQueuedHasAge,
+    NonEmptyQueuedMissingAge,
+    NegativeQueuedAge,
+    EmptyInFlightHasAge,
+    NonEmptyInFlightMissingAge,
+    NegativeInFlightAge,
+});
+
+claim_dependency_enum!(ClaimDependencyPath {
+    ClaimNext,
+    TargetedClaim,
+});
+claim_dependency_enum!(ClaimDependencyRole {
+    Executor,
+    Reviewer,
+    Orchestrator,
+});
+claim_dependency_enum!(ClaimDependencySession {
+    SessionFree,
+    SessionOccupied,
+    SessionInactive,
+});
+claim_dependency_enum!(ClaimDependencyMeta {
+    MetaActive,
+    MetaPlanning,
+    MetaCompleted,
+    MetaCancelled,
+});
+claim_dependency_enum!(ClaimDependencyKind { Work, Review });
+claim_dependency_enum!(ClaimDependencyLineage {
+    PlainCandidate,
+    ChangesRequestedSourceCandidate,
+    ReviewFollowupCandidate,
+});
+claim_dependency_enum!(ClaimDependencyCandidate {
+    CandidateAvailable,
+    CandidateClaimed,
+    CandidateInProgress,
+    NoCandidate,
+});
+claim_dependency_enum!(ClaimDependencyDependency {
+    NoDependency,
+    DepOpen,
+    DepApproved,
+    DepReadyForApply,
+    DepApplied,
+    DepDecided,
+    DepChangesRequestedNoFollowup,
+    DepChangesRequestedFollowupAvailable,
+    DepChangesRequestedFollowupApproved,
+    DepChangesRequestedFollowupReadyForApply,
+    DepChangesRequestedFollowupApplied,
+    DepChangesRequestedFollowupDecided,
+});
+claim_dependency_enum!(ClaimDependencyDecision {
+    NotEvaluated,
+    ClaimCreated,
+    NoClaimableCandidate,
+    Rejected,
+});
+claim_dependency_enum!(ClaimDependencyRejectReason {
+    NoReject,
+    WrongRole,
+    SessionUnavailable,
+    SessionAlreadyOccupied,
+    MetaUnavailable,
+    IllegalTransition,
+    DependencyUnsatisfied,
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Block {
     B0,
@@ -969,6 +1124,26 @@ where
         .value
         .parse::<i64>()
         .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_claim_dependency_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: ClaimDependencyEnum,
+{
+    let tag = ItfVariant::deserialize(deserializer)?.tag;
+    T::from_itf_tag(&tag)
+        .ok_or_else(|| serde::de::Error::custom(format!("unknown claim dependency tag {tag}")))
+}
+
+fn deserialize_ready_queue_metrics_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: ReadyQueueMetricsEnum,
+{
+    let tag = ItfVariant::deserialize(deserializer)?.tag;
+    T::from_itf_tag(&tag)
+        .ok_or_else(|| serde::de::Error::custom(format!("unknown ready-queue metrics tag {tag}")))
 }
 
 impl Block {
@@ -1699,21 +1874,23 @@ fn replay_ready_queue_claim_selection_trace(
     violations
 }
 
-fn ready_queue_metrics_expected_reject(state: &ReadyQueueMetricsState) -> &'static str {
+fn ready_queue_metrics_expected_reject(
+    state: &ReadyQueueMetricsState,
+) -> ReadyQueueMetricsRejectReason {
     if state.queued_count == 0 && state.queued_age_present {
-        "EmptyQueuedHasAge"
+        ReadyQueueMetricsRejectReason::EmptyQueuedHasAge
     } else if state.queued_count > 0 && !state.queued_age_present {
-        "NonEmptyQueuedMissingAge"
+        ReadyQueueMetricsRejectReason::NonEmptyQueuedMissingAge
     } else if state.queued_age_present && !state.queued_age_non_negative {
-        "NegativeQueuedAge"
+        ReadyQueueMetricsRejectReason::NegativeQueuedAge
     } else if state.in_flight_count == 0 && state.in_flight_age_present {
-        "EmptyInFlightHasAge"
+        ReadyQueueMetricsRejectReason::EmptyInFlightHasAge
     } else if state.in_flight_count > 0 && !state.in_flight_age_present {
-        "NonEmptyInFlightMissingAge"
+        ReadyQueueMetricsRejectReason::NonEmptyInFlightMissingAge
     } else if state.in_flight_age_present && !state.in_flight_age_non_negative {
-        "NegativeInFlightAge"
+        ReadyQueueMetricsRejectReason::NegativeInFlightAge
     } else {
-        "NoReject"
+        ReadyQueueMetricsRejectReason::NoReject
     }
 }
 
@@ -1721,13 +1898,13 @@ fn ready_queue_metrics_bucket_shape(
     count: i64,
     age_present: bool,
     age_non_negative: bool,
-) -> &'static str {
+) -> ReadyQueueMetricsBucketShape {
     if count == 0 && !age_present {
-        "EmptyBucket"
+        ReadyQueueMetricsBucketShape::EmptyBucket
     } else if count > 0 && age_present && age_non_negative {
-        "NonEmptyBucket"
+        ReadyQueueMetricsBucketShape::NonEmptyBucket
     } else {
-        "InvalidBucket"
+        ReadyQueueMetricsBucketShape::InvalidBucket
     }
 }
 
@@ -1770,14 +1947,15 @@ fn replay_ready_queue_metrics_trace(trace: &ReadyQueueMetricsItfTrace) -> Vec<St
                 "{prefix}: ready-queue metric bucket projection disagrees with count and age"
             ));
         }
-        if (state.outcome == "Accepted")
-            != (queued_shape != "InvalidBucket" && in_flight_shape != "InvalidBucket")
+        if (state.outcome == ReadyQueueMetricsOutcome::Accepted)
+            != (queued_shape != ReadyQueueMetricsBucketShape::InvalidBucket
+                && in_flight_shape != ReadyQueueMetricsBucketShape::InvalidBucket)
         {
             violations.push(format!(
                 "{prefix}: ready-queue metrics acceptance disagrees with bucket validity"
             ));
         }
-        if state.outcome == "Accepted"
+        if state.outcome == ReadyQueueMetricsOutcome::Accepted
             && ((state.queued_count == 0 && state.queued_age_present)
                 || (state.in_flight_count == 0 && state.in_flight_age_present))
         {
@@ -1785,7 +1963,7 @@ fn replay_ready_queue_metrics_trace(trace: &ReadyQueueMetricsItfTrace) -> Vec<St
                 "{prefix}: empty ready-queue metric bucket retained oldest age"
             ));
         }
-        if state.outcome == "Accepted"
+        if state.outcome == ReadyQueueMetricsOutcome::Accepted
             && ((state.queued_count > 0 && !state.queued_age_present)
                 || (state.in_flight_count > 0 && !state.in_flight_age_present))
         {
@@ -1793,7 +1971,7 @@ fn replay_ready_queue_metrics_trace(trace: &ReadyQueueMetricsItfTrace) -> Vec<St
                 "{prefix}: non-empty ready-queue metric bucket lacked oldest age"
             ));
         }
-        if state.outcome == "Accepted"
+        if state.outcome == ReadyQueueMetricsOutcome::Accepted
             && ((state.queued_age_present && !state.queued_age_non_negative)
                 || (state.in_flight_age_present && !state.in_flight_age_non_negative))
         {
@@ -2753,76 +2931,101 @@ fn replay_bd_import_trace(trace: &BdImportItfTrace) -> Vec<String> {
     violations
 }
 
-fn claim_dependency_role_can_claim(role: &str, kind: &str) -> bool {
-    matches!((role, kind), ("Executor", "Work") | ("Reviewer", "Review"))
+fn claim_dependency_role_can_claim(role: ClaimDependencyRole, kind: ClaimDependencyKind) -> bool {
+    matches!(
+        (role, kind),
+        (ClaimDependencyRole::Executor, ClaimDependencyKind::Work)
+            | (ClaimDependencyRole::Reviewer, ClaimDependencyKind::Review)
+    )
 }
 
-fn claim_dependency_meta_claimable(meta: &str) -> bool {
-    matches!(meta, "MetaActive" | "MetaPlanning")
+fn claim_dependency_meta_claimable(meta: ClaimDependencyMeta) -> bool {
+    matches!(
+        meta,
+        ClaimDependencyMeta::MetaActive | ClaimDependencyMeta::MetaPlanning
+    )
 }
 
-fn claim_dependency_satisfied(kind: &str, lineage: &str, dependency: &str) -> bool {
-    if kind == "Review" {
+fn claim_dependency_satisfied(
+    kind: ClaimDependencyKind,
+    lineage: ClaimDependencyLineage,
+    dependency: ClaimDependencyDependency,
+) -> bool {
+    if kind == ClaimDependencyKind::Review {
         return true;
     }
-    if lineage == "ReviewFollowupCandidate" {
+    if lineage == ClaimDependencyLineage::ReviewFollowupCandidate {
         return true;
     }
     matches!(
         dependency,
-        "NoDependency"
-            | "DepApproved"
-            | "DepReadyForApply"
-            | "DepApplied"
-            | "DepDecided"
-            | "DepChangesRequestedFollowupApproved"
-            | "DepChangesRequestedFollowupReadyForApply"
-            | "DepChangesRequestedFollowupApplied"
-            | "DepChangesRequestedFollowupDecided"
+        ClaimDependencyDependency::NoDependency
+            | ClaimDependencyDependency::DepApproved
+            | ClaimDependencyDependency::DepReadyForApply
+            | ClaimDependencyDependency::DepApplied
+            | ClaimDependencyDependency::DepDecided
+            | ClaimDependencyDependency::DepChangesRequestedFollowupApproved
+            | ClaimDependencyDependency::DepChangesRequestedFollowupReadyForApply
+            | ClaimDependencyDependency::DepChangesRequestedFollowupApplied
+            | ClaimDependencyDependency::DepChangesRequestedFollowupDecided
     )
 }
 
-fn claim_dependency_expected_reject(state: &ClaimDependencyGateState) -> &'static str {
-    if state.session == "SessionInactive" {
-        "SessionUnavailable"
-    } else if state.session == "SessionOccupied" {
-        "SessionAlreadyOccupied"
-    } else if !claim_dependency_role_can_claim(&state.role, &state.kind) {
-        "WrongRole"
-    } else if !claim_dependency_meta_claimable(&state.meta) {
-        "MetaUnavailable"
-    } else if state.candidate != "CandidateAvailable"
-        || (state.kind == "Review" && state.lineage != "PlainCandidate")
+fn claim_dependency_expected_reject(
+    state: &ClaimDependencyGateState,
+) -> ClaimDependencyRejectReason {
+    if state.session == ClaimDependencySession::SessionInactive {
+        ClaimDependencyRejectReason::SessionUnavailable
+    } else if state.session == ClaimDependencySession::SessionOccupied {
+        ClaimDependencyRejectReason::SessionAlreadyOccupied
+    } else if !claim_dependency_role_can_claim(state.role, state.kind) {
+        ClaimDependencyRejectReason::WrongRole
+    } else if !claim_dependency_meta_claimable(state.meta) {
+        ClaimDependencyRejectReason::MetaUnavailable
+    } else if state.candidate != ClaimDependencyCandidate::CandidateAvailable
+        || (state.kind == ClaimDependencyKind::Review
+            && state.lineage != ClaimDependencyLineage::PlainCandidate)
     {
-        "IllegalTransition"
-    } else if !claim_dependency_satisfied(&state.kind, &state.lineage, &state.dependency) {
-        "DependencyUnsatisfied"
+        ClaimDependencyRejectReason::IllegalTransition
+    } else if !claim_dependency_satisfied(state.kind, state.lineage, state.dependency) {
+        ClaimDependencyRejectReason::DependencyUnsatisfied
     } else {
-        "NoReject"
+        ClaimDependencyRejectReason::NoReject
     }
 }
 
-fn claim_dependency_expected_decision(state: &ClaimDependencyGateState) -> &'static str {
+fn claim_dependency_expected_decision(state: &ClaimDependencyGateState) -> ClaimDependencyDecision {
     let reject = claim_dependency_expected_reject(state);
-    if reject == "NoReject" {
-        "ClaimCreated"
-    } else if state.claim_path == "ClaimNext"
+    if reject == ClaimDependencyRejectReason::NoReject {
+        ClaimDependencyDecision::ClaimCreated
+    } else if state.claim_path == ClaimDependencyPath::ClaimNext
         && matches!(
             reject,
-            "MetaUnavailable" | "IllegalTransition" | "DependencyUnsatisfied"
+            ClaimDependencyRejectReason::MetaUnavailable
+                | ClaimDependencyRejectReason::IllegalTransition
+                | ClaimDependencyRejectReason::DependencyUnsatisfied
         )
     {
-        "NoClaimableCandidate"
+        ClaimDependencyDecision::NoClaimableCandidate
     } else {
-        "Rejected"
+        ClaimDependencyDecision::Rejected
     }
 }
 
 fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Vec<String> {
     let mut violations = Vec::new();
+    let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: claim dependency scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
         if !state.evaluated {
             continue;
         }
@@ -2833,25 +3036,32 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
             ));
         }
         let expected_dependency =
-            claim_dependency_satisfied(&state.kind, &state.lineage, &state.dependency);
+            claim_dependency_satisfied(state.kind, state.lineage, state.dependency);
         if state.dependency_satisfied != expected_dependency {
             violations.push(format!(
                 "{prefix}: dependency satisfaction marker does not match state"
             ));
         }
-        if state.claim_created && state.kind == "Work" && !state.dependency_satisfied {
+        if state.claim_created
+            && state.kind == ClaimDependencyKind::Work
+            && !state.dependency_satisfied
+        {
             violations.push(format!(
                 "{prefix}: work claim ignored unsatisfied dependency"
             ));
         }
-        if state.kind == "Work" && state.dependency == "DepOpen" && state.claim_created {
+        if state.kind == ClaimDependencyKind::Work
+            && state.dependency == ClaimDependencyDependency::DepOpen
+            && state.claim_created
+        {
             violations.push(format!("{prefix}: open dependency allowed work claim"));
         }
-        if state.kind == "Work"
-            && state.lineage == "ChangesRequestedSourceCandidate"
+        if state.kind == ClaimDependencyKind::Work
+            && state.lineage == ClaimDependencyLineage::ChangesRequestedSourceCandidate
             && matches!(
-                state.dependency.as_str(),
-                "DepChangesRequestedNoFollowup" | "DepChangesRequestedFollowupAvailable"
+                state.dependency,
+                ClaimDependencyDependency::DepChangesRequestedNoFollowup
+                    | ClaimDependencyDependency::DepChangesRequestedFollowupAvailable
             )
             && state.claim_created
         {
@@ -2859,23 +3069,23 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
                 "{prefix}: changes-requested dependency without terminal follow-up allowed claim"
             ));
         }
-        if state.kind == "Work"
-            && state.lineage == "ReviewFollowupCandidate"
-            && state.dependency == "DepChangesRequestedFollowupAvailable"
-            && state.claim_path == "ClaimNext"
+        if state.kind == ClaimDependencyKind::Work
+            && state.lineage == ClaimDependencyLineage::ReviewFollowupCandidate
+            && state.dependency == ClaimDependencyDependency::DepChangesRequestedFollowupAvailable
+            && state.claim_path == ClaimDependencyPath::ClaimNext
             && !state.claim_created
         {
             violations.push(format!(
                 "{prefix}: review follow-up candidate for changes-requested source was not claimed"
             ));
         }
-        if state.kind == "Work"
+        if state.kind == ClaimDependencyKind::Work
             && matches!(
-                state.dependency.as_str(),
-                "DepChangesRequestedFollowupApproved"
-                    | "DepChangesRequestedFollowupReadyForApply"
-                    | "DepChangesRequestedFollowupApplied"
-                    | "DepChangesRequestedFollowupDecided"
+                state.dependency,
+                ClaimDependencyDependency::DepChangesRequestedFollowupApproved
+                    | ClaimDependencyDependency::DepChangesRequestedFollowupReadyForApply
+                    | ClaimDependencyDependency::DepChangesRequestedFollowupApplied
+                    | ClaimDependencyDependency::DepChangesRequestedFollowupDecided
             )
             && !state.dependency_satisfied
         {
@@ -2883,10 +3093,13 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
                 "{prefix}: terminal follow-up did not satisfy source dependency"
             ));
         }
-        if state.kind == "Work"
+        if state.kind == ClaimDependencyKind::Work
             && matches!(
-                state.dependency.as_str(),
-                "DepApproved" | "DepReadyForApply" | "DepApplied" | "DepDecided"
+                state.dependency,
+                ClaimDependencyDependency::DepApproved
+                    | ClaimDependencyDependency::DepReadyForApply
+                    | ClaimDependencyDependency::DepApplied
+                    | ClaimDependencyDependency::DepDecided
             )
             && !state.dependency_satisfied
         {
@@ -2906,30 +3119,30 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
                 "{prefix}: created claim lacks subtask/session/fence binding"
             ));
         }
-        if state.claim_path == "ClaimNext"
-            && state.decision == "NoClaimableCandidate"
+        if state.claim_path == ClaimDependencyPath::ClaimNext
+            && state.decision == ClaimDependencyDecision::NoClaimableCandidate
             && state.claim_created
         {
             violations.push(format!("{prefix}: claim-next created blocked candidate"));
         }
-        if state.claim_path == "TargetedClaim"
-            && claim_dependency_expected_reject(state) != "NoReject"
-            && state.decision != "Rejected"
+        if state.claim_path == ClaimDependencyPath::TargetedClaim
+            && claim_dependency_expected_reject(state) != ClaimDependencyRejectReason::NoReject
+            && state.decision != ClaimDependencyDecision::Rejected
         {
             violations.push(format!(
                 "{prefix}: targeted blocked candidate did not reject"
             ));
         }
-        if !claim_dependency_role_can_claim(&state.role, &state.kind) && state.claim_created {
+        if !claim_dependency_role_can_claim(state.role, state.kind) && state.claim_created {
             violations.push(format!("{prefix}: wrong role created claim"));
         }
-        if state.session == "SessionOccupied" && state.claim_created {
+        if state.session == ClaimDependencySession::SessionOccupied && state.claim_created {
             violations.push(format!("{prefix}: occupied session created claim"));
         }
-        if !claim_dependency_meta_claimable(&state.meta) && state.claim_created {
+        if !claim_dependency_meta_claimable(state.meta) && state.claim_created {
             violations.push(format!("{prefix}: terminal meta created claim"));
         }
-        if state.candidate_selected && state.candidate == "NoCandidate" {
+        if state.candidate_selected && state.candidate == ClaimDependencyCandidate::NoCandidate {
             violations.push(format!("{prefix}: selected absent candidate"));
         }
     }
@@ -3529,7 +3742,7 @@ fn covey_replays_quint_ready_queue_claim_selection_itf_trace(
                 .states
                 .iter()
                 .any(|state| state.s.case == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert_eq!(
@@ -3547,12 +3760,12 @@ fn covey_replays_quint_ready_queue_metrics_itf_trace(
         "fixture should contain at least one state"
     );
     for expected in [
-        "EmptyQueuedHasAge",
-        "NonEmptyQueuedMissingAge",
-        "NegativeQueuedAge",
-        "EmptyInFlightHasAge",
-        "NonEmptyInFlightMissingAge",
-        "NegativeInFlightAge",
+        ReadyQueueMetricsRejectReason::EmptyQueuedHasAge,
+        ReadyQueueMetricsRejectReason::NonEmptyQueuedMissingAge,
+        ReadyQueueMetricsRejectReason::NegativeQueuedAge,
+        ReadyQueueMetricsRejectReason::EmptyInFlightHasAge,
+        ReadyQueueMetricsRejectReason::NonEmptyInFlightMissingAge,
+        ReadyQueueMetricsRejectReason::NegativeInFlightAge,
     ] {
         assert!(
             ready_queue_metrics_trace
@@ -3566,7 +3779,8 @@ fn covey_replays_quint_ready_queue_metrics_itf_trace(
         ready_queue_metrics_trace
             .states
             .iter()
-            .any(|state| state.s.case == "BothNonEmpty" && state.s.outcome == "Accepted"),
+            .any(|state| state.s.case == ReadyQueueMetricsCase::BothNonEmpty
+                && state.s.outcome == ReadyQueueMetricsOutcome::Accepted),
         "fixture should cover both ready-queue metric buckets populated"
     );
     assert_eq!(
@@ -3617,7 +3831,7 @@ fn covey_replays_quint_repoops_snapshot_itf_trace(repoops_snapshot_trace: Repoop
                 .states
                 .iter()
                 .any(|state| state.s.reject_reason == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert!(
@@ -3664,7 +3878,7 @@ fn covey_replays_quint_transition_matrix_itf_trace(
                 .states
                 .iter()
                 .any(|state| state.s.case == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert_eq!(
@@ -3696,7 +3910,7 @@ fn covey_replays_quint_apply_gate_evidence_itf_trace(
                 .states
                 .iter()
                 .any(|state| state.s.reject_reason == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert!(
@@ -3828,7 +4042,7 @@ fn covey_replays_quint_bd_import_itf_trace(bd_import_trace: BdImportItfTrace) {
                 .states
                 .iter()
                 .any(|state| state.s.conflict_reason == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert!(
@@ -3860,42 +4074,45 @@ fn covey_replays_quint_claim_dependency_gate_itf_trace(
         "fixture should contain at least one state"
     );
     for expected in [
-        "DepOpen",
-        "DepApplied",
-        "DepChangesRequestedNoFollowup",
-        "DepChangesRequestedFollowupAvailable",
-        "DepChangesRequestedFollowupApplied",
-        "DepChangesRequestedFollowupDecided",
+        ClaimDependencyDependency::DepOpen,
+        ClaimDependencyDependency::DepApplied,
+        ClaimDependencyDependency::DepChangesRequestedNoFollowup,
+        ClaimDependencyDependency::DepChangesRequestedFollowupAvailable,
+        ClaimDependencyDependency::DepChangesRequestedFollowupApplied,
+        ClaimDependencyDependency::DepChangesRequestedFollowupDecided,
     ] {
         assert!(
             claim_dependency_gate_trace
                 .states
                 .iter()
                 .any(|state| state.s.dependency == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert!(
         claim_dependency_gate_trace.states.iter().any(|state| {
-            state.s.lineage == "ChangesRequestedSourceCandidate"
-                && state.s.dependency == "DepChangesRequestedFollowupAvailable"
+            state.s.lineage == ClaimDependencyLineage::ChangesRequestedSourceCandidate
+                && state.s.dependency
+                    == ClaimDependencyDependency::DepChangesRequestedFollowupAvailable
                 && !state.s.claim_created
         }),
         "fixture should cover blocked original changes-requested source candidate"
     );
     assert!(
         claim_dependency_gate_trace.states.iter().any(|state| {
-            state.s.lineage == "ReviewFollowupCandidate"
-                && state.s.dependency == "DepChangesRequestedFollowupAvailable"
+            state.s.lineage == ClaimDependencyLineage::ReviewFollowupCandidate
+                && state.s.dependency
+                    == ClaimDependencyDependency::DepChangesRequestedFollowupAvailable
+                && state.s.claim_path == ClaimDependencyPath::ClaimNext
                 && state.s.claim_created
         }),
-        "fixture should cover claimable review follow-up candidate"
+        "fixture should cover claim-next selecting claimable review follow-up candidate"
     );
     assert!(
         claim_dependency_gate_trace.states.iter().any(|state| {
-            state.s.claim_path == "TargetedClaim"
-                && state.s.decision == "Rejected"
-                && state.s.reject_reason == "DependencyUnsatisfied"
+            state.s.claim_path == ClaimDependencyPath::TargetedClaim
+                && state.s.decision == ClaimDependencyDecision::Rejected
+                && state.s.reject_reason == ClaimDependencyRejectReason::DependencyUnsatisfied
         }),
         "fixture should cover targeted dependency rejection"
     );
@@ -3903,8 +4120,8 @@ fn covey_replays_quint_claim_dependency_gate_itf_trace(
         claim_dependency_gate_trace
             .states
             .iter()
-            .any(|state| state.s.role == "Reviewer"
-                && state.s.kind == "Review"
+            .any(|state| state.s.role == ClaimDependencyRole::Reviewer
+                && state.s.kind == ClaimDependencyKind::Review
                 && state.s.claim_created),
         "fixture should cover reviewer review claims"
     );
@@ -3912,7 +4129,7 @@ fn covey_replays_quint_claim_dependency_gate_itf_trace(
         claim_dependency_gate_trace
             .states
             .iter()
-            .any(|state| state.s.decision == "NoClaimableCandidate"),
+            .any(|state| state.s.decision == ClaimDependencyDecision::NoClaimableCandidate),
         "fixture should cover claim-next no-candidate result"
     );
     assert_eq!(
@@ -3944,7 +4161,7 @@ fn covey_replays_quint_mutation_idempotency_itf_trace(
                 .states
                 .iter()
                 .any(|state| state.s.last_outcome == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert!(
@@ -3980,7 +4197,7 @@ fn covey_replays_quint_event_log_itf_trace(event_log_trace: EventLogItfTrace) {
                 .states
                 .iter()
                 .any(|state| state.s.last_outcome == expected),
-            "fixture should cover {expected}"
+            "fixture should cover {expected:?}"
         );
     }
     assert!(
@@ -4146,17 +4363,17 @@ fn covey_ready_queue_claim_selection_replay_reports_counterexample_shape() {
 fn covey_ready_queue_metrics_replay_reports_counterexample_shape() {
     let state = ReadyQueueMetricsState {
         case_index: 1,
-        case: "BothNonEmpty".to_owned(),
+        case: ReadyQueueMetricsCase::BothNonEmpty,
         queued_count: 0,
         in_flight_count: 1,
         queued_age_present: true,
         in_flight_age_present: false,
         queued_age_non_negative: false,
         in_flight_age_non_negative: true,
-        queued_shape: "NonEmptyBucket".to_owned(),
-        in_flight_shape: "EmptyBucket".to_owned(),
-        outcome: "Accepted".to_owned(),
-        reject_reason: "NoReject".to_owned(),
+        queued_shape: ReadyQueueMetricsBucketShape::NonEmptyBucket,
+        in_flight_shape: ReadyQueueMetricsBucketShape::EmptyBucket,
+        outcome: ReadyQueueMetricsOutcome::Accepted,
+        reject_reason: ReadyQueueMetricsRejectReason::NoReject,
         evaluated: true,
     };
     let trace = ReadyQueueMetricsItfTrace {
@@ -4585,16 +4802,17 @@ fn covey_bd_import_replay_reports_counterexample_shape() {
 #[rstest]
 fn covey_claim_dependency_gate_replay_reports_counterexample_shape() {
     let state = ClaimDependencyGateState {
-        claim_path: "TargetedClaim".to_owned(),
-        role: "Executor".to_owned(),
-        session: "SessionOccupied".to_owned(),
-        meta: "MetaCompleted".to_owned(),
-        kind: "Work".to_owned(),
-        lineage: "PlainCandidate".to_owned(),
-        candidate: "NoCandidate".to_owned(),
-        dependency: "DepOpen".to_owned(),
-        decision: "ClaimCreated".to_owned(),
-        reject_reason: "NoReject".to_owned(),
+        case_index: 1,
+        claim_path: ClaimDependencyPath::TargetedClaim,
+        role: ClaimDependencyRole::Executor,
+        session: ClaimDependencySession::SessionOccupied,
+        meta: ClaimDependencyMeta::MetaCompleted,
+        kind: ClaimDependencyKind::Work,
+        lineage: ClaimDependencyLineage::PlainCandidate,
+        candidate: ClaimDependencyCandidate::NoCandidate,
+        dependency: ClaimDependencyDependency::DepOpen,
+        decision: ClaimDependencyDecision::ClaimCreated,
+        reject_reason: ClaimDependencyRejectReason::NoReject,
         dependency_satisfied: true,
         candidate_selected: true,
         claim_created: true,
@@ -4625,16 +4843,17 @@ fn covey_claim_dependency_gate_replay_reports_counterexample_shape() {
 #[rstest]
 fn covey_claim_dependency_gate_replay_reports_unclaimed_review_followup_counterexample() {
     let state = ClaimDependencyGateState {
-        claim_path: "ClaimNext".to_owned(),
-        role: "Executor".to_owned(),
-        session: "SessionFree".to_owned(),
-        meta: "MetaActive".to_owned(),
-        kind: "Work".to_owned(),
-        lineage: "ReviewFollowupCandidate".to_owned(),
-        candidate: "CandidateAvailable".to_owned(),
-        dependency: "DepChangesRequestedFollowupAvailable".to_owned(),
-        decision: "NoClaimableCandidate".to_owned(),
-        reject_reason: "NoReject".to_owned(),
+        case_index: 1,
+        claim_path: ClaimDependencyPath::ClaimNext,
+        role: ClaimDependencyRole::Executor,
+        session: ClaimDependencySession::SessionFree,
+        meta: ClaimDependencyMeta::MetaActive,
+        kind: ClaimDependencyKind::Work,
+        lineage: ClaimDependencyLineage::ReviewFollowupCandidate,
+        candidate: ClaimDependencyCandidate::CandidateAvailable,
+        dependency: ClaimDependencyDependency::DepChangesRequestedFollowupAvailable,
+        decision: ClaimDependencyDecision::NoClaimableCandidate,
+        reject_reason: ClaimDependencyRejectReason::NoReject,
         dependency_satisfied: true,
         candidate_selected: false,
         claim_created: false,
