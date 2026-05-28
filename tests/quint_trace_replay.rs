@@ -2,15 +2,15 @@ use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
     ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, CommandTranscriptDigest,
     Conflict, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
-    ExitSessionReq, FenceSeq, HeartbeatReq, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq,
-    MetaTask, MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq, ProviderId, PublishArtifactReq,
-    ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationOverlapConflictPayload, ReservationState,
-    ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
-    RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
-    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    ExitSessionReq, FenceSeq, HeartbeatReq, LandingAuthorizationStatus, LeaseDeadlineMs,
+    MarkAppliedReq, MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq,
+    ProviderId, PublishArtifactReq, ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq,
+    RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq,
+    RequestReservationReq, RequestReviewReq, Reservation, ReservationOverlapConflictPayload,
+    ReservationState, ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget,
+    ReviewVerdict, RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole,
+    SessionState, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
     VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
@@ -82,6 +82,8 @@ const COVEY_APPLY_VERIFICATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyVerificationRequestShape.itf.json");
 const COVEY_LANDING_AUTHORIZATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyLandingAuthorizationRequestShape.itf.json");
+const COVEY_LANDING_AUTHORIZATION_STATUS_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyLandingAuthorizationStatusShape.itf.json");
 const COVEY_LANDING_RECEIPT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyLandingReceiptRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
@@ -311,6 +313,16 @@ struct ConflictRecordShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ConflictRecordShapeItfState {
     s: ConflictRecordShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingAuthorizationStatusShapeItfTrace {
+    states: Vec<LandingAuthorizationStatusShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingAuthorizationStatusShapeItfState {
+    s: LandingAuthorizationStatusShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1904,6 +1916,76 @@ struct ConflictRecordShapeState {
     repo_global_key_canonical: bool,
     #[serde(rename = "payloadJsonPreserved")]
     payload_json_preserved: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingAuthorizationStatusShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "acceptedFlagPresent")]
+    accepted_flag_present: bool,
+    #[serde(rename = "acceptedFlagTrue")]
+    accepted_flag_true: bool,
+    #[serde(rename = "queueIdShape", deserialize_with = "deserialize_itf_variant")]
+    queue_id_shape: String,
+    #[serde(
+        rename = "artifactDigestShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    artifact_digest_shape: String,
+    #[serde(
+        rename = "artifactKindShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    artifact_kind_shape: String,
+    #[serde(rename = "baseRevShape", deserialize_with = "deserialize_itf_variant")]
+    base_rev_shape: String,
+    #[serde(
+        rename = "manifestPathShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    manifest_path_shape: String,
+    #[serde(
+        rename = "changedPathsDigestShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    changed_paths_digest_shape: String,
+    #[serde(rename = "reviewIdShape", deserialize_with = "deserialize_itf_variant")]
+    review_id_shape: String,
+    #[serde(
+        rename = "findingsDigestShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    findings_digest_shape: String,
+    #[serde(rename = "claimFencePositive")]
+    claim_fence_positive: bool,
+    #[serde(rename = "verifierShape", deserialize_with = "deserialize_itf_variant")]
+    verifier_shape: String,
+    #[serde(
+        rename = "verdictDigestShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    verdict_digest_shape: String,
+    #[serde(
+        rename = "sealDigestShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    seal_digest_shape: String,
+    #[serde(
+        rename = "recordedSessionShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    recorded_session_shape: String,
+    #[serde(rename = "flatFieldsPreserved")]
+    flat_fields_preserved: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -5861,6 +5943,194 @@ fn replay_conflict_record_shape_trace(trace: &ConflictRecordShapeItfTrace) -> Ve
     violations
 }
 
+fn landing_authorization_status_expected_reject(
+    state: &LandingAuthorizationStatusShapeState,
+) -> &'static str {
+    if !state.accepted_flag_present {
+        "AcceptedFlagMissing"
+    } else if !state.accepted_flag_true {
+        "AcceptedFlagFalse"
+    } else if state.queue_id_shape == "InvalidField" {
+        "QueueIdInvalid"
+    } else if state.artifact_digest_shape == "InvalidField" {
+        "ArtifactDigestInvalid"
+    } else if state.artifact_kind_shape == "MissingField" {
+        "ArtifactKindMissing"
+    } else if state.artifact_kind_shape == "InvalidField" {
+        "ArtifactKindInvalid"
+    } else if state.base_rev_shape == "InvalidField" {
+        "BaseRevInvalid"
+    } else if state.manifest_path_shape == "InvalidField" {
+        "ManifestPathInvalid"
+    } else if state.changed_paths_digest_shape == "InvalidField" {
+        "ChangedPathsDigestInvalid"
+    } else if state.review_id_shape == "InvalidField" {
+        "ReviewIdInvalid"
+    } else if state.findings_digest_shape == "InvalidField" {
+        "FindingsDigestInvalid"
+    } else if !state.claim_fence_positive {
+        "ClaimFenceInvalid"
+    } else if state.verifier_shape == "InvalidField" {
+        "VerifierInvalid"
+    } else if state.verdict_digest_shape == "InvalidField" {
+        "VerdictDigestInvalid"
+    } else if state.seal_digest_shape == "InvalidField" {
+        "SealDigestInvalid"
+    } else if state.recorded_session_shape == "InvalidField" {
+        "RecordedSessionInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn invalid_or_valid(shape: &str, valid: &'static str, invalid: &'static str) -> serde_json::Value {
+    match shape {
+        "ValidField" => serde_json::json!(valid),
+        "InvalidField" => serde_json::json!(invalid),
+        "MissingField" => serde_json::Value::Null,
+        other => panic!("unexpected landing authorization field shape: {other}"),
+    }
+}
+
+fn landing_authorization_status_json(
+    state: &LandingAuthorizationStatusShapeState,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    if state.accepted_flag_present {
+        map.insert(
+            "accepted".to_owned(),
+            serde_json::json!(state.accepted_flag_true),
+        );
+    }
+    map.insert(
+        "queue_id".to_owned(),
+        invalid_or_valid(&state.queue_id_shape, "queue-1", "queue id"),
+    );
+    map.insert(
+        "artifact_digest".to_owned(),
+        invalid_or_valid(&state.artifact_digest_shape, "blake3:artifact", "artifact"),
+    );
+    if state.artifact_kind_shape != "MissingField" {
+        map.insert(
+            "artifact_kind".to_owned(),
+            invalid_or_valid(&state.artifact_kind_shape, "patch_bundle", "bundle"),
+        );
+    }
+    map.insert(
+        "base_rev".to_owned(),
+        invalid_or_valid(&state.base_rev_shape, "main", " "),
+    );
+    map.insert(
+        "manifest_path".to_owned(),
+        invalid_or_valid(&state.manifest_path_shape, "manifest.json", " "),
+    );
+    map.insert(
+        "changed_paths_digest".to_owned(),
+        invalid_or_valid(&state.changed_paths_digest_shape, "blake3:paths", "paths"),
+    );
+    map.insert(
+        "review_id".to_owned(),
+        invalid_or_valid(&state.review_id_shape, "review-1", "review id"),
+    );
+    map.insert(
+        "findings_digest".to_owned(),
+        invalid_or_valid(&state.findings_digest_shape, "blake3:findings", "findings"),
+    );
+    map.insert(
+        "claim_fence_seq".to_owned(),
+        serde_json::json!(if state.claim_fence_positive { 7 } else { 0 }),
+    );
+    map.insert(
+        "verifier".to_owned(),
+        invalid_or_valid(&state.verifier_shape, "mutai-rs", " "),
+    );
+    map.insert(
+        "verdict_digest".to_owned(),
+        invalid_or_valid(&state.verdict_digest_shape, "blake3:verdict", "verdict"),
+    );
+    map.insert(
+        "seal_digest".to_owned(),
+        invalid_or_valid(&state.seal_digest_shape, "blake3:seal", "seal"),
+    );
+    map.insert(
+        "recorded_by_session".to_owned(),
+        invalid_or_valid(&state.recorded_session_shape, "session-1", "session token"),
+    );
+    serde_json::Value::Object(map)
+}
+
+fn landing_authorization_status_actual(
+    state: &LandingAuthorizationStatusShapeState,
+) -> Option<LandingAuthorizationStatus> {
+    serde_json::from_value::<LandingAuthorizationStatus>(landing_authorization_status_json(state))
+        .ok()
+}
+
+fn replay_landing_authorization_status_shape_trace(
+    trace: &LandingAuthorizationStatusShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: landing authorization status scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = landing_authorization_status_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: landing authorization status reject reason disagrees with flat fields"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: landing authorization status outcome disagrees with flat fields"
+            ));
+        }
+        let actual = landing_authorization_status_actual(state);
+        if actual.is_some() != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: landing authorization status parser disagrees with model"
+            ));
+        }
+        if let Some(status) = actual {
+            if !status.accepted_flag() {
+                violations.push(format!(
+                    "state[{index}]: accepted landing authorization status lost accepted flag"
+                ));
+            }
+            let value = serde_json::to_value(&status).expect("status should serialize");
+            if value["artifact_kind"] != "patch_bundle"
+                || value["base_rev"] != "main"
+                || value["manifest_path"] != "manifest.json"
+                || value["changed_paths_digest"] != "blake3:paths"
+                || status.claim_fence_seq().get() != 7
+                || status.recorded_by_session().as_str() != "session-1"
+            {
+                violations.push(format!(
+                    "state[{index}]: accepted landing authorization status did not preserve flat evidence fields"
+                ));
+            }
+            if state.accepted && !state.flat_fields_preserved {
+                violations.push(format!(
+                    "state[{index}]: accepted landing authorization model did not preserve flat fields"
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn conflict_resolution_expected_reject(state: &ConflictResolutionRequestState) -> &'static str {
     if !state.session_token_valid {
         "SessionTokenInvalid"
@@ -9423,6 +9693,12 @@ fn landing_authorization_request_shape_trace() -> LandingAuthorizationRequestSha
 }
 
 #[fixture]
+fn landing_authorization_status_shape_trace() -> LandingAuthorizationStatusShapeItfTrace {
+    serde_json::from_str(COVEY_LANDING_AUTHORIZATION_STATUS_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn landing_receipt_request_shape_trace() -> LandingReceiptRequestShapeItfTrace {
     serde_json::from_str(COVEY_LANDING_RECEIPT_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -10910,6 +11186,56 @@ fn covey_replays_quint_landing_authorization_request_shape_itf_trace(
         replay_landing_authorization_request_shape_trace(
             &landing_authorization_request_shape_trace
         ),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_landing_authorization_status_shape_itf_trace(
+    landing_authorization_status_shape_trace: LandingAuthorizationStatusShapeItfTrace,
+) {
+    assert!(
+        !landing_authorization_status_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidAccepted",
+        "MissingAcceptedFlag",
+        "RejectedFlag",
+        "InvalidQueueId",
+        "InvalidArtifactDigest",
+        "InvalidArtifactKind",
+        "MissingArtifactKind",
+        "InvalidBaseRev",
+        "InvalidManifestPath",
+        "InvalidChangedPathsDigest",
+        "InvalidReviewId",
+        "InvalidFindingsDigest",
+        "NonPositiveFence",
+        "InvalidVerifier",
+        "InvalidVerdictDigest",
+        "InvalidSealDigest",
+        "InvalidRecordedSession",
+    ] {
+        assert!(
+            landing_authorization_status_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        landing_authorization_status_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidAccepted"
+                && state.s.accepted
+                && state.s.flat_fields_preserved),
+        "fixture should cover accepted landing authorization status preservation"
+    );
+    assert_eq!(
+        replay_landing_authorization_status_shape_trace(&landing_authorization_status_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -12931,6 +13257,45 @@ fn covey_landing_authorization_request_shape_replay_reports_counterexample_shape
         vec![
             "state[0]: landing authorization reject reason does not match validation facts",
             "state[0]: landing authorization outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_landing_authorization_status_shape_replay_reports_counterexample_shape() {
+    let state = LandingAuthorizationStatusShapeState {
+        case_index: 3,
+        case: "RejectedFlag".to_owned(),
+        accepted_flag_present: true,
+        accepted_flag_true: false,
+        queue_id_shape: "ValidField".to_owned(),
+        artifact_digest_shape: "ValidField".to_owned(),
+        artifact_kind_shape: "ValidField".to_owned(),
+        base_rev_shape: "ValidField".to_owned(),
+        manifest_path_shape: "ValidField".to_owned(),
+        changed_paths_digest_shape: "ValidField".to_owned(),
+        review_id_shape: "ValidField".to_owned(),
+        findings_digest_shape: "ValidField".to_owned(),
+        claim_fence_positive: true,
+        verifier_shape: "ValidField".to_owned(),
+        verdict_digest_shape: "ValidField".to_owned(),
+        seal_digest_shape: "ValidField".to_owned(),
+        recorded_session_shape: "ValidField".to_owned(),
+        flat_fields_preserved: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = LandingAuthorizationStatusShapeItfTrace {
+        states: vec![LandingAuthorizationStatusShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_landing_authorization_status_shape_trace(&trace),
+        vec![
+            "state[0]: landing authorization status reject reason disagrees with flat fields",
+            "state[0]: landing authorization status outcome disagrees with flat fields",
         ]
     );
 }
