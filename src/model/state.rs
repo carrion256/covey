@@ -423,4 +423,6 @@ pub enum StateValue {
     Reservation(ReservationState),
     #[display("{_0}")]
     ReadyQueue(ReadyQueueState),
+    #[display("{_0}")]
+    ConflictResolution(ConflictResolutionState),
 }

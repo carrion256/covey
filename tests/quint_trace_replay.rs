@@ -3,6 +3,8 @@ use serde::Deserialize;
 
 const COVEY_REVIEW_FOLLOWUP_ITF: &str = include_str!("fixtures/quint/CoveyReviewFollowup.itf.json");
 const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
+const COVEY_QUEUE_RESERVATION_ITF: &str =
+    include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -22,6 +24,16 @@ struct CoreItfTrace {
 #[derive(Debug, Deserialize)]
 struct CoreItfState {
     s: CoreLifecycleState,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueueReservationItfTrace {
+    states: Vec<QueueReservationItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueueReservationItfState {
+    s: QueueReservationState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +59,41 @@ struct CoreLifecycleState {
     #[serde(rename = "applyVerified")]
     apply_verified: bool,
     terminal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueueReservationState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    queue: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    reservation: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    conflict: String,
+    #[serde(rename = "queueFence", deserialize_with = "deserialize_itf_variant")]
+    queue_fence: String,
+    #[serde(rename = "queueClaimLive")]
+    queue_claim_live: bool,
+    #[serde(rename = "queueLeaseLive")]
+    queue_lease_live: bool,
+    #[serde(rename = "applyVerified")]
+    apply_verified: bool,
+    #[serde(rename = "subtaskReady")]
+    subtask_ready: bool,
+    #[serde(rename = "artifactMatches")]
+    artifact_matches: bool,
+    #[serde(rename = "metaSchedulable")]
+    meta_schedulable: bool,
+    #[serde(rename = "reservationLeaseLive")]
+    reservation_lease_live: bool,
+    #[serde(rename = "overlapDetected")]
+    overlap_detected: bool,
+    #[serde(rename = "conflictBound")]
+    conflict_bound: bool,
+    #[serde(
+        rename = "conflictRankFloor",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    conflict_rank_floor: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +329,18 @@ fn core_queue_open(state: &CoreLifecycleState) -> bool {
     matches!(state.queue.as_str(), "Queued" | "QueueInFlight")
 }
 
+fn queue_reservation_terminal_queue(state: &QueueReservationState) -> bool {
+    matches!(state.queue.as_str(), "Applied" | "Superseded" | "Cancelled")
+}
+
+fn queue_reservation_conflict_rank(state: &QueueReservationState) -> i64 {
+    match state.conflict.as_str() {
+        "Acknowledged" => 1,
+        "Resolved" => 2,
+        _ => 0,
+    }
+}
+
 fn replay_core_lifecycle_trace(trace: &CoreItfTrace) -> Vec<String> {
     let mut violations = Vec::new();
     for (index, wrapped_state) in trace.states.iter().enumerate() {
@@ -348,6 +407,80 @@ fn replay_core_lifecycle_trace(trace: &CoreItfTrace) -> Vec<String> {
     violations
 }
 
+fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if state.queue_claim_live != (state.queue == "InFlight") {
+            violations.push(format!(
+                "state[{index}]: queue claim liveness disagrees with queue state"
+            ));
+        }
+        if state.queue == "InFlight" && (!state.queue_lease_live || state.queue_fence == "F0") {
+            violations.push(format!(
+                "state[{index}]: in-flight queue lacks live lease or issued fence"
+            ));
+        }
+        if queue_reservation_terminal_queue(state)
+            && (state.queue_claim_live || state.queue_lease_live)
+        {
+            violations.push(format!("state[{index}]: terminal queue has live claim"));
+        }
+        if state.queue == "Applied" && !state.apply_verified {
+            violations.push(format!(
+                "state[{index}]: applied queue lacks apply verification"
+            ));
+        }
+        if state.queue == "Queued" && (!state.subtask_ready || !state.artifact_matches) {
+            violations.push(format!(
+                "state[{index}]: queued item is not bound to a ready matching artifact"
+            ));
+        }
+        if state.queue == "InFlight"
+            && (!state.subtask_ready || !state.artifact_matches || !state.meta_schedulable)
+        {
+            violations.push(format!(
+                "state[{index}]: in-flight queue lacks ready artifact or schedulable meta-task"
+            ));
+        }
+        if state.reservation == "Active" && !state.reservation_lease_live {
+            violations.push(format!(
+                "state[{index}]: active reservation lacks live lease"
+            ));
+        }
+        if matches!(state.reservation.as_str(), "Released" | "Expired")
+            && state.reservation_lease_live
+        {
+            violations.push(format!(
+                "state[{index}]: terminal reservation has live lease"
+            ));
+        }
+        if matches!(state.conflict.as_str(), "Open" | "Acknowledged")
+            && !(state.reservation == "Active" && state.overlap_detected)
+        {
+            violations.push(format!(
+                "state[{index}]: unresolved conflict is not bound to active overlap"
+            ));
+        }
+        if state.conflict != "NoConflict" && !(state.overlap_detected && state.conflict_bound) {
+            violations.push(format!(
+                "state[{index}]: conflict exists without recorded overlap binding"
+            ));
+        }
+        if queue_reservation_conflict_rank(state) < state.conflict_rank_floor {
+            violations.push(format!(
+                "state[{index}]: conflict resolution moved below recorded floor"
+            ));
+        }
+        if state.conflict_rank_floor >= 2 && state.conflict != "Resolved" {
+            violations.push(format!(
+                "state[{index}]: resolved conflict floor was downgraded"
+            ));
+        }
+    }
+    violations
+}
+
 #[fixture]
 fn review_followup_trace() -> ItfTrace {
     serde_json::from_str(COVEY_REVIEW_FOLLOWUP_ITF).expect("fixture must be valid ITF JSON")
@@ -356,6 +489,11 @@ fn review_followup_trace() -> ItfTrace {
 #[fixture]
 fn core_lifecycle_trace() -> CoreItfTrace {
     serde_json::from_str(COVEY_CORE_LIFECYCLE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn queue_reservation_trace() -> QueueReservationItfTrace {
+    serde_json::from_str(COVEY_QUEUE_RESERVATION_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[rstest]
@@ -378,6 +516,20 @@ fn covey_replays_quint_core_lifecycle_itf_trace(core_lifecycle_trace: CoreItfTra
     );
     assert_eq!(
         replay_core_lifecycle_trace(&core_lifecycle_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_queue_reservation_itf_trace(
+    queue_reservation_trace: QueueReservationItfTrace,
+) {
+    assert!(
+        !queue_reservation_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert_eq!(
+        replay_queue_reservation_trace(&queue_reservation_trace),
         Vec::<String>::new()
     );
 }
@@ -439,6 +591,43 @@ fn covey_core_lifecycle_replay_reports_counterexample_shape() {
             "state[0]: ready queue exists without approved review",
             "state[0]: applied queue lacks apply verification",
             "state[0]: terminal marker disagrees with subtask state",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_queue_reservation_replay_reports_counterexample_shape() {
+    let state = QueueReservationState {
+        queue: "Applied".to_owned(),
+        reservation: "Released".to_owned(),
+        conflict: "Acknowledged".to_owned(),
+        queue_fence: "F0".to_owned(),
+        queue_claim_live: true,
+        queue_lease_live: true,
+        apply_verified: false,
+        subtask_ready: false,
+        artifact_matches: false,
+        meta_schedulable: false,
+        reservation_lease_live: true,
+        overlap_detected: false,
+        conflict_bound: false,
+        conflict_rank_floor: 2,
+    };
+    let trace = QueueReservationItfTrace {
+        states: vec![QueueReservationItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_queue_reservation_trace(&trace),
+        vec![
+            "state[0]: queue claim liveness disagrees with queue state",
+            "state[0]: terminal queue has live claim",
+            "state[0]: applied queue lacks apply verification",
+            "state[0]: terminal reservation has live lease",
+            "state[0]: unresolved conflict is not bound to active overlap",
+            "state[0]: conflict exists without recorded overlap binding",
+            "state[0]: conflict resolution moved below recorded floor",
+            "state[0]: resolved conflict floor was downgraded",
         ]
     );
 }

@@ -1045,17 +1045,41 @@ fn reservation_success_error_and_conflict_paths_use_public_contract(rig: Rig) {
 
     let conflicts = rig.covey.list_conflicts().expect("list conflicts");
     assert!(!conflicts.is_empty());
+    let conflict_id = conflicts[0].conflict_id().to_string();
     rig.covey
         .resolve_conflict(
             ResolveConflictReq::try_from_raw_parts(
                 orch.clone(),
-                conflicts[0].conflict_id(),
+                conflict_id.clone(),
                 ConflictResolutionState::Acknowledged,
                 id_key("resolve-conflict"),
             )
             .expect("valid conflict resolution request"),
         )
         .expect("resolve conflict");
+    rig.covey
+        .resolve_conflict(
+            ResolveConflictReq::try_from_raw_parts(
+                orch.clone(),
+                conflict_id.clone(),
+                ConflictResolutionState::Resolved,
+                id_key("resolve-conflict-final"),
+            )
+            .expect("valid conflict resolution request"),
+        )
+        .expect("resolve acknowledged conflict");
+    assert!(matches!(
+        rig.covey.resolve_conflict(
+            ResolveConflictReq::try_from_raw_parts(
+                orch.clone(),
+                conflict_id,
+                ConflictResolutionState::Acknowledged,
+                id_key("downgrade-resolved-conflict"),
+            )
+            .expect("valid conflict resolution request"),
+        ),
+        Err(CoveyError::IllegalTransition { .. })
+    ));
     assert!(matches!(
         rig.covey.resolve_conflict(
             ResolveConflictReq::try_from_raw_parts(

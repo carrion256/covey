@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::{
     Covey,
@@ -19,9 +19,9 @@ use crate::{
     schema::advance_lease_clock,
     store::append_session_event,
     validators::{
-        MAX_OBJECT_ID_LEN, MAX_PATH_LEN, ensure_generated_member_count, ensure_length,
-        ensure_positive_lease_duration, ensure_reservation_transition, ensure_subtask_exists,
-        require_role,
+        MAX_OBJECT_ID_LEN, MAX_PATH_LEN, ensure_conflict_resolution_transition,
+        ensure_generated_member_count, ensure_length, ensure_positive_lease_duration,
+        ensure_reservation_transition, ensure_subtask_exists, require_role,
     },
 };
 
@@ -391,15 +391,36 @@ impl Covey {
                 crate::model::TimestampMs::parse(now)?,
                 || {
                     require_role(tx, req.session_token(), &[SessionRole::Orchestrator])?;
+                    let conflict = tx
+                        .query_row(
+                            r#"
+                            SELECT conflict_id, object_type, object_id, conflict_kind, payload_json, detected_at, resolution_state
+                            FROM conflicts
+                            WHERE conflict_id = ?1
+                            "#,
+                            params![req.conflict_id()],
+                            deserialize_row::<Conflict>,
+                        )
+                        .optional()?
+                        .ok_or(CoveyError::ConflictNotFound)?;
+                    ensure_conflict_resolution_transition(
+                        conflict.resolution_state(),
+                        req.resolution_state(),
+                    )?;
                     let updated = tx.execute(
-                        "UPDATE conflicts SET resolution_state = ?2 WHERE conflict_id = ?1",
+                        "UPDATE conflicts SET resolution_state = ?2 WHERE conflict_id = ?1 AND resolution_state = ?3",
                         params![
                             req.conflict_id(),
-                            conflict_resolution_state_name(req.resolution_state())
+                            conflict_resolution_state_name(req.resolution_state()),
+                            conflict_resolution_state_name(conflict.resolution_state())
                         ],
                     )?;
                     if updated == 0 {
-                        return Err(CoveyError::ConflictNotFound);
+                        return Err(CoveyError::IllegalTransition {
+                            from: conflict.resolution_state().into(),
+                            to: req.resolution_state().into(),
+                            object: ObjectType::Conflict,
+                        });
                     }
                     append_session_event(
                         tx,

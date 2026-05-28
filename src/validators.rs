@@ -3,10 +3,10 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ArtifactDigest, Claim, ClaimState, FenceSeq, MetaTaskState, ObjectType, ReadyQueueState,
-        ReservationState, ReviewState, RuntimeAttestation, Session, SessionRole, SessionState,
-        SessionToken, StateValue, SubtaskId, SubtaskKind, SubtaskState, claim_state_name,
-        review_state_name, session_state_name,
+        ArtifactDigest, Claim, ClaimState, ConflictResolutionState, FenceSeq, MetaTaskState,
+        ObjectType, ReadyQueueState, ReservationState, ReviewState, RuntimeAttestation, Session,
+        SessionRole, SessionState, SessionToken, StateValue, SubtaskId, SubtaskKind, SubtaskState,
+        claim_state_name, review_state_name, session_state_name,
     },
     queries::{
         load_artifact_tx, load_claim_tx, load_meta_task_tx, load_runtime_attestation_tx,
@@ -457,8 +457,36 @@ pub(crate) fn ensure_ready_queue_transition(
             | (ReadyQueueState::InFlight, ReadyQueueState::Applied)
             | (ReadyQueueState::Queued, ReadyQueueState::Superseded)
             | (ReadyQueueState::InFlight, ReadyQueueState::Superseded)
+            | (ReadyQueueState::Queued, ReadyQueueState::Cancelled)
+            | (ReadyQueueState::InFlight, ReadyQueueState::Cancelled)
     );
     ensure_transition(from, to, ObjectType::ReadyQueue, allowed)
+}
+
+pub(crate) fn ensure_conflict_resolution_transition(
+    from: ConflictResolutionState,
+    to: ConflictResolutionState,
+) -> Result<()> {
+    let allowed = matches!(
+        (from, to),
+        (
+            ConflictResolutionState::Open,
+            ConflictResolutionState::Acknowledged
+        ) | (
+            ConflictResolutionState::Open,
+            ConflictResolutionState::Resolved
+        ) | (
+            ConflictResolutionState::Acknowledged,
+            ConflictResolutionState::Acknowledged
+        ) | (
+            ConflictResolutionState::Acknowledged,
+            ConflictResolutionState::Resolved
+        ) | (
+            ConflictResolutionState::Resolved,
+            ConflictResolutionState::Resolved
+        )
+    );
+    ensure_transition(from, to, ObjectType::Conflict, allowed)
 }
 
 pub(crate) fn ensure_reservation_transition(
@@ -493,17 +521,18 @@ pub(crate) fn ensure_transition(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_GENERATED_MEMBERS, MAX_IDEMPOTENCY_KEY_LEN, ensure_generated_member_count,
-        ensure_length, ensure_positive_lease_duration, ensure_ready_queue_transition,
-        ensure_reservation_transition, ensure_review_transition, ensure_subtask_transition,
-        ensure_transition, require_session_can_claim_kind, require_session_can_enqueue,
-        require_session_can_request_review, validate_idempotency_key,
+        MAX_GENERATED_MEMBERS, MAX_IDEMPOTENCY_KEY_LEN, ensure_conflict_resolution_transition,
+        ensure_generated_member_count, ensure_length, ensure_positive_lease_duration,
+        ensure_ready_queue_transition, ensure_reservation_transition, ensure_review_transition,
+        ensure_subtask_transition, ensure_transition, require_session_can_claim_kind,
+        require_session_can_enqueue, require_session_can_request_review, validate_idempotency_key,
     };
     use crate::{
         CoveyError,
         model::{
-            ClaimState, ObjectType, ReadyQueueState, ReservationState, Session, SessionRole,
-            SessionState, SessionToken, StateValue, SubtaskKind, SubtaskState, TimestampMs,
+            ClaimState, ConflictResolutionState, ObjectType, ReadyQueueState, ReservationState,
+            Session, SessionRole, SessionState, SessionToken, StateValue, SubtaskKind,
+            SubtaskState, TimestampMs,
         },
     };
 
@@ -786,8 +815,19 @@ mod tests {
                 .is_ok()
         );
         assert!(
+            ensure_ready_queue_transition(ReadyQueueState::Queued, ReadyQueueState::Cancelled)
+                .is_ok()
+        );
+        assert!(
             ensure_reservation_transition(ReservationState::Active, ReservationState::Released)
                 .is_ok()
+        );
+        assert!(
+            ensure_conflict_resolution_transition(
+                ConflictResolutionState::Open,
+                ConflictResolutionState::Resolved,
+            )
+            .is_ok()
         );
 
         let review_err = ensure_review_transition(
@@ -801,6 +841,11 @@ mod tests {
         let reservation_err =
             ensure_reservation_transition(ReservationState::Released, ReservationState::Expired)
                 .expect_err("released reservations are terminal");
+        let conflict_err = ensure_conflict_resolution_transition(
+            ConflictResolutionState::Resolved,
+            ConflictResolutionState::Acknowledged,
+        )
+        .expect_err("resolved conflicts cannot be downgraded");
 
         assert_eq!(
             review_err,
@@ -824,6 +869,14 @@ mod tests {
                 from: ReservationState::Released.into(),
                 to: ReservationState::Expired.into(),
                 object: ObjectType::Reservation,
+            }
+        );
+        assert_eq!(
+            conflict_err,
+            CoveyError::IllegalTransition {
+                from: ConflictResolutionState::Resolved.into(),
+                to: ConflictResolutionState::Acknowledged.into(),
+                object: ObjectType::Conflict,
             }
         );
     }
