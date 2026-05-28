@@ -10,6 +10,7 @@ const COVEY_QUEUE_RESERVATION_ITF: &str =
 const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
+const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -69,6 +70,16 @@ struct LandingReceiptItfTrace {
 #[derive(Debug, Deserialize)]
 struct LandingReceiptItfState {
     s: LandingReceiptState,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSpecImportItfTrace {
+    states: Vec<OpenSpecImportItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSpecImportItfState {
+    s: OpenSpecImportState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +226,42 @@ struct LandingReceiptState {
     receipt_created_by_last_attempt: bool,
     #[serde(rename = "divergentAttemptRejected")]
     divergent_attempt_rejected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSpecImportState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    store: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    source: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    mode: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    role: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    diff: String,
+    #[serde(
+        rename = "conflictReason",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    conflict_reason: String,
+    #[serde(rename = "applyResult", deserialize_with = "deserialize_itf_variant")]
+    apply_result: String,
+    #[serde(rename = "metaWritten")]
+    meta_written: bool,
+    #[serde(rename = "subtaskWritten")]
+    subtask_written: bool,
+    #[serde(rename = "provenanceWritten")]
+    provenance_written: bool,
+    #[serde(rename = "importEventWritten")]
+    import_event_written: bool,
+    #[serde(rename = "dependenciesWritten")]
+    dependencies_written: bool,
+    #[serde(rename = "claimLive")]
+    claim_live: bool,
+    #[serde(rename = "claimCreatedByImport")]
+    claim_created_by_import: bool,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -842,6 +889,144 @@ fn replay_landing_receipt_trace(trace: &LandingReceiptItfTrace) -> Vec<String> {
     violations
 }
 
+fn openspec_source_version(source: &str) -> i64 {
+    if source == "SourceV1" { 1 } else { 2 }
+}
+
+fn openspec_store_version(store: &str) -> i64 {
+    match store {
+        "ImportedV1" | "ActiveClaimV1" | "TerminalSameTitle" => 1,
+        "ImportedV2" => 2,
+        _ => 0,
+    }
+}
+
+fn openspec_store_has_imported_subtask(store: &str) -> bool {
+    matches!(
+        store,
+        "ImportedV1" | "ImportedV2" | "ActiveClaimV1" | "TerminalSameTitle"
+    )
+}
+
+fn openspec_expected_diff(state: &OpenSpecImportState) -> &'static str {
+    if state.store == "Empty" {
+        "CreateDiff"
+    } else if state.store == "DifferentMetaTask"
+        || (state.store == "ActiveClaimV1" && state.source == "SourceV2")
+    {
+        "ConflictDiff"
+    } else if openspec_store_version(&state.store) == openspec_source_version(&state.source) {
+        "UnchangedDiff"
+    } else {
+        "UpdateDiff"
+    }
+}
+
+fn openspec_expected_conflict(state: &OpenSpecImportState) -> &'static str {
+    if state.store == "DifferentMetaTask" {
+        "ExistingSubtaskDifferentMetaTask"
+    } else if state.store == "ActiveClaimV1" && state.source == "SourceV2" {
+        "ActiveClaimChangedSource"
+    } else {
+        "NoConflict"
+    }
+}
+
+fn replay_openspec_import_trace(trace: &OpenSpecImportItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if !state.evaluated {
+            continue;
+        }
+        let any_write = state.meta_written
+            || state.subtask_written
+            || state.provenance_written
+            || state.import_event_written
+            || state.dependencies_written;
+        if state.diff != openspec_expected_diff(state) {
+            violations.push(format!(
+                "{prefix}: OpenSpec diff does not match store/source"
+            ));
+        }
+        if state.conflict_reason != openspec_expected_conflict(state) {
+            violations.push(format!(
+                "{prefix}: OpenSpec conflict reason does not match store/source"
+            ));
+        }
+        if state.mode == "DryRun" && any_write {
+            violations.push(format!("{prefix}: dry-run OpenSpec import wrote state"));
+        }
+        if state.apply_result == "Applied"
+            && !(state.mode == "Write" && state.role == "Orchestrator")
+        {
+            violations.push(format!(
+                "{prefix}: OpenSpec write applied without orchestrator role"
+            ));
+        }
+        if state.conflict_reason != "NoConflict"
+            && state.mode == "Write"
+            && state.role == "Orchestrator"
+            && !(state.apply_result == "Rejected" && !any_write)
+        {
+            violations.push(format!(
+                "{prefix}: conflicting OpenSpec import partially applied"
+            ));
+        }
+        if state.store == "ActiveClaimV1"
+            && state.source == "SourceV2"
+            && !(state.diff == "ConflictDiff"
+                && state.conflict_reason == "ActiveClaimChangedSource"
+                && state.claim_live)
+        {
+            violations.push(format!(
+                "{prefix}: active claimed OpenSpec task update did not conflict"
+            ));
+        }
+        if state.store == "DifferentMetaTask"
+            && !(state.diff == "ConflictDiff"
+                && state.conflict_reason == "ExistingSubtaskDifferentMetaTask")
+        {
+            violations.push(format!(
+                "{prefix}: imported OpenSpec subtask in different meta-task did not conflict"
+            ));
+        }
+        if (state.provenance_written || state.import_event_written)
+            && !(state.apply_result == "Applied"
+                && matches!(state.diff.as_str(), "CreateDiff" | "UpdateDiff"))
+        {
+            violations.push(format!(
+                "{prefix}: OpenSpec provenance/event written without applied diff"
+            ));
+        }
+        if state.dependencies_written
+            && !(state.apply_result == "Applied" && state.conflict_reason == "NoConflict")
+        {
+            violations.push(format!(
+                "{prefix}: OpenSpec dependencies written without applied conflict-free diff"
+            ));
+        }
+        if state.diff == "UnchangedDiff" && any_write {
+            violations.push(format!("{prefix}: unchanged OpenSpec import wrote state"));
+        }
+        if state.diff == "CreateDiff" && openspec_store_has_imported_subtask(&state.store) {
+            violations.push(format!(
+                "{prefix}: OpenSpec import created over imported subtask"
+            ));
+        }
+        if state.diff == "UpdateDiff" && state.claim_live {
+            violations.push(format!(
+                "{prefix}: OpenSpec import updated a live-claimed task"
+            ));
+        }
+        if state.claim_created_by_import {
+            violations.push(format!("{prefix}: OpenSpec import created a live claim"));
+        }
+    }
+    violations
+}
+
 #[fixture]
 fn review_followup_trace() -> ItfTrace {
     serde_json::from_str(COVEY_REVIEW_FOLLOWUP_ITF).expect("fixture must be valid ITF JSON")
@@ -870,6 +1055,11 @@ fn session_meta_task_trace() -> SessionMetaTaskItfTrace {
 #[fixture]
 fn landing_receipt_trace() -> LandingReceiptItfTrace {
     serde_json::from_str(COVEY_LANDING_RECEIPT_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn openspec_import_trace() -> OpenSpecImportItfTrace {
+    serde_json::from_str(COVEY_OPENSPEC_IMPORT_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[rstest]
@@ -967,6 +1157,32 @@ fn covey_replays_quint_landing_receipt_itf_trace(landing_receipt_trace: LandingR
     );
     assert_eq!(
         replay_landing_receipt_trace(&landing_receipt_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_openspec_import_itf_trace(openspec_import_trace: OpenSpecImportItfTrace) {
+    assert!(
+        !openspec_import_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert!(
+        openspec_import_trace
+            .states
+            .iter()
+            .any(|state| state.s.mode == "DryRun"),
+        "fixture should cover dry-run import"
+    );
+    assert!(
+        openspec_import_trace
+            .states
+            .iter()
+            .any(|state| state.s.conflict_reason == "ActiveClaimChangedSource"),
+        "fixture should cover active-claim source-change conflict"
+    );
+    assert_eq!(
+        replay_openspec_import_trace(&openspec_import_trace),
         Vec::<String>::new()
     );
 }
@@ -1160,6 +1376,43 @@ fn covey_landing_receipt_replay_reports_counterexample_shape() {
             "state[0]: divergent landing receipt attempt was not rejected",
             "state[0]: rejected landing receipt attempt created receipt",
             "state[0]: non-accepted attempt marked receipt creation",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_openspec_import_replay_reports_counterexample_shape() {
+    let state = OpenSpecImportState {
+        store: "ActiveClaimV1".to_owned(),
+        source: "SourceV2".to_owned(),
+        mode: "DryRun".to_owned(),
+        role: "Executor".to_owned(),
+        diff: "UpdateDiff".to_owned(),
+        conflict_reason: "NoConflict".to_owned(),
+        apply_result: "Applied".to_owned(),
+        meta_written: true,
+        subtask_written: true,
+        provenance_written: true,
+        import_event_written: true,
+        dependencies_written: true,
+        claim_live: true,
+        claim_created_by_import: true,
+        evaluated: true,
+    };
+    let trace = OpenSpecImportItfTrace {
+        states: vec![OpenSpecImportItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_openspec_import_trace(&trace),
+        vec![
+            "state[0]: OpenSpec diff does not match store/source",
+            "state[0]: OpenSpec conflict reason does not match store/source",
+            "state[0]: dry-run OpenSpec import wrote state",
+            "state[0]: OpenSpec write applied without orchestrator role",
+            "state[0]: active claimed OpenSpec task update did not conflict",
+            "state[0]: OpenSpec import updated a live-claimed task",
+            "state[0]: OpenSpec import created a live claim",
         ]
     );
 }
