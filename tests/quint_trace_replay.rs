@@ -12,6 +12,8 @@ const COVEY_SESSION_META_TASK_ITF: &str =
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
+const COVEY_CLAIM_DEPENDENCY_GATE_ITF: &str =
+    include_str!("fixtures/quint/CoveyClaimDependencyGate.itf.json");
 const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
     include_str!("fixtures/quint/CoveyMutationIdempotency.itf.json");
 const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
@@ -94,6 +96,16 @@ struct BdImportItfTrace {
 #[derive(Debug, Deserialize)]
 struct BdImportItfState {
     s: BdImportState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimDependencyGateItfTrace {
+    states: Vec<ClaimDependencyGateItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimDependencyGateItfState {
+    s: ClaimDependencyGateState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +347,41 @@ struct BdImportState {
     claim_created: bool,
     #[serde(rename = "sessionActiveSubtaskSet")]
     session_active_subtask_set: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimDependencyGateState {
+    #[serde(rename = "path", deserialize_with = "deserialize_itf_variant")]
+    claim_path: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    role: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    session: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    meta: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    kind: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    candidate: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    dependency: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    decision: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    #[serde(rename = "dependencySatisfied")]
+    dependency_satisfied: bool,
+    #[serde(rename = "candidateSelected")]
+    candidate_selected: bool,
+    #[serde(rename = "claimCreated")]
+    claim_created: bool,
+    #[serde(rename = "subtaskClaimed")]
+    subtask_claimed: bool,
+    #[serde(rename = "sessionActiveSubtaskSet")]
+    session_active_subtask_set: bool,
+    #[serde(rename = "fenceIssued")]
+    fence_issued: bool,
     evaluated: bool,
 }
 
@@ -1372,6 +1419,172 @@ fn replay_bd_import_trace(trace: &BdImportItfTrace) -> Vec<String> {
     violations
 }
 
+fn claim_dependency_role_can_claim(role: &str, kind: &str) -> bool {
+    matches!((role, kind), ("Executor", "Work") | ("Reviewer", "Review"))
+}
+
+fn claim_dependency_meta_claimable(meta: &str) -> bool {
+    matches!(meta, "MetaActive" | "MetaPlanning")
+}
+
+fn claim_dependency_satisfied(kind: &str, dependency: &str) -> bool {
+    if kind == "Review" {
+        return true;
+    }
+    matches!(
+        dependency,
+        "NoDependency"
+            | "DepApproved"
+            | "DepReadyForApply"
+            | "DepApplied"
+            | "DepDecided"
+            | "DepChangesRequestedFollowupApproved"
+            | "DepChangesRequestedFollowupReadyForApply"
+            | "DepChangesRequestedFollowupApplied"
+            | "DepChangesRequestedFollowupDecided"
+    )
+}
+
+fn claim_dependency_expected_reject(state: &ClaimDependencyGateState) -> &'static str {
+    if state.session == "SessionInactive" {
+        "SessionUnavailable"
+    } else if state.session == "SessionOccupied" {
+        "SessionAlreadyOccupied"
+    } else if !claim_dependency_role_can_claim(&state.role, &state.kind) {
+        "WrongRole"
+    } else if !claim_dependency_meta_claimable(&state.meta) {
+        "MetaUnavailable"
+    } else if state.candidate != "CandidateAvailable" {
+        "IllegalTransition"
+    } else if !claim_dependency_satisfied(&state.kind, &state.dependency) {
+        "DependencyUnsatisfied"
+    } else {
+        "NoReject"
+    }
+}
+
+fn claim_dependency_expected_decision(state: &ClaimDependencyGateState) -> &'static str {
+    let reject = claim_dependency_expected_reject(state);
+    if reject == "NoReject" {
+        "ClaimCreated"
+    } else if state.claim_path == "ClaimNext"
+        && matches!(
+            reject,
+            "MetaUnavailable" | "IllegalTransition" | "DependencyUnsatisfied"
+        )
+    {
+        "NoClaimableCandidate"
+    } else {
+        "Rejected"
+    }
+}
+
+fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if !state.evaluated {
+            continue;
+        }
+        let expected_decision = claim_dependency_expected_decision(state);
+        if state.decision != expected_decision {
+            violations.push(format!(
+                "{prefix}: claim dependency decision does not match inputs"
+            ));
+        }
+        let expected_dependency = claim_dependency_satisfied(&state.kind, &state.dependency);
+        if state.dependency_satisfied != expected_dependency {
+            violations.push(format!(
+                "{prefix}: dependency satisfaction marker does not match state"
+            ));
+        }
+        if state.claim_created && state.kind == "Work" && !state.dependency_satisfied {
+            violations.push(format!(
+                "{prefix}: work claim ignored unsatisfied dependency"
+            ));
+        }
+        if state.kind == "Work" && state.dependency == "DepOpen" && state.claim_created {
+            violations.push(format!("{prefix}: open dependency allowed work claim"));
+        }
+        if state.kind == "Work"
+            && matches!(
+                state.dependency.as_str(),
+                "DepChangesRequestedNoFollowup" | "DepChangesRequestedFollowupAvailable"
+            )
+            && state.claim_created
+        {
+            violations.push(format!(
+                "{prefix}: changes-requested dependency without terminal follow-up allowed claim"
+            ));
+        }
+        if state.kind == "Work"
+            && matches!(
+                state.dependency.as_str(),
+                "DepChangesRequestedFollowupApproved"
+                    | "DepChangesRequestedFollowupReadyForApply"
+                    | "DepChangesRequestedFollowupApplied"
+                    | "DepChangesRequestedFollowupDecided"
+            )
+            && !state.dependency_satisfied
+        {
+            violations.push(format!(
+                "{prefix}: terminal follow-up did not satisfy source dependency"
+            ));
+        }
+        if state.kind == "Work"
+            && matches!(
+                state.dependency.as_str(),
+                "DepApproved" | "DepReadyForApply" | "DepApplied" | "DepDecided"
+            )
+            && !state.dependency_satisfied
+        {
+            violations.push(format!(
+                "{prefix}: terminal dependency state did not satisfy dependency"
+            ));
+        }
+        if !state.claim_created
+            && (state.subtask_claimed || state.session_active_subtask_set || state.fence_issued)
+        {
+            violations.push(format!("{prefix}: blocked claim mutated claim state"));
+        }
+        if state.claim_created
+            && !(state.subtask_claimed && state.session_active_subtask_set && state.fence_issued)
+        {
+            violations.push(format!(
+                "{prefix}: created claim lacks subtask/session/fence binding"
+            ));
+        }
+        if state.claim_path == "ClaimNext"
+            && state.decision == "NoClaimableCandidate"
+            && state.claim_created
+        {
+            violations.push(format!("{prefix}: claim-next created blocked candidate"));
+        }
+        if state.claim_path == "TargetedClaim"
+            && claim_dependency_expected_reject(state) != "NoReject"
+            && state.decision != "Rejected"
+        {
+            violations.push(format!(
+                "{prefix}: targeted blocked candidate did not reject"
+            ));
+        }
+        if !claim_dependency_role_can_claim(&state.role, &state.kind) && state.claim_created {
+            violations.push(format!("{prefix}: wrong role created claim"));
+        }
+        if state.session == "SessionOccupied" && state.claim_created {
+            violations.push(format!("{prefix}: occupied session created claim"));
+        }
+        if !claim_dependency_meta_claimable(&state.meta) && state.claim_created {
+            violations.push(format!("{prefix}: terminal meta created claim"));
+        }
+        if state.candidate_selected && state.candidate == "NoCandidate" {
+            violations.push(format!("{prefix}: selected absent candidate"));
+        }
+    }
+    violations
+}
+
 fn mutation_idempotency_valid_key(key: &str) -> bool {
     matches!(key, "Key1" | "Key2")
 }
@@ -1703,6 +1916,11 @@ fn bd_import_trace() -> BdImportItfTrace {
 }
 
 #[fixture]
+fn claim_dependency_gate_trace() -> ClaimDependencyGateItfTrace {
+    serde_json::from_str(COVEY_CLAIM_DEPENDENCY_GATE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn mutation_idempotency_trace() -> MutationIdempotencyItfTrace {
     serde_json::from_str(COVEY_MUTATION_IDEMPOTENCY_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -1875,6 +2093,60 @@ fn covey_replays_quint_bd_import_itf_trace(bd_import_trace: BdImportItfTrace) {
     );
     assert_eq!(
         replay_bd_import_trace(&bd_import_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_claim_dependency_gate_itf_trace(
+    claim_dependency_gate_trace: ClaimDependencyGateItfTrace,
+) {
+    assert!(
+        !claim_dependency_gate_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "DepOpen",
+        "DepApplied",
+        "DepChangesRequestedNoFollowup",
+        "DepChangesRequestedFollowupAvailable",
+        "DepChangesRequestedFollowupApplied",
+        "DepChangesRequestedFollowupDecided",
+    ] {
+        assert!(
+            claim_dependency_gate_trace
+                .states
+                .iter()
+                .any(|state| state.s.dependency == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        claim_dependency_gate_trace.states.iter().any(|state| {
+            state.s.claim_path == "TargetedClaim"
+                && state.s.decision == "Rejected"
+                && state.s.reject_reason == "DependencyUnsatisfied"
+        }),
+        "fixture should cover targeted dependency rejection"
+    );
+    assert!(
+        claim_dependency_gate_trace
+            .states
+            .iter()
+            .any(|state| state.s.role == "Reviewer"
+                && state.s.kind == "Review"
+                && state.s.claim_created),
+        "fixture should cover reviewer review claims"
+    );
+    assert!(
+        claim_dependency_gate_trace
+            .states
+            .iter()
+            .any(|state| state.s.decision == "NoClaimableCandidate"),
+        "fixture should cover claim-next no-candidate result"
+    );
+    assert_eq!(
+        replay_claim_dependency_gate_trace(&claim_dependency_gate_trace),
         Vec::<String>::new()
     );
 }
@@ -2222,6 +2494,45 @@ fn covey_bd_import_replay_reports_counterexample_shape() {
             "state[0]: imported BD rows did not become available work subtasks",
             "state[0]: BD import created live claim state",
             "state[0]: BD import counts do not match source eligibility",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_claim_dependency_gate_replay_reports_counterexample_shape() {
+    let state = ClaimDependencyGateState {
+        claim_path: "TargetedClaim".to_owned(),
+        role: "Executor".to_owned(),
+        session: "SessionOccupied".to_owned(),
+        meta: "MetaCompleted".to_owned(),
+        kind: "Work".to_owned(),
+        candidate: "NoCandidate".to_owned(),
+        dependency: "DepOpen".to_owned(),
+        decision: "ClaimCreated".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        dependency_satisfied: true,
+        candidate_selected: true,
+        claim_created: true,
+        subtask_claimed: false,
+        session_active_subtask_set: false,
+        fence_issued: false,
+        evaluated: true,
+    };
+    let trace = ClaimDependencyGateItfTrace {
+        states: vec![ClaimDependencyGateItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_claim_dependency_gate_trace(&trace),
+        vec![
+            "state[0]: claim dependency decision does not match inputs",
+            "state[0]: dependency satisfaction marker does not match state",
+            "state[0]: open dependency allowed work claim",
+            "state[0]: created claim lacks subtask/session/fence binding",
+            "state[0]: targeted blocked candidate did not reject",
+            "state[0]: occupied session created claim",
+            "state[0]: terminal meta created claim",
+            "state[0]: selected absent candidate",
         ]
     );
 }
