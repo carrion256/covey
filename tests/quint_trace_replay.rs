@@ -2,6 +2,8 @@ use rstest::{fixture, rstest};
 use serde::Deserialize;
 
 const COVEY_REVIEW_FOLLOWUP_ITF: &str = include_str!("fixtures/quint/CoveyReviewFollowup.itf.json");
+const COVEY_REVIEW_CLAIM_RECLAIM_ITF: &str =
+    include_str!("fixtures/quint/CoveyReviewClaimReclaim.itf.json");
 const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
@@ -16,6 +18,16 @@ struct ItfTrace {
 #[derive(Debug, Deserialize)]
 struct ItfState {
     m: ReviewFollowupState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewClaimReclaimItfTrace {
+    states: Vec<ReviewClaimReclaimItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewClaimReclaimItfState {
+    s: ReviewClaimReclaimState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +164,30 @@ struct ReviewFollowupState {
     r1: bool,
     r2: bool,
     r3: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewClaimReclaimState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    review: String,
+    #[serde(rename = "reviewSubtask", deserialize_with = "deserialize_itf_variant")]
+    review_subtask: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    claim: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    owner: String,
+    #[serde(rename = "currentFence", deserialize_with = "deserialize_itf_bigint")]
+    current_fence: i64,
+    #[serde(rename = "expiredFence", deserialize_with = "deserialize_itf_bigint")]
+    expired_fence: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    verdict: String,
+    #[serde(rename = "artifactCurrent")]
+    artifact_current: bool,
+    #[serde(rename = "followupAvailable")]
+    followup_available: bool,
+    #[serde(rename = "staleDecisionRejected")]
+    stale_decision_rejected: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +372,90 @@ fn replay_review_followup_trace(trace: &ItfTrace) -> Vec<String> {
             violations.push(format!(
                 "state[{index}]: active block {} is not claimed or in progress",
                 active.as_str()
+            ));
+        }
+    }
+    violations
+}
+
+fn replay_review_claim_reclaim_trace(trace: &ReviewClaimReclaimItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if state.claim == "Held" && state.owner == "NoReviewer" {
+            violations.push(format!(
+                "state[{index}]: held review claim has no reviewer owner"
+            ));
+        }
+        if state.claim != "Held" && state.owner != "NoReviewer" {
+            violations.push(format!(
+                "state[{index}]: non-held review claim retained owner"
+            ));
+        }
+        if state.review == "InProgress"
+            && !(state.review_subtask == "SubtaskInProgress" && state.claim == "Held")
+        {
+            violations.push(format!(
+                "state[{index}]: in-progress review lacks held started review subtask"
+            ));
+        }
+        if state.claim == "Expired"
+            && state.review == "Requested"
+            && state.review_subtask != "Available"
+        {
+            violations.push(format!(
+                "state[{index}]: expired review claim did not reset to claimable"
+            ));
+        }
+        if state.review == "Decided"
+            && !(state.review_subtask == "SubtaskDecided"
+                && state.claim == "Released"
+                && state.owner == "NoReviewer")
+        {
+            violations.push(format!(
+                "state[{index}]: decided review retained live claim state"
+            ));
+        }
+        if state.claim == "Expired" && state.review == "Decided" {
+            violations.push(format!("state[{index}]: expired review claim decided review"));
+        }
+        if state.stale_decision_rejected
+            && !(state.review == "Requested" && state.review_subtask == "Available")
+        {
+            violations.push(format!(
+                "state[{index}]: stale decision rejection mutated review state"
+            ));
+        }
+        if matches!(state.verdict.as_str(), "ChangesRequested" | "Blocked")
+            && !state.followup_available
+        {
+            violations.push(format!(
+                "state[{index}]: non-approval review decision lacks follow-up"
+            ));
+        }
+        if state.verdict == "Approve" && state.followup_available {
+            violations.push(format!(
+                "state[{index}]: approved review unexpectedly created follow-up"
+            ));
+        }
+        if state.review == "Decided" && state.verdict == "NoVerdict" {
+            violations.push(format!("state[{index}]: decided review lacks verdict"));
+        }
+        if state.review == "Superseded"
+            && (state.verdict != "NoVerdict" || state.followup_available)
+        {
+            violations.push(format!(
+                "state[{index}]: superseded review decided or created follow-up"
+            ));
+        }
+        if !state.artifact_current && state.review == "Decided" {
+            violations.push(format!(
+                "state[{index}]: stale artifact review was decided"
+            ));
+        }
+        if state.claim == "Held" && state.current_fence <= state.expired_fence {
+            violations.push(format!(
+                "state[{index}]: reclaimed held review claim did not advance fence"
             ));
         }
     }
@@ -588,6 +708,12 @@ fn review_followup_trace() -> ItfTrace {
 }
 
 #[fixture]
+fn review_claim_reclaim_trace() -> ReviewClaimReclaimItfTrace {
+    serde_json::from_str(COVEY_REVIEW_CLAIM_RECLAIM_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn core_lifecycle_trace() -> CoreItfTrace {
     serde_json::from_str(COVEY_CORE_LIFECYCLE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -610,6 +736,20 @@ fn covey_replays_quint_review_followup_itf_trace(review_followup_trace: ItfTrace
     );
     assert_eq!(
         replay_review_followup_trace(&review_followup_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_review_claim_reclaim_itf_trace(
+    review_claim_reclaim_trace: ReviewClaimReclaimItfTrace,
+) {
+    assert!(
+        !review_claim_reclaim_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert_eq!(
+        replay_review_claim_reclaim_trace(&review_claim_reclaim_trace),
         Vec::<String>::new()
     );
 }
@@ -680,6 +820,37 @@ fn covey_replay_reports_quint_counterexample_shape() {
     assert_eq!(
         replay_review_followup_trace(&trace),
         vec!["state[0]: idle observed while work or repair exists"]
+    );
+}
+
+#[rstest]
+fn covey_review_claim_reclaim_replay_reports_counterexample_shape() {
+    let state = ReviewClaimReclaimState {
+        review: "Decided".to_owned(),
+        review_subtask: "Available".to_owned(),
+        claim: "Expired".to_owned(),
+        owner: "ReviewerA".to_owned(),
+        current_fence: 1,
+        expired_fence: 1,
+        verdict: "ChangesRequested".to_owned(),
+        artifact_current: false,
+        followup_available: false,
+        stale_decision_rejected: true,
+    };
+    let trace = ReviewClaimReclaimItfTrace {
+        states: vec![ReviewClaimReclaimItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_review_claim_reclaim_trace(&trace),
+        vec![
+            "state[0]: non-held review claim retained owner",
+            "state[0]: decided review retained live claim state",
+            "state[0]: expired review claim decided review",
+            "state[0]: stale decision rejection mutated review state",
+            "state[0]: non-approval review decision lacks follow-up",
+            "state[0]: stale artifact review was decided",
+        ]
     );
 }
 
