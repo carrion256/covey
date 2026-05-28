@@ -11,6 +11,8 @@ const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
+const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
+    include_str!("fixtures/quint/CoveyMutationIdempotency.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -80,6 +82,16 @@ struct OpenSpecImportItfTrace {
 #[derive(Debug, Deserialize)]
 struct OpenSpecImportItfState {
     s: OpenSpecImportState,
+}
+
+#[derive(Debug, Deserialize)]
+struct MutationIdempotencyItfTrace {
+    states: Vec<MutationIdempotencyItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MutationIdempotencyItfState {
+    s: MutationIdempotencyState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +274,64 @@ struct OpenSpecImportState {
     #[serde(rename = "claimCreatedByImport")]
     claim_created_by_import: bool,
     evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MutationIdempotencyRecordState {
+    present: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    actor: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    operation: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    key: String,
+    #[serde(rename = "requestHash", deserialize_with = "deserialize_itf_variant")]
+    request_hash: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    response: String,
+    #[serde(rename = "responseJsonValid")]
+    response_json_valid: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MutationIdempotencyState {
+    r0: MutationIdempotencyRecordState,
+    r1: MutationIdempotencyRecordState,
+    #[serde(rename = "lastActor", deserialize_with = "deserialize_itf_variant")]
+    last_actor: String,
+    #[serde(rename = "lastOperation", deserialize_with = "deserialize_itf_variant")]
+    last_operation: String,
+    #[serde(rename = "lastKey", deserialize_with = "deserialize_itf_variant")]
+    last_key: String,
+    #[serde(
+        rename = "lastRequestHash",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    last_request_hash: String,
+    #[serde(rename = "lastResponse", deserialize_with = "deserialize_itf_variant")]
+    last_response: String,
+    #[serde(rename = "lastClosureOk")]
+    last_closure_ok: bool,
+    #[serde(rename = "lastSerializeOk")]
+    last_serialize_ok: bool,
+    #[serde(rename = "lastOutcome", deserialize_with = "deserialize_itf_variant")]
+    last_outcome: String,
+    #[serde(rename = "sideEffects", deserialize_with = "deserialize_itf_bigint")]
+    side_effects: i64,
+    #[serde(rename = "recordWrites", deserialize_with = "deserialize_itf_bigint")]
+    record_writes: i64,
+    #[serde(
+        rename = "lastSideEffectDelta",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    last_side_effect_delta: i64,
+    #[serde(
+        rename = "lastRecordWriteDelta",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    last_record_write_delta: i64,
+    #[serde(rename = "identityMatchedBeforeAttempt")]
+    identity_matched_before_attempt: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1027,6 +1097,145 @@ fn replay_openspec_import_trace(trace: &OpenSpecImportItfTrace) -> Vec<String> {
     violations
 }
 
+fn mutation_idempotency_valid_key(key: &str) -> bool {
+    matches!(key, "Key1" | "Key2")
+}
+
+fn mutation_idempotency_same_identity(
+    record: &MutationIdempotencyRecordState,
+    actor: &str,
+    operation: &str,
+    key: &str,
+) -> bool {
+    record.present && record.actor == actor && record.operation == operation && record.key == key
+}
+
+fn mutation_idempotency_matching_record<'a>(
+    state: &'a MutationIdempotencyState,
+    actor: &str,
+    operation: &str,
+    key: &str,
+) -> Option<&'a MutationIdempotencyRecordState> {
+    if mutation_idempotency_same_identity(&state.r0, actor, operation, key) {
+        Some(&state.r0)
+    } else if mutation_idempotency_same_identity(&state.r1, actor, operation, key) {
+        Some(&state.r1)
+    } else {
+        None
+    }
+}
+
+fn replay_mutation_idempotency_trace(trace: &MutationIdempotencyItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous: Option<&MutationIdempotencyState> = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        let matching = mutation_idempotency_matching_record(
+            state,
+            &state.last_actor,
+            &state.last_operation,
+            &state.last_key,
+        );
+
+        if let Some(previous_state) = previous {
+            if state.side_effects < previous_state.side_effects {
+                violations.push(format!("{prefix}: side effect count moved backward"));
+            }
+            if state.record_writes < previous_state.record_writes {
+                violations.push(format!("{prefix}: idempotency record count moved backward"));
+            }
+            if state.side_effects - previous_state.side_effects != state.last_side_effect_delta {
+                violations.push(format!(
+                    "{prefix}: side effect delta disagrees with previous state"
+                ));
+            }
+            if state.record_writes - previous_state.record_writes != state.last_record_write_delta {
+                violations.push(format!(
+                    "{prefix}: record write delta disagrees with previous state"
+                ));
+            }
+        }
+
+        if state.r0.present
+            && state.r1.present
+            && mutation_idempotency_same_identity(
+                &state.r0,
+                &state.r1.actor,
+                &state.r1.operation,
+                &state.r1.key,
+            )
+        {
+            violations.push(format!(
+                "{prefix}: duplicate idempotency records share one actor/operation/key"
+            ));
+        }
+
+        if state.last_outcome == "InvalidKey"
+            && (state.last_side_effect_delta != 0 || state.last_record_write_delta != 0)
+        {
+            violations.push(format!("{prefix}: invalid key ran mutation side effects"));
+        }
+        if state.last_outcome == "Created"
+            && !(mutation_idempotency_valid_key(&state.last_key)
+                && state.last_closure_ok
+                && state.last_serialize_ok
+                && !state.identity_matched_before_attempt
+                && state.last_side_effect_delta == 1
+                && state.last_record_write_delta == 1)
+        {
+            violations.push(format!(
+                "{prefix}: idempotency record was created without one successful mutation"
+            ));
+        }
+        if state.last_outcome == "Replayed" {
+            match matching {
+                Some(record)
+                    if state.identity_matched_before_attempt
+                        && record.request_hash == state.last_request_hash
+                        && record.response == state.last_response
+                        && state.last_side_effect_delta == 0
+                        && state.last_record_write_delta == 0 => {}
+                _ => violations.push(format!(
+                    "{prefix}: idempotent replay did not return stored response without side effects"
+                )),
+            }
+        }
+        if state.last_outcome == "Conflict"
+            && !(state.identity_matched_before_attempt
+                && matching.is_some()
+                && state.last_side_effect_delta == 0
+                && state.last_record_write_delta == 0)
+        {
+            violations.push(format!(
+                "{prefix}: request drift conflict mutated state or crossed namespace"
+            ));
+        }
+        if matches!(
+            state.last_outcome.as_str(),
+            "ClosureFailed" | "SerializeFailed" | "InvalidKey" | "Conflict" | "CapacityFull"
+        ) && (state.last_side_effect_delta != 0 || state.last_record_write_delta != 0)
+        {
+            violations.push(format!("{prefix}: failed idempotent mutation wrote state"));
+        }
+        if state.last_outcome == "DeserializeFailed" {
+            match matching {
+                Some(record)
+                    if state.identity_matched_before_attempt
+                        && !record.response_json_valid
+                        && state.last_side_effect_delta == 0
+                        && state.last_record_write_delta == 0 => {}
+                _ => violations.push(format!(
+                    "{prefix}: stored-response deserialize failure reran mutation or lacked record"
+                )),
+            }
+        }
+
+        previous = Some(state);
+    }
+    violations
+}
+
 #[fixture]
 fn review_followup_trace() -> ItfTrace {
     serde_json::from_str(COVEY_REVIEW_FOLLOWUP_ITF).expect("fixture must be valid ITF JSON")
@@ -1060,6 +1269,11 @@ fn landing_receipt_trace() -> LandingReceiptItfTrace {
 #[fixture]
 fn openspec_import_trace() -> OpenSpecImportItfTrace {
     serde_json::from_str(COVEY_OPENSPEC_IMPORT_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn mutation_idempotency_trace() -> MutationIdempotencyItfTrace {
+    serde_json::from_str(COVEY_MUTATION_IDEMPOTENCY_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[rstest]
@@ -1183,6 +1397,47 @@ fn covey_replays_quint_openspec_import_itf_trace(openspec_import_trace: OpenSpec
     );
     assert_eq!(
         replay_openspec_import_trace(&openspec_import_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_mutation_idempotency_itf_trace(
+    mutation_idempotency_trace: MutationIdempotencyItfTrace,
+) {
+    assert!(
+        !mutation_idempotency_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ClosureFailed",
+        "SerializeFailed",
+        "InvalidKey",
+        "Created",
+        "DeserializeFailed",
+        "Conflict",
+        "Replayed",
+        "CapacityFull",
+    ] {
+        assert!(
+            mutation_idempotency_trace
+                .states
+                .iter()
+                .any(|state| state.s.last_outcome == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        mutation_idempotency_trace.states.iter().any(|state| {
+            state.s.last_outcome == "Created"
+                && state.s.last_actor == "ActorB"
+                && state.s.last_key == "Key1"
+                && !state.s.identity_matched_before_attempt
+        }),
+        "fixture should cover actor namespace isolation for reused idempotency keys"
+    );
+    assert_eq!(
+        replay_mutation_idempotency_trace(&mutation_idempotency_trace),
         Vec::<String>::new()
     );
 }
@@ -1413,6 +1668,56 @@ fn covey_openspec_import_replay_reports_counterexample_shape() {
             "state[0]: active claimed OpenSpec task update did not conflict",
             "state[0]: OpenSpec import updated a live-claimed task",
             "state[0]: OpenSpec import created a live claim",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_mutation_idempotency_replay_reports_counterexample_shape() {
+    let duplicate_record = MutationIdempotencyRecordState {
+        present: true,
+        actor: "ActorA".to_owned(),
+        operation: "RegisterSession".to_owned(),
+        key: "Key1".to_owned(),
+        request_hash: "ReqA".to_owned(),
+        response: "RespA".to_owned(),
+        response_json_valid: true,
+    };
+    let state = MutationIdempotencyState {
+        r0: duplicate_record,
+        r1: MutationIdempotencyRecordState {
+            present: true,
+            actor: "ActorA".to_owned(),
+            operation: "RegisterSession".to_owned(),
+            key: "Key1".to_owned(),
+            request_hash: "ReqB".to_owned(),
+            response: "RespB".to_owned(),
+            response_json_valid: true,
+        },
+        last_actor: "ActorA".to_owned(),
+        last_operation: "RegisterSession".to_owned(),
+        last_key: "Key1".to_owned(),
+        last_request_hash: "ReqB".to_owned(),
+        last_response: "NoResponse".to_owned(),
+        last_closure_ok: true,
+        last_serialize_ok: true,
+        last_outcome: "Conflict".to_owned(),
+        side_effects: 1,
+        record_writes: 2,
+        last_side_effect_delta: 1,
+        last_record_write_delta: 1,
+        identity_matched_before_attempt: false,
+    };
+    let trace = MutationIdempotencyItfTrace {
+        states: vec![MutationIdempotencyItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_mutation_idempotency_trace(&trace),
+        vec![
+            "state[0]: duplicate idempotency records share one actor/operation/key",
+            "state[0]: request drift conflict mutated state or crossed namespace",
+            "state[0]: failed idempotent mutation wrote state",
         ]
     );
 }
