@@ -1,7 +1,8 @@
 use covey::{
-    ArtifactKind, ConflictResolutionState, DecideReviewReq, OverlapQueryReq, PublishArtifactReq,
-    RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
+    ArtifactKind, ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq, OverlapQueryReq,
+    PublishArtifactReq, RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
+    SettlementTarget,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -41,6 +42,8 @@ const COVEY_DECIDE_REVIEW_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyDecideReviewRequestShape.itf.json");
 const COVEY_REQUEST_REVIEW_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRequestReviewRequestShape.itf.json");
+const COVEY_ENQUEUE_FOR_APPLY_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyEnqueueForApplyRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -240,6 +243,16 @@ struct RequestReviewRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct RequestReviewRequestShapeItfState {
     s: RequestReviewRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnqueueForApplyRequestShapeItfTrace {
+    states: Vec<EnqueueForApplyRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnqueueForApplyRequestShapeItfState {
+    s: EnqueueForApplyRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -914,6 +927,33 @@ struct RequestReviewRequestShapeState {
     review_subtask_id_valid: bool,
     #[serde(rename = "priorityValid")]
     priority_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnqueueForApplyRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "settlementTarget",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    settlement_target: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "subtaskIdValid")]
+    subtask_id_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -2752,6 +2792,106 @@ fn replay_request_review_request_shape_trace(
         if expected_accepted && (!state.priority_valid || !state.idempotency_key_valid) {
             violations.push(format!(
                 "state[{index}]: accepted request review has invalid priority or idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn enqueue_for_apply_expected_reject(state: &EnqueueForApplyRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if !state.subtask_id_valid {
+        "SubtaskIdInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn enqueue_for_apply_actual_accepts(state: &EnqueueForApplyRequestShapeState) -> bool {
+    EnqueueForApplyReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.artifact_digest_valid {
+            "blake3:artifact".to_owned()
+        } else {
+            "artifact".to_owned()
+        },
+        if state.subtask_id_valid {
+            "subtask-1".to_owned()
+        } else {
+            "subtask 1".to_owned()
+        },
+        SettlementTarget::Canonical,
+        if state.idempotency_key_valid {
+            "idem-enqueue"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_enqueue_for_apply_request_shape_trace(
+    trace: &EnqueueForApplyRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: enqueue for apply scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = enqueue_for_apply_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: enqueue for apply reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: enqueue for apply outcome disagrees with validation facts"
+            ));
+        }
+        if enqueue_for_apply_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: enqueue for apply parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.artifact_digest_valid
+                || !state.subtask_id_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted enqueue for apply has invalid session, artifact, or subtask"
+            ));
+        }
+        if expected_accepted && state.settlement_target != "Canonical" {
+            violations.push(format!(
+                "state[{index}]: accepted enqueue for apply has non-canonical settlement target"
+            ));
+        }
+        if expected_accepted && !state.idempotency_key_valid {
+            violations.push(format!(
+                "state[{index}]: accepted enqueue for apply lacks idempotency key"
             ));
         }
     }
@@ -5309,6 +5449,12 @@ fn request_review_request_shape_trace() -> RequestReviewRequestShapeItfTrace {
 }
 
 #[fixture]
+fn enqueue_for_apply_request_shape_trace() -> EnqueueForApplyRequestShapeItfTrace {
+    serde_json::from_str(COVEY_ENQUEUE_FOR_APPLY_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
     serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -6039,6 +6185,42 @@ fn covey_replays_quint_request_review_request_shape_itf_trace(
     );
     assert_eq!(
         replay_request_review_request_shape_trace(&request_review_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_enqueue_for_apply_request_shape_itf_trace(
+    enqueue_for_apply_request_shape_trace: EnqueueForApplyRequestShapeItfTrace,
+) {
+    assert!(
+        !enqueue_for_apply_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidCanonical",
+        "InvalidSessionToken",
+        "InvalidArtifactDigest",
+        "InvalidSubtaskId",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            enqueue_for_apply_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        enqueue_for_apply_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.settlement_target == "Canonical" && state.s.accepted),
+        "fixture should cover accepted canonical settlement target"
+    );
+    assert_eq!(
+        replay_enqueue_for_apply_request_shape_trace(&enqueue_for_apply_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -7216,6 +7398,34 @@ fn covey_request_review_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: request review reject reason does not match validation facts",
             "state[0]: request review outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_enqueue_for_apply_request_shape_replay_reports_counterexample_shape() {
+    let state = EnqueueForApplyRequestShapeState {
+        case_index: 4,
+        case: "InvalidSubtaskId".to_owned(),
+        settlement_target: "Canonical".to_owned(),
+        session_token_valid: true,
+        artifact_digest_valid: true,
+        subtask_id_valid: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = EnqueueForApplyRequestShapeItfTrace {
+        states: vec![EnqueueForApplyRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_enqueue_for_apply_request_shape_trace(&trace),
+        vec![
+            "state[0]: enqueue for apply reject reason does not match validation facts",
+            "state[0]: enqueue for apply outcome disagrees with validation facts",
         ]
     );
 }
