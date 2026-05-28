@@ -7,6 +7,12 @@ const COVEY_REVIEW_CLAIM_RECLAIM_ITF: &str =
 const COVEY_REVIEW_CLAIM_RECLAIM_CHANGES_REQUESTED_ITF: &str =
     include_str!("fixtures/quint/CoveyReviewClaimReclaimChangesRequested.itf.json");
 const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
+const COVEY_STALE_CLAIM_RECOVERY_REAP_ITF: &str =
+    include_str!("fixtures/quint/CoveyStaleClaimRecoveryReap.itf.json");
+const COVEY_STALE_CLAIM_RECOVERY_LEASE_ITF: &str =
+    include_str!("fixtures/quint/CoveyStaleClaimRecoveryLease.itf.json");
+const COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF: &str =
+    include_str!("fixtures/quint/CoveyStaleClaimRecoveryExit.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
 const COVEY_SESSION_META_TASK_ITF: &str =
@@ -48,6 +54,16 @@ struct CoreItfTrace {
 #[derive(Debug, Deserialize)]
 struct CoreItfState {
     s: CoreLifecycleState,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleClaimRecoveryItfTrace {
+    states: Vec<StaleClaimRecoveryItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleClaimRecoveryItfState {
+    s: StaleClaimRecoveryState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +169,36 @@ struct CoreLifecycleState {
     #[serde(rename = "applyVerified")]
     apply_verified: bool,
     terminal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleClaimRecoveryState {
+    #[serde(rename = "oldSession", deserialize_with = "deserialize_itf_variant")]
+    old_session: String,
+    #[serde(rename = "newSession", deserialize_with = "deserialize_itf_variant")]
+    new_session: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    claim: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    owner: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    subtask: String,
+    #[serde(rename = "oldActiveSubtask")]
+    old_active_subtask: bool,
+    #[serde(rename = "newActiveSubtask")]
+    new_active_subtask: bool,
+    #[serde(rename = "currentFence", deserialize_with = "deserialize_itf_bigint")]
+    current_fence: i64,
+    #[serde(rename = "expiredFence", deserialize_with = "deserialize_itf_bigint")]
+    expired_fence: i64,
+    #[serde(rename = "staleReaped")]
+    stale_reaped: bool,
+    #[serde(rename = "leaseExpired")]
+    lease_expired: bool,
+    #[serde(rename = "exitedWithHeldClaim")]
+    exited_with_held_claim: bool,
+    #[serde(rename = "staleMutationRejected")]
+    stale_mutation_rejected: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1038,6 +1084,95 @@ fn replay_core_lifecycle_trace(trace: &CoreItfTrace) -> Vec<String> {
         if matches!(state.fence.as_str(), "F1" | "F2") && state.claim == "NoClaim" {
             violations.push(format!(
                 "state[{index}]: issued fence exists before any claim lifecycle"
+            ));
+        }
+    }
+    violations
+}
+
+fn stale_recovery_occurred(state: &StaleClaimRecoveryState) -> bool {
+    state.stale_reaped || state.lease_expired || state.exited_with_held_claim
+}
+
+fn replay_stale_claim_recovery_trace(trace: &StaleClaimRecoveryItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let recovered = stale_recovery_occurred(state);
+        let active_count =
+            i32::from(state.old_active_subtask) + i32::from(state.new_active_subtask);
+        if state.claim == "Held" {
+            let old_holds = state.owner == "OldSession"
+                && state.old_active_subtask
+                && !state.new_active_subtask;
+            let new_holds = state.owner == "NewSession"
+                && state.new_active_subtask
+                && !state.old_active_subtask;
+            if !(old_holds || new_holds) {
+                violations.push(format!(
+                    "state[{index}]: held stale-recovery claim lacks exactly one active owner"
+                ));
+            }
+        }
+        if state.old_session != "ActiveSession" && state.old_active_subtask {
+            violations.push(format!(
+                "state[{index}]: inactive old session retained active subtask"
+            ));
+        }
+        if recovered && state.owner != "NewSession" {
+            if state.old_active_subtask || state.owner != "NoOwner" || state.subtask != "Available"
+            {
+                violations.push(format!(
+                    "state[{index}]: recovered old claim did not detach session and subtask"
+                ));
+            }
+        }
+        if recovered && state.expired_fence <= 0 {
+            violations.push(format!(
+                "state[{index}]: recovered claim lacks expired fence"
+            ));
+        }
+        if state.old_session != "ActiveSession" && state.owner == "OldSession" {
+            violations.push(format!(
+                "state[{index}]: stale or exited session still owns claim"
+            ));
+        }
+        if recovered && !matches!(state.subtask.as_str(), "Available" | "Claimed") {
+            violations.push(format!(
+                "state[{index}]: recovered subtask is neither claimable nor reclaimed"
+            ));
+        }
+        if state.owner == "NewSession"
+            && state.claim == "Held"
+            && state.current_fence <= state.expired_fence
+        {
+            violations.push(format!(
+                "state[{index}]: resumed claim did not advance fence"
+            ));
+        }
+        if active_count > 1 {
+            violations.push(format!(
+                "state[{index}]: stale recovery has dual active claims"
+            ));
+        }
+        if state.stale_mutation_rejected
+            && (state.owner == "OldSession" || state.old_active_subtask)
+        {
+            violations.push(format!(
+                "state[{index}]: stale mutation reattached old claim"
+            ));
+        }
+        if matches!(state.claim.as_str(), "Released" | "Expired")
+            && state.owner == "NoOwner"
+            && (state.old_active_subtask || state.new_active_subtask)
+        {
+            violations.push(format!(
+                "state[{index}]: terminal recovered claim retained active subtask"
+            ));
+        }
+        if state.new_session != "ActiveSession" && state.new_active_subtask {
+            violations.push(format!(
+                "state[{index}]: inactive new session retained active subtask"
             ));
         }
     }
@@ -1995,6 +2130,24 @@ fn core_lifecycle_trace() -> CoreItfTrace {
 }
 
 #[fixture]
+fn stale_claim_recovery_reap_trace() -> StaleClaimRecoveryItfTrace {
+    serde_json::from_str(COVEY_STALE_CLAIM_RECOVERY_REAP_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn stale_claim_recovery_lease_trace() -> StaleClaimRecoveryItfTrace {
+    serde_json::from_str(COVEY_STALE_CLAIM_RECOVERY_LEASE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn stale_claim_recovery_exit_trace() -> StaleClaimRecoveryItfTrace {
+    serde_json::from_str(COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn queue_reservation_trace() -> QueueReservationItfTrace {
     serde_json::from_str(COVEY_QUEUE_RESERVATION_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -2123,6 +2276,72 @@ fn covey_replays_quint_core_lifecycle_itf_trace(core_lifecycle_trace: CoreItfTra
     );
     assert_eq!(
         replay_core_lifecycle_trace(&core_lifecycle_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_stale_claim_recovery_reap_itf_trace(
+    stale_claim_recovery_reap_trace: StaleClaimRecoveryItfTrace,
+) {
+    assert!(
+        stale_claim_recovery_reap_trace
+            .states
+            .iter()
+            .any(|state| state.s.stale_reaped),
+        "fixture should cover stale-session reap recovery"
+    );
+    assert!(
+        stale_claim_recovery_reap_trace
+            .states
+            .iter()
+            .any(|state| state.s.owner == "NewSession"
+                && state.s.current_fence > state.s.expired_fence),
+        "fixture should cover resumed claim with advanced fence"
+    );
+    assert_eq!(
+        replay_stale_claim_recovery_trace(&stale_claim_recovery_reap_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_stale_claim_recovery_lease_itf_trace(
+    stale_claim_recovery_lease_trace: StaleClaimRecoveryItfTrace,
+) {
+    assert!(
+        stale_claim_recovery_lease_trace
+            .states
+            .iter()
+            .any(|state| state.s.lease_expired),
+        "fixture should cover lease-expiry recovery"
+    );
+    assert_eq!(
+        replay_stale_claim_recovery_trace(&stale_claim_recovery_lease_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_stale_claim_recovery_exit_itf_trace(
+    stale_claim_recovery_exit_trace: StaleClaimRecoveryItfTrace,
+) {
+    assert!(
+        stale_claim_recovery_exit_trace
+            .states
+            .iter()
+            .any(|state| state.s.exited_with_held_claim),
+        "fixture should cover explicit session-exit recovery"
+    );
+    assert!(
+        stale_claim_recovery_exit_trace
+            .states
+            .iter()
+            .any(|state| state.s.stale_mutation_rejected),
+        "fixture should cover stale owner mutation rejection"
+    );
+    assert_eq!(
+        replay_stale_claim_recovery_trace(&stale_claim_recovery_exit_trace),
         Vec::<String>::new()
     );
 }
@@ -2534,6 +2753,41 @@ fn covey_core_lifecycle_replay_reports_counterexample_shape() {
             "state[0]: ready queue exists without approved review",
             "state[0]: applied queue lacks apply verification",
             "state[0]: terminal marker disagrees with subtask state",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_stale_claim_recovery_replay_reports_counterexample_shape() {
+    let state = StaleClaimRecoveryState {
+        old_session: "StaleSession".to_owned(),
+        new_session: "ActiveSession".to_owned(),
+        claim: "Held".to_owned(),
+        owner: "OldSession".to_owned(),
+        subtask: "InProgress".to_owned(),
+        old_active_subtask: true,
+        new_active_subtask: true,
+        current_fence: 1,
+        expired_fence: 1,
+        stale_reaped: true,
+        lease_expired: false,
+        exited_with_held_claim: false,
+        stale_mutation_rejected: true,
+    };
+    let trace = StaleClaimRecoveryItfTrace {
+        states: vec![StaleClaimRecoveryItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_stale_claim_recovery_trace(&trace),
+        vec![
+            "state[0]: held stale-recovery claim lacks exactly one active owner",
+            "state[0]: inactive old session retained active subtask",
+            "state[0]: recovered old claim did not detach session and subtask",
+            "state[0]: stale or exited session still owns claim",
+            "state[0]: recovered subtask is neither claimable nor reclaimed",
+            "state[0]: stale recovery has dual active claims",
+            "state[0]: stale mutation reattached old claim",
         ]
     );
 }
