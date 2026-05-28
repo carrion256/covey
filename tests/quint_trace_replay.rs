@@ -2,17 +2,17 @@ use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
     ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, CommandTranscriptDigest,
     Conflict, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
-    ExitSessionReq, FenceSeq, HeartbeatReq, LandingAuthorizationStatus, LeaseDeadlineMs,
-    MarkAppliedReq, MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq,
-    ProviderId, PublishArtifactReq, ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq,
-    RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq,
-    RequestReservationReq, RequestReviewReq, Reservation, ReservationOverlapConflictPayload,
-    ReservationState, ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget,
-    ReviewVerdict, RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole,
-    SessionState, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
-    SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
-    VerifyLandingAuthorizationReq, WorkSubtask,
+    ExitSessionReq, FenceSeq, HeartbeatReq, ImportBdV1Req, LandingAuthorizationStatus,
+    LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, ModelId,
+    OverlapQueryReq, ProviderId, PublishArtifactReq, ReadyQueueItem, ReadyQueueState,
+    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, Reservation,
+    ReservationOverlapConflictPayload, ReservationState, ResolveConflictReq, Review, ReviewState,
+    ReviewSubtask, ReviewTarget, ReviewVerdict, RuntimeAttestation, ScopeClass, Session,
+    SessionHandle, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
+    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
+    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
@@ -95,6 +95,8 @@ const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
+const COVEY_BD_IMPORT_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyBdImportRequestShape.itf.json");
 const COVEY_BD_IMPORT_ITEM_OUTCOME_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyBdImportItemOutcomeShape.itf.json");
 const COVEY_CLAIM_DEPENDENCY_GATE_ITF: &str =
@@ -593,6 +595,16 @@ struct BdImportItfTrace {
 #[derive(Debug, Deserialize)]
 struct BdImportItfState {
     s: BdImportState,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportRequestShapeItfTrace {
+    states: Vec<BdImportRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportRequestShapeItfState {
+    s: BdImportRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2167,6 +2179,47 @@ struct BdImportState {
     claim_created: bool,
     #[serde(rename = "sessionActiveSubtaskSet")]
     session_active_subtask_set: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "destinationShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    destination_shape: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(
+        rename = "beadsDbPathShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    beads_db_path_shape: String,
+    #[serde(rename = "metaTaskIdValid")]
+    meta_task_id_valid: bool,
+    #[serde(rename = "promptTextValid")]
+    prompt_text_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    #[serde(rename = "existingMetaSelectorPreserved")]
+    existing_meta_selector_preserved: bool,
+    #[serde(rename = "newPromptSelectorPreserved")]
+    new_prompt_selector_preserved: bool,
+    #[serde(rename = "beadsDbPathPreserved")]
+    beads_db_path_preserved: bool,
+    #[serde(rename = "coveyStateMutated")]
+    covey_state_mutated: bool,
+    #[serde(rename = "schedulerAction")]
+    scheduler_action: bool,
     evaluated: bool,
 }
 
@@ -8714,6 +8767,184 @@ fn replay_openspec_import_trace(trace: &OpenSpecImportItfTrace) -> Vec<String> {
     violations
 }
 
+fn bd_import_request_expected_reject(state: &BdImportRequestShapeState) -> &'static str {
+    match state.destination_shape.as_str() {
+        "Both" | "Neither" => "DestinationInvalid",
+        _ if !state.meta_task_id_valid => "MetaTaskIdInvalid",
+        _ if !state.prompt_text_valid => "PromptTextInvalid",
+        _ if !state.session_token_valid => "SessionTokenInvalid",
+        _ if state.beads_db_path_shape != "ValidPath" => "BeadsDbPathInvalid",
+        _ if !state.idempotency_key_valid => "IdempotencyKeyInvalid",
+        _ => "NoReject",
+    }
+}
+
+fn bd_import_request_raw_parts(
+    state: &BdImportRequestShapeState,
+) -> (String, String, Option<String>, Option<String>, String) {
+    let session_token = if state.session_token_valid {
+        "session-1"
+    } else {
+        "session 1"
+    }
+    .to_owned();
+    let beads_db_path = match state.beads_db_path_shape.as_str() {
+        "ValidPath" => "beads.db",
+        "EmptyPath" => "",
+        "WhitespacePath" => " beads.db",
+        other => panic!("unexpected BD import path shape from ITF trace: {other}"),
+    }
+    .to_owned();
+    let meta_task_id = match state.destination_shape.as_str() {
+        "ExistingMeta" | "Both" => Some(if state.meta_task_id_valid {
+            "meta-1".to_owned()
+        } else {
+            "meta 1".to_owned()
+        }),
+        "NewMeta" | "Neither" => None,
+        other => panic!("unexpected BD import destination shape from ITF trace: {other}"),
+    };
+    let prompt_text = match state.destination_shape.as_str() {
+        "NewMeta" | "Both" => Some(if state.prompt_text_valid {
+            "new work".to_owned()
+        } else {
+            " ".to_owned()
+        }),
+        "ExistingMeta" | "Neither" => None,
+        other => panic!("unexpected BD import destination shape from ITF trace: {other}"),
+    };
+    let idempotency_key = if state.idempotency_key_valid {
+        "idem-import"
+    } else {
+        " "
+    }
+    .to_owned();
+    (
+        session_token,
+        beads_db_path,
+        meta_task_id,
+        prompt_text,
+        idempotency_key,
+    )
+}
+
+fn bd_import_request_actual(state: &BdImportRequestShapeState) -> Result<ImportBdV1Req, String> {
+    let (session_token, beads_db_path, meta_task_id, prompt_text, idempotency_key) =
+        bd_import_request_raw_parts(state);
+    ImportBdV1Req::from_flat_selectors(
+        session_token,
+        beads_db_path,
+        meta_task_id,
+        prompt_text,
+        idempotency_key,
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn bd_import_request_actual_reject(error: &str) -> &'static str {
+    if error.contains("bd_import_destination") {
+        "DestinationInvalid"
+    } else if error.contains("meta_task_id") {
+        "MetaTaskIdInvalid"
+    } else if error.contains("prompt") {
+        "PromptTextInvalid"
+    } else if error.contains("session_token") {
+        "SessionTokenInvalid"
+    } else if error.contains("beads_db_path") {
+        "BeadsDbPathInvalid"
+    } else if error.contains("idempotency_key") {
+        "IdempotencyKeyInvalid"
+    } else {
+        panic!("unexpected BD import request validation error: {error}")
+    }
+}
+
+fn replay_bd_import_request_shape_trace(trace: &BdImportRequestShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: BD import request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.covey_state_mutated || state.scheduler_action {
+            violations.push(format!(
+                "{prefix}: BD import request shape mutated Covey state or scheduled work"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = bd_import_request_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "{prefix}: BD import request reject reason disagrees with modeled fields"
+            ));
+        }
+        let expected_accepted = expected_reject == "NoReject";
+        if (state.outcome == "Accepted") != expected_accepted {
+            violations.push(format!(
+                "{prefix}: BD import request outcome disagrees with modeled fields"
+            ));
+        }
+        match bd_import_request_actual(state) {
+            Ok(req) => {
+                if !expected_accepted {
+                    violations.push(format!(
+                        "{prefix}: BD import request parser accepted rejected model state"
+                    ));
+                    continue;
+                }
+                if req.meta_task_id().is_some() != state.existing_meta_selector_preserved {
+                    violations.push(format!(
+                        "{prefix}: BD import request existing-meta selector preservation disagrees with Rust contract"
+                    ));
+                }
+                if req.prompt_text().is_some() != state.new_prompt_selector_preserved {
+                    violations.push(format!(
+                        "{prefix}: BD import request prompt selector preservation disagrees with Rust contract"
+                    ));
+                }
+                if (req.beads_db_path.as_str() == "beads.db") != state.beads_db_path_preserved {
+                    violations.push(format!(
+                        "{prefix}: BD import request path preservation disagrees with Rust contract"
+                    ));
+                }
+            }
+            Err(error) => {
+                if expected_accepted {
+                    violations.push(format!(
+                        "{prefix}: BD import request parser rejected accepted model state"
+                    ));
+                    continue;
+                }
+                let actual_reject = bd_import_request_actual_reject(&error);
+                if actual_reject != expected_reject {
+                    violations.push(format!(
+                        "{prefix}: BD import request parser reject reason disagrees with model"
+                    ));
+                }
+            }
+        }
+        if state.outcome == "Rejected"
+            && (state.existing_meta_selector_preserved
+                || state.new_prompt_selector_preserved
+                || state.beads_db_path_preserved)
+        {
+            violations.push(format!(
+                "{prefix}: rejected BD import request preserved destination/path fields"
+            ));
+        }
+    }
+    violations
+}
+
 fn bd_import_expected_conflict(state: &BdImportState) -> &'static str {
     match (
         state.destination.as_str(),
@@ -9735,6 +9966,11 @@ fn openspec_import_trace() -> OpenSpecImportItfTrace {
 #[fixture]
 fn bd_import_trace() -> BdImportItfTrace {
     serde_json::from_str(COVEY_BD_IMPORT_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn bd_import_request_shape_trace() -> BdImportRequestShapeItfTrace {
+    serde_json::from_str(COVEY_BD_IMPORT_REQUEST_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -11733,6 +11969,72 @@ fn covey_replays_quint_bd_import_itf_trace(bd_import_trace: BdImportItfTrace) {
 }
 
 #[rstest]
+fn covey_replays_quint_bd_import_request_shape_itf_trace(
+    bd_import_request_shape_trace: BdImportRequestShapeItfTrace,
+) {
+    assert!(
+        !bd_import_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ExistingMetaValid",
+        "NewMetaValid",
+        "BothSelectors",
+        "NeitherSelector",
+        "InvalidExistingMetaId",
+        "BlankNewPrompt",
+        "InvalidSessionToken",
+        "EmptyBeadsDbPath",
+        "WhitespaceBeadsDbPath",
+        "InvalidIdempotencyKey",
+    ] {
+        assert!(
+            bd_import_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in [
+        "DestinationInvalid",
+        "MetaTaskIdInvalid",
+        "PromptTextInvalid",
+        "SessionTokenInvalid",
+        "BeadsDbPathInvalid",
+        "IdempotencyKeyInvalid",
+    ] {
+        assert!(
+            bd_import_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.reject_reason == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        bd_import_request_shape_trace.states.iter().any(|state| {
+            state.s.destination_shape == "ExistingMeta"
+                && state.s.existing_meta_selector_preserved
+                && state.s.beads_db_path_preserved
+        }),
+        "fixture should cover existing meta selector preservation"
+    );
+    assert!(
+        bd_import_request_shape_trace.states.iter().any(|state| {
+            state.s.destination_shape == "NewMeta"
+                && state.s.new_prompt_selector_preserved
+                && state.s.beads_db_path_preserved
+        }),
+        "fixture should cover new prompt selector preservation"
+    );
+    assert_eq!(
+        replay_bd_import_request_shape_trace(&bd_import_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_bd_import_item_outcome_shape_itf_trace(
     bd_import_item_outcome_shape_trace: BdImportItemOutcomeShapeItfTrace,
 ) {
@@ -13486,6 +13788,40 @@ fn covey_conflict_resolution_request_replay_reports_counterexample_shape() {
             "state[0]: conflict resolution reject reason does not match validation facts",
             "state[0]: conflict resolution transition flag disagrees with transition matrix",
             "state[0]: conflict resolution outcome disagrees with request and transition facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_bd_import_request_shape_replay_reports_counterexample_shape() {
+    let state = BdImportRequestShapeState {
+        case_index: 3,
+        case: "BothSelectors".to_owned(),
+        destination_shape: "Both".to_owned(),
+        session_token_valid: true,
+        beads_db_path_shape: "ValidPath".to_owned(),
+        meta_task_id_valid: true,
+        prompt_text_valid: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        existing_meta_selector_preserved: true,
+        new_prompt_selector_preserved: true,
+        beads_db_path_preserved: true,
+        covey_state_mutated: true,
+        scheduler_action: true,
+        evaluated: true,
+    };
+    let trace = BdImportRequestShapeItfTrace {
+        states: vec![BdImportRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_bd_import_request_shape_trace(&trace),
+        vec![
+            "state[0]: BD import request shape mutated Covey state or scheduled work",
+            "state[0]: BD import request reject reason disagrees with modeled fields",
+            "state[0]: BD import request outcome disagrees with modeled fields",
         ]
     );
 }
