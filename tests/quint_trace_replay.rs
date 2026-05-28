@@ -1,8 +1,9 @@
 use covey::{
     ArtifactKind, ClaimReadyQueueReq, ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq,
-    MarkInFlightReq, OverlapQueryReq, PublishArtifactReq, RecordRuntimeAttestationReq,
-    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
-    ReviewVerdict, ScopeClass, SettlementTarget,
+    MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
+    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
+    SettlementTarget,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -48,6 +49,10 @@ const COVEY_CLAIM_READY_QUEUE_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyClaimReadyQueueRequestShape.itf.json");
 const COVEY_MARK_IN_FLIGHT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMarkInFlightRequestShape.itf.json");
+const COVEY_MARK_APPLIED_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyMarkAppliedRequestShape.itf.json");
+const COVEY_APPLY_VERIFICATION_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyApplyVerificationRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -277,6 +282,26 @@ struct MarkInFlightRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct MarkInFlightRequestShapeItfState {
     s: MarkInFlightRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkAppliedRequestShapeItfTrace {
+    states: Vec<MarkAppliedRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkAppliedRequestShapeItfState {
+    s: MarkAppliedRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyVerificationRequestShapeItfTrace {
+    states: Vec<ApplyVerificationRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyVerificationRequestShapeItfState {
+    s: ApplyVerificationRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1020,6 +1045,62 @@ struct MarkInFlightRequestShapeState {
     queue_id_valid: bool,
     #[serde(rename = "leaseDurationPositive")]
     lease_duration_positive: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkAppliedRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "queueIdValid")]
+    queue_id_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyVerificationRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "queueIdValid")]
+    queue_id_valid: bool,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "reviewIdValid")]
+    review_id_valid: bool,
+    #[serde(rename = "findingsDigestValid")]
+    findings_digest_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "verifierValid")]
+    verifier_valid: bool,
+    #[serde(rename = "verdictDigestValid")]
+    verdict_digest_valid: bool,
+    #[serde(rename = "sealDigestValid")]
+    seal_digest_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -3139,6 +3220,235 @@ fn replay_mark_in_flight_request_shape_trace(
         if expected_accepted && !state.idempotency_key_valid {
             violations.push(format!(
                 "state[{index}]: accepted mark in flight lacks idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn mark_applied_expected_reject(state: &MarkAppliedRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.queue_id_valid {
+        "QueueIdInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn mark_applied_fence_seq(state: &MarkAppliedRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ZeroFence" => 0,
+        "NegativeFence" => -1,
+        _ => 1,
+    }
+}
+
+fn mark_applied_actual_accepts(state: &MarkAppliedRequestShapeState) -> bool {
+    MarkAppliedReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.queue_id_valid { "queue-1" } else { "" },
+        mark_applied_fence_seq(state),
+        if state.idempotency_key_valid {
+            "idem-mark-applied"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_mark_applied_request_shape_trace(trace: &MarkAppliedRequestShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: mark applied scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = mark_applied_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: mark applied reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: mark applied outcome disagrees with validation facts"
+            ));
+        }
+        if mark_applied_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: mark applied parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid || !state.queue_id_valid || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted mark applied has invalid session, queue, or fence"
+            ));
+        }
+        if expected_accepted && !state.idempotency_key_valid {
+            violations.push(format!(
+                "state[{index}]: accepted mark applied lacks idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn apply_verification_expected_reject(state: &ApplyVerificationRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.queue_id_valid {
+        "QueueIdInvalid"
+    } else if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if !state.review_id_valid {
+        "ReviewIdInvalid"
+    } else if !state.findings_digest_valid {
+        "FindingsDigestInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.verifier_valid {
+        "VerifierInvalid"
+    } else if !state.verdict_digest_valid {
+        "VerdictDigestInvalid"
+    } else if !state.seal_digest_valid {
+        "SealDigestInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn apply_verification_actual_accepts(state: &ApplyVerificationRequestShapeState) -> bool {
+    RecordApplyVerificationReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.queue_id_valid { "queue-1" } else { "" },
+        if state.artifact_digest_valid {
+            "blake3:artifact"
+        } else {
+            "artifact"
+        },
+        if state.review_id_valid {
+            "review-1"
+        } else {
+            "review 1"
+        },
+        if state.findings_digest_valid {
+            "blake3:findings"
+        } else {
+            "findings"
+        },
+        if state.fence_seq_positive { 1 } else { 0 },
+        if state.verifier_valid {
+            "mutai-rs"
+        } else {
+            "mutai rs"
+        },
+        if state.verdict_digest_valid {
+            "blake3:verdict"
+        } else {
+            "verdict"
+        },
+        if state.seal_digest_valid {
+            "blake3:seal"
+        } else {
+            "seal"
+        },
+        if state.idempotency_key_valid {
+            "idem-verification"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_apply_verification_request_shape_trace(
+    trace: &ApplyVerificationRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: apply verification scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = apply_verification_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: apply verification reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: apply verification outcome disagrees with validation facts"
+            ));
+        }
+        if apply_verification_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: apply verification parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.queue_id_valid
+                || !state.review_id_valid
+                || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted apply verification has invalid queue review or fence"
+            ));
+        }
+        if expected_accepted && (!state.artifact_digest_valid || !state.findings_digest_valid) {
+            violations.push(format!(
+                "state[{index}]: accepted apply verification has invalid artifact or findings digest"
+            ));
+        }
+        if expected_accepted
+            && (!state.verifier_valid
+                || !state.verdict_digest_valid
+                || !state.seal_digest_valid
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted apply verification has invalid verifier evidence"
             ));
         }
     }
@@ -5714,6 +6024,18 @@ fn mark_in_flight_request_shape_trace() -> MarkInFlightRequestShapeItfTrace {
 }
 
 #[fixture]
+fn mark_applied_request_shape_trace() -> MarkAppliedRequestShapeItfTrace {
+    serde_json::from_str(COVEY_MARK_APPLIED_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn apply_verification_request_shape_trace() -> ApplyVerificationRequestShapeItfTrace {
+    serde_json::from_str(COVEY_APPLY_VERIFICATION_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
     serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -6553,6 +6875,85 @@ fn covey_replays_quint_mark_in_flight_request_shape_itf_trace(
     );
     assert_eq!(
         replay_mark_in_flight_request_shape_trace(&mark_in_flight_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_mark_applied_request_shape_itf_trace(
+    mark_applied_request_shape_trace: MarkAppliedRequestShapeItfTrace,
+) {
+    assert!(
+        !mark_applied_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidMarkApplied",
+        "InvalidSessionToken",
+        "InvalidQueueId",
+        "ZeroFence",
+        "NegativeFence",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            mark_applied_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        mark_applied_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidMarkApplied" && state.s.accepted),
+        "fixture should cover accepted mark-applied request"
+    );
+    assert_eq!(
+        replay_mark_applied_request_shape_trace(&mark_applied_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_apply_verification_request_shape_itf_trace(
+    apply_verification_request_shape_trace: ApplyVerificationRequestShapeItfTrace,
+) {
+    assert!(
+        !apply_verification_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidVerification",
+        "InvalidSessionToken",
+        "InvalidQueueId",
+        "InvalidArtifactDigest",
+        "InvalidReviewId",
+        "InvalidFindingsDigest",
+        "NonPositiveFence",
+        "InvalidVerifier",
+        "InvalidVerdictDigest",
+        "InvalidSealDigest",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            apply_verification_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        apply_verification_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidVerification" && state.s.accepted),
+        "fixture should cover accepted apply verification request"
+    );
+    assert_eq!(
+        replay_apply_verification_request_shape_trace(&apply_verification_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -7811,6 +8212,66 @@ fn covey_mark_in_flight_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: mark in flight reject reason does not match validation facts",
             "state[0]: mark in flight outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_mark_applied_request_shape_replay_reports_counterexample_shape() {
+    let state = MarkAppliedRequestShapeState {
+        case_index: 4,
+        case: "ZeroFence".to_owned(),
+        session_token_valid: true,
+        queue_id_valid: true,
+        fence_seq_positive: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = MarkAppliedRequestShapeItfTrace {
+        states: vec![MarkAppliedRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_mark_applied_request_shape_trace(&trace),
+        vec![
+            "state[0]: mark applied reject reason does not match validation facts",
+            "state[0]: mark applied outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_apply_verification_request_shape_replay_reports_counterexample_shape() {
+    let state = ApplyVerificationRequestShapeState {
+        case_index: 7,
+        case: "NonPositiveFence".to_owned(),
+        session_token_valid: true,
+        queue_id_valid: true,
+        artifact_digest_valid: true,
+        review_id_valid: true,
+        findings_digest_valid: true,
+        fence_seq_positive: false,
+        verifier_valid: true,
+        verdict_digest_valid: true,
+        seal_digest_valid: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ApplyVerificationRequestShapeItfTrace {
+        states: vec![ApplyVerificationRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_apply_verification_request_shape_trace(&trace),
+        vec![
+            "state[0]: apply verification reject reason does not match validation facts",
+            "state[0]: apply verification outcome disagrees with validation facts",
         ]
     );
 }
