@@ -1,17 +1,18 @@
 use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
     ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, CommandTranscriptDigest,
-    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
+    Conflict, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     ExitSessionReq, FenceSeq, HeartbeatReq, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq,
     MetaTask, MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq, ProviderId, PublishArtifactReq,
     ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
     RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationState, ResolveConflictReq, Review, ReviewState,
-    ReviewSubtask, ReviewTarget, ReviewVerdict, RuntimeAttestation, ScopeClass, Session,
-    SessionHandle, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
-    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
-    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
+    RequestReviewReq, Reservation, ReservationOverlapConflictPayload, ReservationState,
+    ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
+    RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
+    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
+    VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
@@ -119,6 +120,8 @@ const COVEY_READY_QUEUE_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReadyQueueRecordShape.itf.json");
 const COVEY_RESERVATION_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRecordShape.itf.json");
+const COVEY_CONFLICT_RECORD_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyConflictRecordShape.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -298,6 +301,16 @@ struct ReservationRecordShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ReservationRecordShapeItfState {
     s: ReservationRecordShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConflictRecordShapeItfTrace {
+    states: Vec<ConflictRecordShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConflictRecordShapeItfState {
+    s: ConflictRecordShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1849,6 +1862,48 @@ struct ReservationRecordShapeState {
         deserialize_with = "deserialize_itf_variant"
     )]
     timestamp_shape: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConflictRecordShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "objectShape", deserialize_with = "deserialize_itf_variant")]
+    object_shape: String,
+    #[serde(
+        rename = "conflictKindShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    conflict_kind_shape: String,
+    #[serde(rename = "payloadShape", deserialize_with = "deserialize_itf_variant")]
+    payload_shape: String,
+    #[serde(
+        rename = "resolutionState",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    resolution_state: String,
+    #[serde(rename = "conflictIdValid")]
+    conflict_id_valid: bool,
+    #[serde(rename = "typedPayloadValid")]
+    typed_payload_valid: bool,
+    #[serde(rename = "objectIdMatchesPayload")]
+    object_id_matches_payload: bool,
+    #[serde(rename = "scopeKeyNormalized")]
+    scope_key_normalized: bool,
+    #[serde(rename = "overlappingScopeKeyNormalized")]
+    overlapping_scope_key_normalized: bool,
+    #[serde(rename = "repoGlobalKeyCanonical")]
+    repo_global_key_canonical: bool,
+    #[serde(rename = "payloadJsonPreserved")]
+    payload_json_preserved: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -5637,6 +5692,175 @@ fn replay_reservation_record_shape_trace(trace: &ReservationRecordShapeItfTrace)
     violations
 }
 
+fn conflict_record_expected_reject(state: &ConflictRecordShapeState) -> &'static str {
+    if !state.conflict_id_valid {
+        "ConflictIdInvalid"
+    } else if state.conflict_kind_shape == "UnknownKind" {
+        "ConflictKindUnknown"
+    } else if state.object_shape != "ReservationObject" {
+        "ObjectTypeMismatch"
+    } else if !state.typed_payload_valid {
+        "TypedPayloadInvalid"
+    } else if !state.object_id_matches_payload {
+        "ObjectIdMismatch"
+    } else {
+        "NoReject"
+    }
+}
+
+fn conflict_record_resolution_state(state: &ConflictRecordShapeState) -> &'static str {
+    match state.resolution_state.as_str() {
+        "Open" => "open",
+        "Acknowledged" => "acknowledged",
+        "Resolved" => "resolved",
+        other => panic!("unexpected conflict resolution state from ITF trace: {other}"),
+    }
+}
+
+fn conflict_record_scope_fields(state: &ConflictRecordShapeState) -> (&'static str, &'static str) {
+    match state.case.as_str() {
+        "ValidAcknowledgedRepoGlobal" => ("repo_global", "repo"),
+        "ValidResolvedGeneratedSet" => ("generated_set", "artifact-manifest"),
+        "RepoGlobalWrongKey" => ("repo_global", "src"),
+        "ScopeKeyMissing" => ("exact_path", " "),
+        "ScopeKeyNotNormalized" => ("subtree", " src "),
+        _ => ("exact_path", "src/lib.rs"),
+    }
+}
+
+fn conflict_record_overlapping_scope_fields(
+    state: &ConflictRecordShapeState,
+) -> (&'static str, &'static str) {
+    match state.case.as_str() {
+        "ValidOpenExactPathSubtree" => ("subtree", "src"),
+        "ValidResolvedGeneratedSet" => ("repo_global", "repo"),
+        "OverlappingScopeKeyNotNormalized" => ("generated_set", " artifact-manifest "),
+        _ => ("exact_path", "src/main.rs"),
+    }
+}
+
+fn conflict_record_payload_json(state: &ConflictRecordShapeState) -> String {
+    if state.payload_shape == "MissingPayload" {
+        return "{}".to_owned();
+    }
+    let (scope_class, scope_key) = conflict_record_scope_fields(state);
+    let (overlapping_scope_class, overlapping_scope_key) =
+        conflict_record_overlapping_scope_fields(state);
+    serde_json::json!({
+        "reservation_id": if state.payload_shape == "BlankReservation" { " " } else { "reservation-1" },
+        "overlapping_reservation_id": if state.payload_shape == "InvalidOverlappingReservation" { "reservation 2" } else { "reservation-2" },
+        "owner_subtask_id": if state.payload_shape == "BlankOwnerSubtask" { " " } else { "subtask-1" },
+        "overlapping_owner_subtask_id": "subtask-2",
+        "scope_class": scope_class,
+        "scope_key": scope_key,
+        "overlapping_scope_class": overlapping_scope_class,
+        "overlapping_scope_key": overlapping_scope_key,
+    })
+    .to_string()
+}
+
+fn conflict_record_json(state: &ConflictRecordShapeState) -> serde_json::Value {
+    serde_json::json!({
+        "conflict_id": if state.conflict_id_valid { "conflict-1" } else { "conflict 1" },
+        "object_type": if state.object_shape == "ReservationObject" { "reservation" } else { "subtask" },
+        "object_id": if state.object_id_matches_payload { "reservation-1" } else { "reservation-3" },
+        "conflict_kind": if state.conflict_kind_shape == "ReservationOverlapKind" { "reservation_overlap" } else { "overlap" },
+        "payload_json": conflict_record_payload_json(state),
+        "detected_at": 100,
+        "resolution_state": conflict_record_resolution_state(state),
+    })
+}
+
+fn conflict_record_actual(state: &ConflictRecordShapeState) -> Option<Conflict> {
+    serde_json::from_value::<Conflict>(conflict_record_json(state)).ok()
+}
+
+fn replay_conflict_record_shape_trace(trace: &ConflictRecordShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: conflict record scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = conflict_record_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: conflict record reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: conflict record outcome disagrees with row facts"
+            ));
+        }
+        if state.typed_payload_valid != (state.payload_shape == "ValidPayload") {
+            violations.push(format!(
+                "state[{index}]: conflict record typed payload flag disagrees with payload shape"
+            ));
+        }
+        let actual = conflict_record_actual(state);
+        if actual.is_some() != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: conflict record constructor disagrees with model"
+            ));
+        }
+        if let Some(conflict) = actual {
+            if conflict.object_type() != covey::ObjectType::Reservation {
+                violations.push(format!(
+                    "state[{index}]: accepted conflict did not project reservation object type"
+                ));
+            }
+            if conflict.resolution_state().to_string() != conflict_record_resolution_state(state) {
+                violations.push(format!(
+                    "state[{index}]: conflict record resolution projection disagrees with model"
+                ));
+            }
+            let payload =
+                serde_json::from_str::<ReservationOverlapConflictPayload>(&conflict.payload_json());
+            match payload {
+                Ok(payload) => {
+                    if conflict.object_id() != payload.reservation_id()
+                        && conflict.object_id() != payload.overlapping_reservation_id()
+                    {
+                        violations.push(format!(
+                            "state[{index}]: accepted conflict object id is not bound to payload reservations"
+                        ));
+                    }
+                    if state.accepted && !state.payload_json_preserved {
+                        violations.push(format!(
+                            "state[{index}]: accepted conflict did not preserve typed payload JSON"
+                        ));
+                    }
+                    if state.accepted
+                        && (!state.scope_key_normalized
+                            || !state.overlapping_scope_key_normalized
+                            || !state.repo_global_key_canonical)
+                    {
+                        violations.push(format!(
+                            "state[{index}]: accepted conflict retained invalid scope shape"
+                        ));
+                    }
+                }
+                Err(_) => violations.push(format!(
+                    "state[{index}]: accepted conflict payload did not decode as reservation overlap"
+                )),
+            }
+        }
+    }
+    violations
+}
+
 fn conflict_resolution_expected_reject(state: &ConflictResolutionRequestState) -> &'static str {
     if !state.session_token_valid {
         "SessionTokenInvalid"
@@ -9080,6 +9304,11 @@ fn reservation_record_shape_trace() -> ReservationRecordShapeItfTrace {
 }
 
 #[fixture]
+fn conflict_record_shape_trace() -> ConflictRecordShapeItfTrace {
+    serde_json::from_str(COVEY_CONFLICT_RECORD_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -10981,6 +11210,61 @@ fn covey_replays_quint_reservation_record_shape_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_conflict_record_shape_itf_trace(
+    conflict_record_shape_trace: ConflictRecordShapeItfTrace,
+) {
+    assert!(
+        !conflict_record_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidOpenExactPathSubtree",
+        "ValidAcknowledgedRepoGlobal",
+        "ValidResolvedGeneratedSet",
+    ] {
+        assert!(
+            conflict_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "InvalidConflictId",
+        "UnknownConflictKind",
+        "WrongObjectType",
+        "WrongObjectId",
+        "MissingTypedPayload",
+        "BlankReservationId",
+        "InvalidOverlappingReservationId",
+        "BlankOwnerSubtaskId",
+        "RepoGlobalWrongKey",
+        "ScopeKeyMissing",
+        "ScopeKeyNotNormalized",
+        "OverlappingScopeKeyNotNormalized",
+    ] {
+        assert!(
+            conflict_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert!(
+        conflict_record_shape_trace.states.iter().any(|state| {
+            state.s.case == "ValidAcknowledgedRepoGlobal" && state.s.repo_global_key_canonical
+        }),
+        "fixture should cover accepted repo-global conflict payload"
+    );
+    assert_eq!(
+        replay_conflict_record_shape_trace(&conflict_record_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_conflict_resolution_request_itf_trace(
     conflict_resolution_request_trace: ConflictResolutionRequestItfTrace,
 ) {
@@ -12773,6 +13057,40 @@ fn covey_reservation_record_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: reservation record reject reason disagrees with row facts",
             "state[0]: reservation record outcome disagrees with row facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_conflict_record_shape_replay_reports_counterexample_shape() {
+    let state = ConflictRecordShapeState {
+        case_index: 13,
+        case: "ScopeKeyNotNormalized".to_owned(),
+        object_shape: "ReservationObject".to_owned(),
+        conflict_kind_shape: "ReservationOverlapKind".to_owned(),
+        payload_shape: "PaddedScopeKey".to_owned(),
+        resolution_state: "Open".to_owned(),
+        conflict_id_valid: true,
+        typed_payload_valid: true,
+        object_id_matches_payload: true,
+        scope_key_normalized: false,
+        overlapping_scope_key_normalized: true,
+        repo_global_key_canonical: true,
+        payload_json_preserved: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ConflictRecordShapeItfTrace {
+        states: vec![ConflictRecordShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_conflict_record_shape_trace(&trace),
+        vec![
+            "state[0]: conflict record typed payload flag disagrees with payload shape",
+            "state[0]: conflict record constructor disagrees with model",
         ]
     );
 }
