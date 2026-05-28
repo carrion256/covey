@@ -7,7 +7,7 @@ use covey::{
     ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
     RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationState, ResolveConflictReq, ReviewState,
+    RequestReviewReq, Reservation, ReservationState, ResolveConflictReq, Review, ReviewState,
     ReviewSubtask, ReviewTarget, ReviewVerdict, RuntimeAttestation, ScopeClass, Session,
     SessionHandle, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
     SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
@@ -113,6 +113,8 @@ const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRecordShape.itf.json");
+const COVEY_REVIEW_RECORD_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReviewRecordShape.itf.json");
 const COVEY_RESERVATION_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRecordShape.itf.json");
 
@@ -264,6 +266,16 @@ struct RuntimeAttestationRecordShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct RuntimeAttestationRecordShapeItfState {
     s: RuntimeAttestationRecordShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewRecordShapeItfTrace {
+    states: Vec<ReviewRecordShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewRecordShapeItfState {
+    s: ReviewRecordShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1028,6 +1040,38 @@ struct RuntimeAttestationRecordShapeState {
     provider_run_ref_present: bool,
     #[serde(rename = "legacyProviderRunMissing")]
     legacy_provider_run_missing: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewRecordShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    lifecycle: String,
+    #[serde(rename = "decisionShape", deserialize_with = "deserialize_itf_variant")]
+    decision_shape: String,
+    #[serde(
+        rename = "reviewSubtaskShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    review_subtask_shape: String,
+    #[serde(
+        rename = "timestampShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    timestamp_shape: String,
+    #[serde(rename = "verdictPresent")]
+    verdict_present: bool,
+    #[serde(rename = "findingsDigestPresent")]
+    findings_digest_present: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -7404,6 +7448,149 @@ fn replay_runtime_attestation_record_shape_trace(
     violations
 }
 
+fn review_record_expected_reject(state: &ReviewRecordShapeState) -> &'static str {
+    match state.review_subtask_shape.as_str() {
+        "MissingReviewSubtaskShape" | "BlankReviewSubtaskShape" => "ReviewSubtaskMissing",
+        "InvalidReviewSubtaskShape" => "ReviewSubtaskInvalid",
+        _ if state.timestamp_shape == "UpdatedBeforeCreatedShape" => "UpdatedBeforeCreatedReject",
+        _ if state.lifecycle != "Decided" && state.decision_shape != "NoDecision" => {
+            "NonDecidedCarriesDecisionEvidence"
+        }
+        _ if state.lifecycle == "Decided" && !state.verdict_present => {
+            "DecidedMissingVerdictReject"
+        }
+        _ if state.lifecycle == "Decided"
+            && (!state.findings_digest_present || state.decision_shape == "BlankFindings") =>
+        {
+            "DecidedMissingFindingsReject"
+        }
+        _ if state.lifecycle == "Decided" && state.decision_shape == "InvalidFindings" => {
+            "FindingsDigestInvalid"
+        }
+        _ => "NoReject",
+    }
+}
+
+fn review_record_state(state: &ReviewRecordShapeState) -> &'static str {
+    match state.lifecycle.as_str() {
+        "Requested" => "requested",
+        "InProgress" => "in_progress",
+        "Decided" => "decided",
+        "Superseded" => "superseded",
+        other => panic!("unexpected review record lifecycle from ITF trace: {other}"),
+    }
+}
+
+fn review_record_review_subtask_id(state: &ReviewRecordShapeState) -> serde_json::Value {
+    match state.review_subtask_shape.as_str() {
+        "MissingReviewSubtaskShape" => serde_json::Value::Null,
+        "BlankReviewSubtaskShape" => serde_json::json!(" "),
+        "InvalidReviewSubtaskShape" => serde_json::json!("review subtask"),
+        "ValidReviewSubtask" => serde_json::json!("review-subtask-1"),
+        other => panic!("unexpected review subtask shape from ITF trace: {other}"),
+    }
+}
+
+fn review_record_verdict(state: &ReviewRecordShapeState) -> serde_json::Value {
+    if !state.verdict_present {
+        return serde_json::Value::Null;
+    }
+    match state.case.as_str() {
+        "ValidDecidedBlocked" => serde_json::json!("blocked"),
+        _ => serde_json::json!("approve"),
+    }
+}
+
+fn review_record_findings_digest(state: &ReviewRecordShapeState) -> serde_json::Value {
+    if !state.findings_digest_present {
+        return serde_json::Value::Null;
+    }
+    match state.decision_shape.as_str() {
+        "BlankFindings" => serde_json::json!(" "),
+        "InvalidFindings" => serde_json::json!("findings"),
+        _ => serde_json::json!("blake3:findings"),
+    }
+}
+
+fn review_record_json(state: &ReviewRecordShapeState) -> serde_json::Value {
+    serde_json::json!({
+        "review_id": "review-1",
+        "subtask_id": "subtask-1",
+        "artifact_digest": "blake3:artifact",
+        "reviewer_session": "session-1",
+        "review_subtask_id": review_record_review_subtask_id(state),
+        "verdict": review_record_verdict(state),
+        "findings_digest": review_record_findings_digest(state),
+        "state": review_record_state(state),
+        "created_at": if state.timestamp_shape == "UpdatedBeforeCreatedShape" { 200 } else { 100 },
+        "updated_at": 100,
+    })
+}
+
+fn review_record_actual(state: &ReviewRecordShapeState) -> Option<Review> {
+    serde_json::from_value::<Review>(review_record_json(state)).ok()
+}
+
+fn replay_review_record_shape_trace(trace: &ReviewRecordShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: review record scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = review_record_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: review record reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: review record outcome disagrees with row facts"
+            ));
+        }
+        let actual = review_record_actual(state);
+        if actual.is_some() != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: review record constructor disagrees with model"
+            ));
+        }
+        if let Some(review) = actual {
+            if review.state().to_string() != review_record_state(state) {
+                violations.push(format!(
+                    "state[{index}]: review record lifecycle projection disagrees with model"
+                ));
+            }
+            if expected_accepted && state.lifecycle == "Decided" {
+                if review.verdict().is_none() || review.findings_digest().is_none() {
+                    violations.push(format!(
+                        "state[{index}]: decided review lost decision evidence"
+                    ));
+                }
+            }
+            if expected_accepted && state.lifecycle != "Decided" {
+                if review.verdict().is_some() || review.findings_digest().is_some() {
+                    violations.push(format!(
+                        "state[{index}]: non-decided review retained decision evidence"
+                    ));
+                }
+            }
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -8650,6 +8837,11 @@ fn record_lifecycle_shape_trace() -> RecordLifecycleShapeItfTrace {
 fn runtime_attestation_record_shape_trace() -> RuntimeAttestationRecordShapeItfTrace {
     serde_json::from_str(COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn review_record_shape_trace() -> ReviewRecordShapeItfTrace {
+    serde_json::from_str(COVEY_REVIEW_RECORD_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -10401,6 +10593,56 @@ fn covey_replays_quint_reservation_lifecycle_request_shape_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_review_record_shape_itf_trace(
+    review_record_shape_trace: ReviewRecordShapeItfTrace,
+) {
+    assert!(
+        !review_record_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidRequested",
+        "ValidInProgress",
+        "ValidDecidedApprove",
+        "ValidDecidedBlocked",
+        "ValidSuperseded",
+    ] {
+        assert!(
+            review_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "MissingReviewSubtask",
+        "BlankReviewSubtask",
+        "InvalidReviewSubtask",
+        "RequestedWithVerdict",
+        "InProgressWithFindings",
+        "SupersededWithDecision",
+        "DecidedMissingVerdict",
+        "DecidedMissingFindings",
+        "DecidedBlankFindings",
+        "DecidedInvalidFindings",
+        "UpdatedBeforeCreated",
+    ] {
+        assert!(
+            review_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_review_record_shape_trace(&review_record_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_reservation_record_shape_itf_trace(
     reservation_record_shape_trace: ReservationRecordShapeItfTrace,
 ) {
@@ -11311,6 +11553,35 @@ fn covey_runtime_attestation_record_shape_replay_reports_counterexample_shape() 
     assert_eq!(
         replay_runtime_attestation_record_shape_trace(&trace),
         vec!["state[0]: provider-run projection disagrees with model"]
+    );
+}
+
+#[rstest]
+fn covey_review_record_shape_replay_reports_counterexample_shape() {
+    let state = ReviewRecordShapeState {
+        case_index: 9,
+        case: "RequestedWithVerdict".to_owned(),
+        lifecycle: "Requested".to_owned(),
+        decision_shape: "VerdictOnly".to_owned(),
+        review_subtask_shape: "ValidReviewSubtask".to_owned(),
+        timestamp_shape: "Monotonic".to_owned(),
+        verdict_present: true,
+        findings_digest_present: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ReviewRecordShapeItfTrace {
+        states: vec![ReviewRecordShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_review_record_shape_trace(&trace),
+        vec![
+            "state[0]: review record reject reason disagrees with row facts",
+            "state[0]: review record outcome disagrees with row facts",
+        ]
     );
 }
 
