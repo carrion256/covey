@@ -1,8 +1,8 @@
 use covey::{
     ArtifactKind, ClaimReadyQueueReq, ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq,
-    OverlapQueryReq, PublishArtifactReq, RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
-    SettlementTarget,
+    MarkInFlightReq, OverlapQueryReq, PublishArtifactReq, RecordRuntimeAttestationReq,
+    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
+    ReviewVerdict, ScopeClass, SettlementTarget,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -46,6 +46,8 @@ const COVEY_ENQUEUE_FOR_APPLY_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyEnqueueForApplyRequestShape.itf.json");
 const COVEY_CLAIM_READY_QUEUE_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyClaimReadyQueueRequestShape.itf.json");
+const COVEY_MARK_IN_FLIGHT_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyMarkInFlightRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -265,6 +267,16 @@ struct ClaimReadyQueueRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ClaimReadyQueueRequestShapeItfState {
     s: ClaimReadyQueueRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkInFlightRequestShapeItfTrace {
+    states: Vec<MarkInFlightRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkInFlightRequestShapeItfState {
+    s: MarkInFlightRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -984,6 +996,28 @@ struct ClaimReadyQueueRequestShapeState {
     case: String,
     #[serde(rename = "sessionTokenValid")]
     session_token_valid: bool,
+    #[serde(rename = "leaseDurationPositive")]
+    lease_duration_positive: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkInFlightRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "queueIdValid")]
+    queue_id_valid: bool,
     #[serde(rename = "leaseDurationPositive")]
     lease_duration_positive: bool,
     #[serde(rename = "idempotencyKeyValid")]
@@ -3011,6 +3045,100 @@ fn replay_claim_ready_queue_request_shape_trace(
         if expected_accepted && !state.idempotency_key_valid {
             violations.push(format!(
                 "state[{index}]: accepted claim ready queue lacks idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn mark_in_flight_expected_reject(state: &MarkInFlightRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.queue_id_valid {
+        "QueueIdInvalid"
+    } else if !state.lease_duration_positive {
+        "LeaseDurationInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn mark_in_flight_lease_duration(state: &MarkInFlightRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ZeroLeaseDuration" => 0,
+        "NegativeLeaseDuration" => -1,
+        _ => 30_000,
+    }
+}
+
+fn mark_in_flight_actual_accepts(state: &MarkInFlightRequestShapeState) -> bool {
+    MarkInFlightReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        },
+        if state.queue_id_valid { "queue-1" } else { "" },
+        mark_in_flight_lease_duration(state),
+        if state.idempotency_key_valid {
+            "idem-mark-in-flight"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_mark_in_flight_request_shape_trace(
+    trace: &MarkInFlightRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: mark in flight scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = mark_in_flight_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: mark in flight reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: mark in flight outcome disagrees with validation facts"
+            ));
+        }
+        if mark_in_flight_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: mark in flight parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.queue_id_valid
+                || !state.lease_duration_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted mark in flight has invalid session, queue, or lease"
+            ));
+        }
+        if expected_accepted && !state.idempotency_key_valid {
+            violations.push(format!(
+                "state[{index}]: accepted mark in flight lacks idempotency key"
             ));
         }
     }
@@ -5580,6 +5708,12 @@ fn claim_ready_queue_request_shape_trace() -> ClaimReadyQueueRequestShapeItfTrac
 }
 
 #[fixture]
+fn mark_in_flight_request_shape_trace() -> MarkInFlightRequestShapeItfTrace {
+    serde_json::from_str(COVEY_MARK_IN_FLIGHT_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
     serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -6382,6 +6516,43 @@ fn covey_replays_quint_claim_ready_queue_request_shape_itf_trace(
     );
     assert_eq!(
         replay_claim_ready_queue_request_shape_trace(&claim_ready_queue_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_mark_in_flight_request_shape_itf_trace(
+    mark_in_flight_request_shape_trace: MarkInFlightRequestShapeItfTrace,
+) {
+    assert!(
+        !mark_in_flight_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidMarkInFlight",
+        "InvalidSessionToken",
+        "InvalidQueueId",
+        "ZeroLeaseDuration",
+        "NegativeLeaseDuration",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            mark_in_flight_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        mark_in_flight_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidMarkInFlight" && state.s.accepted),
+        "fixture should cover accepted mark-in-flight request"
+    );
+    assert_eq!(
+        replay_mark_in_flight_request_shape_trace(&mark_in_flight_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -7613,6 +7784,33 @@ fn covey_claim_ready_queue_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: claim ready queue reject reason does not match validation facts",
             "state[0]: claim ready queue outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_mark_in_flight_request_shape_replay_reports_counterexample_shape() {
+    let state = MarkInFlightRequestShapeState {
+        case_index: 3,
+        case: "InvalidQueueId".to_owned(),
+        session_token_valid: true,
+        queue_id_valid: false,
+        lease_duration_positive: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = MarkInFlightRequestShapeItfTrace {
+        states: vec![MarkInFlightRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_mark_in_flight_request_shape_trace(&trace),
+        vec![
+            "state[0]: mark in flight reject reason does not match validation facts",
+            "state[0]: mark in flight outcome disagrees with validation facts",
         ]
     );
 }
