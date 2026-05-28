@@ -5,8 +5,9 @@ use covey::{
     OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
     RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
-    StartSubtaskReq, SubmitMetaTaskReq, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass, SessionHandle, SessionRole,
+    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SupersedeQueueItemReq,
+    VerifyLandingAuthorizationReq,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -38,6 +39,8 @@ const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 const COVEY_SESSION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionRequestShape.itf.json");
+const COVEY_SESSION_HANDLE_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveySessionHandleShape.itf.json");
 const COVEY_META_TASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMetaTaskRequestShape.itf.json");
 const COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF: &str =
@@ -233,6 +236,16 @@ struct SessionRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct SessionRequestShapeItfState {
     s: SessionRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionHandleShapeItfTrace {
+    states: Vec<SessionHandleShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionHandleShapeItfState {
+    s: SessionHandleShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -940,6 +953,28 @@ struct SessionRequestShapeState {
     session_token_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionHandleShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    role: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "agentPrincipalValid")]
+    agent_principal_valid: bool,
+    #[serde(rename = "agentInstanceValid")]
+    agent_instance_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -2733,6 +2768,95 @@ fn replay_session_request_shape_trace(trace: &SessionRequestShapeItfTrace) -> Ve
         if expected_accepted && state.operation != "RegisterSession" && !state.session_token_valid {
             violations.push(format!(
                 "state[{index}]: accepted session lifecycle request lacks session token"
+            ));
+        }
+    }
+    violations
+}
+
+fn session_handle_expected_reject(state: &SessionHandleShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.agent_principal_valid {
+        "AgentPrincipalInvalid"
+    } else if !state.agent_instance_valid {
+        "AgentInstanceInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn session_handle_role(state: &SessionHandleShapeState) -> SessionRole {
+    match state.role.as_str() {
+        "Reviewer" => SessionRole::Reviewer,
+        "Orchestrator" => SessionRole::Orchestrator,
+        _ => SessionRole::Executor,
+    }
+}
+
+fn session_handle_actual_accepts(state: &SessionHandleShapeState) -> bool {
+    SessionHandle::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        },
+        if state.agent_principal_valid {
+            "agent-principal-1"
+        } else {
+            "agent principal 1"
+        },
+        if state.agent_instance_valid {
+            "agent-instance-1"
+        } else {
+            ""
+        },
+        session_handle_role(state),
+    )
+    .is_ok()
+}
+
+fn replay_session_handle_shape_trace(trace: &SessionHandleShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: session handle scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = session_handle_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: session handle reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: session handle outcome disagrees with validation facts"
+            ));
+        }
+        if session_handle_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: session handle parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.agent_principal_valid
+                || !state.agent_instance_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted session handle lacks validated identity"
             ));
         }
     }
@@ -7354,6 +7478,11 @@ fn session_request_shape_trace() -> SessionRequestShapeItfTrace {
 }
 
 #[fixture]
+fn session_handle_shape_trace() -> SessionHandleShapeItfTrace {
+    serde_json::from_str(COVEY_SESSION_HANDLE_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn meta_task_request_shape_trace() -> MetaTaskRequestShapeItfTrace {
     serde_json::from_str(COVEY_META_TASK_REQUEST_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -8004,6 +8133,45 @@ fn covey_replays_quint_session_request_shape_itf_trace(
     }
     assert_eq!(
         replay_session_request_shape_trace(&session_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_session_handle_shape_itf_trace(
+    session_handle_shape_trace: SessionHandleShapeItfTrace,
+) {
+    assert!(
+        !session_handle_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidExecutorHandle",
+        "ValidReviewerHandle",
+        "ValidOrchestratorHandle",
+        "InvalidSessionToken",
+        "InvalidAgentPrincipal",
+        "InvalidAgentInstance",
+    ] {
+        assert!(
+            session_handle_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in ["Executor", "Reviewer", "Orchestrator"] {
+        assert!(
+            session_handle_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.role == expected && state.s.accepted),
+            "fixture should cover accepted {expected} handles"
+        );
+    }
+    assert_eq!(
+        replay_session_handle_shape_trace(&session_handle_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -9684,6 +9852,33 @@ fn covey_session_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: session request reject reason does not match validation facts",
             "state[0]: session request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_session_handle_shape_replay_reports_counterexample_shape() {
+    let state = SessionHandleShapeState {
+        case_index: 4,
+        case: "InvalidSessionToken".to_owned(),
+        role: "Executor".to_owned(),
+        session_token_valid: false,
+        agent_principal_valid: true,
+        agent_instance_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = SessionHandleShapeItfTrace {
+        states: vec![SessionHandleShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_session_handle_shape_trace(&trace),
+        vec![
+            "state[0]: session handle reject reason does not match validation facts",
+            "state[0]: session handle outcome disagrees with validation facts",
         ]
     );
 }
