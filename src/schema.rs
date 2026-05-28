@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::{
     error::{CoveyError, Result},
-    model::{ActorKind, EventType, ObjectType, object_type_name},
+    model::{ActorKind, Event, EventType, ObjectType, SessionToken, TimestampMs, object_type_name},
 };
 
 pub(crate) const SYSTEM_EVENT_SESSION_TOKEN: &str = "__covey_system__";
@@ -147,9 +147,35 @@ pub(crate) fn append_event<'a, T: Serialize>(
     payload: &T,
     now: i64,
 ) -> Result<()> {
+    let payload_json = serde_json::to_string(payload)?;
+    let created_at = TimestampMs::parse(now)?;
     let (actor_kind, session_token) = match actor.into() {
-        EventActor::Session(session_token) => (ActorKind::Session, session_token),
-        EventActor::System => (ActorKind::System, SYSTEM_EVENT_SESSION_TOKEN),
+        EventActor::Session(session_token) => {
+            let parsed_session_token = SessionToken::parse(session_token)?;
+            Event::session(
+                1,
+                event_type,
+                object_type,
+                object_id.to_owned(),
+                parsed_session_token,
+                payload_json.clone(),
+                created_at,
+            )
+            .map_err(|reason| CoveyError::InvalidEventShape { reason })?;
+            (ActorKind::Session, session_token)
+        }
+        EventActor::System => {
+            Event::system(
+                1,
+                event_type,
+                object_type,
+                object_id.to_owned(),
+                payload_json.clone(),
+                created_at,
+            )
+            .map_err(|reason| CoveyError::InvalidEventShape { reason })?;
+            (ActorKind::System, SYSTEM_EVENT_SESSION_TOKEN)
+        }
     };
     tx.execute(
         r#"
@@ -162,9 +188,79 @@ pub(crate) fn append_event<'a, T: Serialize>(
             object_id,
             actor_kind_name(actor_kind),
             session_token,
-            serde_json::to_string(payload)?,
+            payload_json,
             now
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn migrated_connection() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        apply_pragmas(&conn).expect("apply pragmas");
+        apply_migrations(&mut conn).expect("apply migrations");
+        conn
+    }
+
+    #[test]
+    fn append_event_rejects_payload_type_mismatch_without_writing() {
+        let mut conn = migrated_connection();
+        let tx = conn.transaction().expect("open write transaction");
+
+        let err = append_event(
+            &tx,
+            EventType::SessionHeartbeat,
+            ObjectType::Session,
+            "session-1",
+            "session-1",
+            &json!({"stale_sessions": 1}),
+            123,
+        )
+        .expect_err("mismatched event payload must be rejected before insert");
+
+        assert!(
+            matches!(err, CoveyError::InvalidEventShape { .. }),
+            "unexpected error: {err}"
+        );
+        let event_count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM event_log", [], |row| row.get(0))
+            .expect("count event rows");
+        assert_eq!(event_count, 0);
+    }
+
+    #[test]
+    fn append_event_rejects_object_type_mismatch_without_writing() {
+        let mut conn = migrated_connection();
+        let tx = conn.transaction().expect("open write transaction");
+        let payload = json!({
+            "session_token": "session-1",
+            "idempotency_key": "idem-1"
+        });
+
+        let err = append_event(
+            &tx,
+            EventType::SessionHeartbeat,
+            ObjectType::Claim,
+            "session-1",
+            "session-1",
+            &payload,
+            123,
+        )
+        .expect_err("mismatched event object type must be rejected before insert");
+
+        assert!(
+            matches!(err, CoveyError::InvalidEventShape { .. }),
+            "unexpected error: {err}"
+        );
+        let event_count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM event_log", [], |row| row.get(0))
+            .expect("count event rows");
+        assert_eq!(event_count, 0);
+    }
 }

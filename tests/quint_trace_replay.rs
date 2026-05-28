@@ -13,6 +13,7 @@ const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandin
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
     include_str!("fixtures/quint/CoveyMutationIdempotency.itf.json");
+const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -92,6 +93,16 @@ struct MutationIdempotencyItfTrace {
 #[derive(Debug, Deserialize)]
 struct MutationIdempotencyItfState {
     s: MutationIdempotencyState,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventLogItfTrace {
+    states: Vec<EventLogItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventLogItfState {
+    s: EventLogState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,6 +343,64 @@ struct MutationIdempotencyState {
     last_record_write_delta: i64,
     #[serde(rename = "identityMatchedBeforeAttempt")]
     identity_matched_before_attempt: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventLogRecordState {
+    present: bool,
+    #[serde(deserialize_with = "deserialize_itf_bigint")]
+    seq: i64,
+    #[serde(rename = "eventType", deserialize_with = "deserialize_itf_variant")]
+    event_type: String,
+    #[serde(rename = "objectType", deserialize_with = "deserialize_itf_variant")]
+    object_type: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    actor: String,
+    #[serde(rename = "visibleSessionToken")]
+    visible_session_token: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    payload: String,
+    readable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventLogState {
+    e0: EventLogRecordState,
+    e1: EventLogRecordState,
+    #[serde(rename = "nextSeq", deserialize_with = "deserialize_itf_bigint")]
+    next_seq: i64,
+    #[serde(rename = "lastOutcome", deserialize_with = "deserialize_itf_variant")]
+    last_outcome: String,
+    #[serde(rename = "lastEventType", deserialize_with = "deserialize_itf_variant")]
+    last_event_type: String,
+    #[serde(
+        rename = "lastObjectType",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    last_object_type: String,
+    #[serde(rename = "lastActor", deserialize_with = "deserialize_itf_variant")]
+    last_actor: String,
+    #[serde(rename = "lastToken", deserialize_with = "deserialize_itf_variant")]
+    last_token: String,
+    #[serde(rename = "lastPayload", deserialize_with = "deserialize_itf_variant")]
+    last_payload: String,
+    #[serde(rename = "lastMutationOk")]
+    last_mutation_ok: bool,
+    #[serde(rename = "lastPayloadMatches")]
+    last_payload_matches: bool,
+    #[serde(rename = "lastObjectMatches")]
+    last_object_matches: bool,
+    #[serde(rename = "lastActorValid")]
+    last_actor_valid: bool,
+    #[serde(rename = "lastReadable")]
+    last_readable: bool,
+    #[serde(
+        rename = "lastSeqAssigned",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    last_seq_assigned: i64,
+    #[serde(rename = "lastCountDelta", deserialize_with = "deserialize_itf_bigint")]
+    last_count_delta: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1236,6 +1305,157 @@ fn replay_mutation_idempotency_trace(trace: &MutationIdempotencyItfTrace) -> Vec
     violations
 }
 
+fn event_log_record_count(state: &EventLogState) -> i64 {
+    i64::from(state.e0.present) + i64::from(state.e1.present)
+}
+
+fn event_log_expected_event_type(payload: &str) -> &'static str {
+    match payload {
+        "HeartbeatPayload" => "SessionHeartbeat",
+        "ExpiredCountPayload" => "ClaimsExpired",
+        _ => "NoEvent",
+    }
+}
+
+fn event_log_expected_object_type(payload: &str) -> &'static str {
+    match payload {
+        "HeartbeatPayload" => "Session",
+        "ExpiredCountPayload" => "Claim",
+        _ => "NoObject",
+    }
+}
+
+fn event_log_payload_matches(event_type: &str, payload: &str) -> bool {
+    !matches!(payload, "NoPayload" | "MalformedPayload")
+        && event_log_expected_event_type(payload) == event_type
+}
+
+fn event_log_object_matches(object_type: &str, payload: &str) -> bool {
+    !matches!(payload, "NoPayload" | "MalformedPayload")
+        && event_log_expected_object_type(payload) == object_type
+}
+
+fn event_log_actor_valid(actor: &str, token: &str) -> bool {
+    matches!(
+        (actor, token),
+        ("SessionActor", "ValidSessionToken") | ("SystemActor", "SystemSentinel")
+    )
+}
+
+fn replay_event_log_trace(trace: &EventLogItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous: Option<&EventLogState> = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        let count = event_log_record_count(state);
+        if state.next_seq != count + 1 {
+            violations.push(format!(
+                "{prefix}: next event sequence does not match append-only count"
+            ));
+        }
+        if state.e0.present && state.e0.seq != 1 {
+            violations.push(format!("{prefix}: first event does not have sequence 1"));
+        }
+        if state.e1.present && !(state.e0.present && state.e1.seq == 2) {
+            violations.push(format!(
+                "{prefix}: second event is not contiguous after first event"
+            ));
+        }
+        for (slot, record) in [("e0", &state.e0), ("e1", &state.e1)] {
+            if !record.present {
+                continue;
+            }
+            if !record.readable {
+                violations.push(format!("{prefix}: {slot} committed unreadable event row"));
+            }
+            if !event_log_payload_matches(&record.event_type, &record.payload) {
+                violations.push(format!(
+                    "{prefix}: {slot} event_type does not match payload"
+                ));
+            }
+            if !event_log_object_matches(&record.object_type, &record.payload) {
+                violations.push(format!(
+                    "{prefix}: {slot} object_type does not match payload"
+                ));
+            }
+            if record.actor == "SessionActor" && !record.visible_session_token {
+                violations.push(format!("{prefix}: {slot} session actor lacks token"));
+            }
+            if record.actor == "SystemActor" && record.visible_session_token {
+                violations.push(format!("{prefix}: {slot} system actor exposed token"));
+            }
+        }
+        let expected_payload_match =
+            event_log_payload_matches(&state.last_event_type, &state.last_payload);
+        let expected_object_match =
+            event_log_object_matches(&state.last_object_type, &state.last_payload);
+        let expected_actor_valid = event_log_actor_valid(&state.last_actor, &state.last_token);
+        let expected_readable =
+            expected_payload_match && expected_object_match && expected_actor_valid;
+        if state.last_payload_matches != expected_payload_match {
+            violations.push(format!(
+                "{prefix}: last payload-match marker disagrees with event type"
+            ));
+        }
+        if state.last_object_matches != expected_object_match {
+            violations.push(format!(
+                "{prefix}: last object-match marker disagrees with payload"
+            ));
+        }
+        if state.last_actor_valid != expected_actor_valid {
+            violations.push(format!(
+                "{prefix}: last actor-valid marker disagrees with actor/token"
+            ));
+        }
+        if state.last_readable != expected_readable {
+            violations.push(format!(
+                "{prefix}: last readable marker disagrees with event shape"
+            ));
+        }
+        if matches!(
+            state.last_outcome.as_str(),
+            "Rejected" | "SerializeFailed" | "RolledBack" | "CapacityFull"
+        ) && (state.last_count_delta != 0 || state.last_seq_assigned != 0)
+        {
+            violations.push(format!(
+                "{prefix}: rejected or rolled-back append consumed event sequence"
+            ));
+        }
+        if state.last_outcome == "Committed"
+            && !(state.last_readable
+                && state.last_mutation_ok
+                && state.last_count_delta == 1
+                && state.last_seq_assigned > 0)
+        {
+            violations.push(format!(
+                "{prefix}: committed append did not add exactly one readable event"
+            ));
+        }
+        if !state.last_readable
+            && !matches!(
+                state.last_outcome.as_str(),
+                "NoAttempt" | "Rejected" | "SerializeFailed"
+            )
+        {
+            violations.push(format!("{prefix}: unreadable append was not rejected"));
+        }
+        if let Some(previous_state) = previous {
+            let previous_count = event_log_record_count(previous_state);
+            if count < previous_count {
+                violations.push(format!("{prefix}: event log count moved backward"));
+            }
+            if count - previous_count != state.last_count_delta {
+                violations.push(format!(
+                    "{prefix}: event count delta disagrees with previous state"
+                ));
+            }
+        }
+        previous = Some(state);
+    }
+    violations
+}
+
 #[fixture]
 fn review_followup_trace() -> ItfTrace {
     serde_json::from_str(COVEY_REVIEW_FOLLOWUP_ITF).expect("fixture must be valid ITF JSON")
@@ -1274,6 +1494,11 @@ fn openspec_import_trace() -> OpenSpecImportItfTrace {
 #[fixture]
 fn mutation_idempotency_trace() -> MutationIdempotencyItfTrace {
     serde_json::from_str(COVEY_MUTATION_IDEMPOTENCY_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn event_log_trace() -> EventLogItfTrace {
+    serde_json::from_str(COVEY_EVENT_LOG_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[rstest]
@@ -1438,6 +1663,42 @@ fn covey_replays_quint_mutation_idempotency_itf_trace(
     );
     assert_eq!(
         replay_mutation_idempotency_trace(&mutation_idempotency_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_event_log_itf_trace(event_log_trace: EventLogItfTrace) {
+    assert!(
+        !event_log_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "Rejected",
+        "SerializeFailed",
+        "RolledBack",
+        "Committed",
+        "CapacityFull",
+    ] {
+        assert!(
+            event_log_trace
+                .states
+                .iter()
+                .any(|state| state.s.last_outcome == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        event_log_trace
+            .states
+            .iter()
+            .any(|state| state.s.last_outcome == "Committed"
+                && state.s.last_actor == "SystemActor"
+                && !state.s.e1.visible_session_token),
+        "fixture should cover system event token normalization"
+    );
+    assert_eq!(
+        replay_event_log_trace(&event_log_trace),
         Vec::<String>::new()
     );
 }
@@ -1718,6 +1979,64 @@ fn covey_mutation_idempotency_replay_reports_counterexample_shape() {
             "state[0]: duplicate idempotency records share one actor/operation/key",
             "state[0]: request drift conflict mutated state or crossed namespace",
             "state[0]: failed idempotent mutation wrote state",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_event_log_replay_reports_counterexample_shape() {
+    let bad_record = EventLogRecordState {
+        present: true,
+        seq: 1,
+        event_type: "SessionHeartbeat".to_owned(),
+        object_type: "Claim".to_owned(),
+        actor: "SystemActor".to_owned(),
+        visible_session_token: true,
+        payload: "ExpiredCountPayload".to_owned(),
+        readable: false,
+    };
+    let state = EventLogState {
+        e0: bad_record,
+        e1: EventLogRecordState {
+            present: false,
+            seq: 0,
+            event_type: "NoEvent".to_owned(),
+            object_type: "NoObject".to_owned(),
+            actor: "NoActor".to_owned(),
+            visible_session_token: false,
+            payload: "NoPayload".to_owned(),
+            readable: true,
+        },
+        next_seq: 3,
+        last_outcome: "Committed".to_owned(),
+        last_event_type: "SessionHeartbeat".to_owned(),
+        last_object_type: "Session".to_owned(),
+        last_actor: "SessionActor".to_owned(),
+        last_token: "ValidSessionToken".to_owned(),
+        last_payload: "MalformedPayload".to_owned(),
+        last_mutation_ok: false,
+        last_payload_matches: true,
+        last_object_matches: true,
+        last_actor_valid: true,
+        last_readable: false,
+        last_seq_assigned: 2,
+        last_count_delta: 0,
+    };
+    let trace = EventLogItfTrace {
+        states: vec![EventLogItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_event_log_trace(&trace),
+        vec![
+            "state[0]: next event sequence does not match append-only count",
+            "state[0]: e0 committed unreadable event row",
+            "state[0]: e0 event_type does not match payload",
+            "state[0]: e0 system actor exposed token",
+            "state[0]: last payload-match marker disagrees with event type",
+            "state[0]: last object-match marker disagrees with payload",
+            "state[0]: committed append did not add exactly one readable event",
+            "state[0]: unreadable append was not rejected",
         ]
     );
 }
