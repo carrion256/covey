@@ -10,18 +10,18 @@ use super::{
     MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, MetaTaskStatus, ObjectType,
     OpenSpecImportProvenance, OpenSpecImportProvenanceCommon, OpenSpecSourceDigest, OpenSpecTaskId,
     OverlapQueryReq, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem,
-    ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
-    RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationId, ReservationOverlapConflictPayload,
-    ReservationScope, ReservationState, ResolveConflictReq, Review, ReviewSubtask, ReviewTarget,
-    ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole, SessionState, SessionStatus,
-    SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq, StuckSubtask,
-    SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority,
-    SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
-    TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id,
-    make_id, parse_generated_members,
+    ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact,
+    RepoopsAuthorityLockFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq,
+    RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
+    ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
+    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
+    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
+    StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
+    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
+    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq,
+    WorkSubtask, bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
@@ -2179,6 +2179,96 @@ fn landing_authorization_payload_rejects_invalid_typed_fields() {
     });
     serde_json::from_value::<VerifyLandingAuthorizationReq>(invalid_seal_digest)
         .expect_err("landing authorization should reject invalid seal digests");
+}
+
+#[test]
+fn landing_receipt_payload_rejects_invalid_typed_fields() {
+    let req = RecordLandingReceiptReq::try_from_raw_parts(
+        "session-1",
+        "queue-1",
+        "blake3:artifact",
+        1,
+        "refs/heads/main",
+        "0123456789abcdef",
+    )
+    .expect("valid landing receipt request");
+    assert_eq!(req.session_token, "session-1");
+    let value = serde_json::to_value(&req).expect("landing receipt request serializes");
+    assert_eq!(value["session_token"], "session-1");
+    assert_eq!(value["queue_id"], "queue-1");
+    assert_eq!(value["artifact_digest"], "blake3:artifact");
+    assert_eq!(value["claim_fence_seq"], 1);
+    assert_eq!(value["target_ref"], "refs/heads/main");
+    assert_eq!(value["landed_commit_oid"], "0123456789abcdef");
+    let decoded: RecordLandingReceiptReq =
+        serde_json::from_value(value).expect("landing receipt request deserializes");
+    assert_eq!(decoded, req);
+
+    let invalid_session_token = serde_json::json!({
+        "session_token": "session 1",
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "claim_fence_seq": 1,
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": "0123456789abcdef"
+    });
+    serde_json::from_value::<RecordLandingReceiptReq>(invalid_session_token)
+        .expect_err("landing receipt should reject invalid session tokens");
+
+    let invalid_queue_id = serde_json::json!({
+        "session_token": "session-1",
+        "queue_id": "",
+        "artifact_digest": "blake3:artifact",
+        "claim_fence_seq": 1,
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": "0123456789abcdef"
+    });
+    serde_json::from_value::<RecordLandingReceiptReq>(invalid_queue_id)
+        .expect_err("landing receipt should reject invalid queue ids");
+
+    let invalid_artifact_digest = serde_json::json!({
+        "session_token": "session-1",
+        "queue_id": "queue-1",
+        "artifact_digest": "artifact",
+        "claim_fence_seq": 1,
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": "0123456789abcdef"
+    });
+    serde_json::from_value::<RecordLandingReceiptReq>(invalid_artifact_digest)
+        .expect_err("landing receipt should reject invalid artifact digests");
+
+    let invalid_fence = serde_json::json!({
+        "session_token": "session-1",
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "claim_fence_seq": 0,
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": "0123456789abcdef"
+    });
+    serde_json::from_value::<RecordLandingReceiptReq>(invalid_fence)
+        .expect_err("landing receipt should reject invalid fence sequences");
+
+    let invalid_target_ref = serde_json::json!({
+        "session_token": "session-1",
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "claim_fence_seq": 1,
+        "target_ref": "refs heads main",
+        "landed_commit_oid": "0123456789abcdef"
+    });
+    serde_json::from_value::<RecordLandingReceiptReq>(invalid_target_ref)
+        .expect_err("landing receipt should reject invalid target refs");
+
+    let invalid_landed_commit_oid = serde_json::json!({
+        "session_token": "session-1",
+        "queue_id": "queue-1",
+        "artifact_digest": "blake3:artifact",
+        "claim_fence_seq": 1,
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": "not-a-hex-oid"
+    });
+    serde_json::from_value::<RecordLandingReceiptReq>(invalid_landed_commit_oid)
+        .expect_err("landing receipt should reject invalid commit oids");
 }
 
 #[test]
