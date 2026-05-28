@@ -1,7 +1,7 @@
 use covey::{
-    ArtifactKind, ConflictResolutionState, OverlapQueryReq, PublishArtifactReq,
+    ArtifactKind, ConflictResolutionState, DecideReviewReq, OverlapQueryReq, PublishArtifactReq,
     RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    ResolveConflictReq, ScopeClass,
+    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -37,6 +37,10 @@ const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRequestShape.itf.json");
 const COVEY_PUBLISH_ARTIFACT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyPublishArtifactRequestShape.itf.json");
+const COVEY_DECIDE_REVIEW_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyDecideReviewRequestShape.itf.json");
+const COVEY_REQUEST_REVIEW_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyRequestReviewRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -216,6 +220,26 @@ struct PublishArtifactRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct PublishArtifactRequestShapeItfState {
     s: PublishArtifactRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideReviewRequestShapeItfTrace {
+    states: Vec<DecideReviewRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideReviewRequestShapeItfState {
+    s: DecideReviewRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestReviewRequestShapeItfTrace {
+    states: Vec<RequestReviewRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestReviewRequestShapeItfState {
+    s: RequestReviewRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -834,6 +858,62 @@ struct PublishArtifactRequestShapeState {
     manifest_path_no_control: bool,
     #[serde(rename = "changedPathsDigestValid")]
     changed_paths_digest_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideReviewRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    verdict: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "reviewIdValid")]
+    review_id_valid: bool,
+    #[serde(rename = "claimIdValid")]
+    claim_id_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "findingsDigestValid")]
+    findings_digest_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestReviewRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "subtaskIdValid")]
+    subtask_id_valid: bool,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "explicitReviewSubtaskPresent")]
+    explicit_review_subtask_present: bool,
+    #[serde(rename = "reviewSubtaskIdValid")]
+    review_subtask_id_valid: bool,
+    #[serde(rename = "priorityValid")]
+    priority_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -2430,6 +2510,248 @@ fn replay_publish_artifact_request_shape_trace(
         if expected_accepted && !state.idempotency_key_valid {
             violations.push(format!(
                 "state[{index}]: accepted publish artifact request lacks idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn decide_review_expected_reject(state: &DecideReviewRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.review_id_valid {
+        "ReviewIdInvalid"
+    } else if !state.claim_id_valid {
+        "ClaimIdInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.findings_digest_valid {
+        "FindingsDigestInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn decide_review_verdict(state: &DecideReviewRequestShapeState) -> ReviewVerdict {
+    match state.verdict.as_str() {
+        "Approve" => ReviewVerdict::Approve,
+        "ChangesRequested" => ReviewVerdict::ChangesRequested,
+        "Blocked" => ReviewVerdict::Blocked,
+        verdict => panic!("unexpected review verdict from ITF trace: {verdict}"),
+    }
+}
+
+fn decide_review_actual_accepts(state: &DecideReviewRequestShapeState) -> bool {
+    DecideReviewReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-reviewer"
+        } else {
+            "session reviewer"
+        },
+        if state.review_id_valid {
+            "review-1".to_owned()
+        } else {
+            "review 1".to_owned()
+        },
+        if state.claim_id_valid {
+            "claim-review"
+        } else {
+            ""
+        },
+        if state.fence_seq_positive { 1 } else { 0 },
+        decide_review_verdict(state),
+        if state.findings_digest_valid {
+            "blake3:findings".to_owned()
+        } else {
+            "findings".to_owned()
+        },
+        if state.idempotency_key_valid {
+            "idem-decision"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_decide_review_request_shape_trace(
+    trace: &DecideReviewRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: decide review scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = decide_review_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: decide review reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: decide review outcome disagrees with validation facts"
+            ));
+        }
+        if decide_review_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: decide review parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.review_id_valid
+                || !state.claim_id_valid
+                || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted decide review has invalid review claim or fence"
+            ));
+        }
+        if expected_accepted && (!state.findings_digest_valid || !state.idempotency_key_valid) {
+            violations.push(format!(
+                "state[{index}]: accepted decide review has invalid findings or idempotency key"
+            ));
+        }
+    }
+    violations
+}
+
+fn request_review_expected_reject(state: &RequestReviewRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.subtask_id_valid {
+        "SubtaskIdInvalid"
+    } else if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if state.explicit_review_subtask_present && !state.review_subtask_id_valid {
+        "ReviewSubtaskIdInvalid"
+    } else if !state.priority_valid {
+        "PriorityInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn request_review_priority(state: &RequestReviewRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "NegativePriority" => -1,
+        "TooHighPriority" => 1001,
+        _ => 7,
+    }
+}
+
+fn request_review_actual_accepts(state: &RequestReviewRequestShapeState) -> bool {
+    RequestReviewReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.subtask_id_valid {
+            "subtask-1"
+        } else {
+            "subtask 1"
+        },
+        if state.artifact_digest_valid {
+            "blake3:artifact"
+        } else {
+            "artifact"
+        },
+        if state.explicit_review_subtask_present {
+            Some(
+                if state.review_subtask_id_valid {
+                    "review-subtask-1"
+                } else {
+                    "review subtask"
+                }
+                .to_owned(),
+            )
+        } else {
+            None
+        },
+        request_review_priority(state),
+        if state.idempotency_key_valid {
+            "idem-review"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_request_review_request_shape_trace(
+    trace: &RequestReviewRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: request review scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = request_review_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: request review reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: request review outcome disagrees with validation facts"
+            ));
+        }
+        if request_review_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: request review parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.subtask_id_valid
+                || !state.artifact_digest_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted request review has invalid session, subtask, or artifact"
+            ));
+        }
+        if expected_accepted
+            && state.explicit_review_subtask_present
+            && !state.review_subtask_id_valid
+        {
+            violations.push(format!(
+                "state[{index}]: accepted request review has invalid explicit review subtask"
+            ));
+        }
+        if expected_accepted && (!state.priority_valid || !state.idempotency_key_valid) {
+            violations.push(format!(
+                "state[{index}]: accepted request review has invalid priority or idempotency key"
             ));
         }
     }
@@ -4975,6 +5297,18 @@ fn publish_artifact_request_shape_trace() -> PublishArtifactRequestShapeItfTrace
 }
 
 #[fixture]
+fn decide_review_request_shape_trace() -> DecideReviewRequestShapeItfTrace {
+    serde_json::from_str(COVEY_DECIDE_REVIEW_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn request_review_request_shape_trace() -> RequestReviewRequestShapeItfTrace {
+    serde_json::from_str(COVEY_REQUEST_REVIEW_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
     serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -5619,6 +5953,92 @@ fn covey_replays_quint_publish_artifact_request_shape_itf_trace(
     );
     assert_eq!(
         replay_publish_artifact_request_shape_trace(&publish_artifact_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_decide_review_request_shape_itf_trace(
+    decide_review_request_shape_trace: DecideReviewRequestShapeItfTrace,
+) {
+    assert!(
+        !decide_review_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidApprove",
+        "ValidChangesRequested",
+        "ValidBlocked",
+        "InvalidSessionToken",
+        "InvalidReviewId",
+        "InvalidClaimId",
+        "NonPositiveFence",
+        "InvalidFindingsDigest",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            decide_review_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in ["Approve", "ChangesRequested", "Blocked"] {
+        assert!(
+            decide_review_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.verdict == expected && state.s.accepted),
+            "fixture should cover accepted {expected} review decisions"
+        );
+    }
+    assert_eq!(
+        replay_decide_review_request_shape_trace(&decide_review_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_request_review_request_shape_itf_trace(
+    request_review_request_shape_trace: RequestReviewRequestShapeItfTrace,
+) {
+    assert!(
+        !request_review_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidAutoReviewSubtask",
+        "ValidExplicitReviewSubtask",
+        "InvalidSessionToken",
+        "InvalidSubtaskId",
+        "InvalidArtifactDigest",
+        "InvalidReviewSubtaskId",
+        "NegativePriority",
+        "TooHighPriority",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            request_review_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        request_review_request_shape_trace
+            .states
+            .iter()
+            .any(|state| {
+                state.s.case == "ValidAutoReviewSubtask"
+                    && state.s.accepted
+                    && !state.s.explicit_review_subtask_present
+            }),
+        "fixture should cover accepted automatic review subtask allocation"
+    );
+    assert_eq!(
+        replay_request_review_request_shape_trace(&request_review_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -6736,6 +7156,66 @@ fn covey_publish_artifact_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: publish artifact request reject reason does not match validation facts",
             "state[0]: publish artifact request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_decide_review_request_shape_replay_reports_counterexample_shape() {
+    let state = DecideReviewRequestShapeState {
+        case_index: 7,
+        case: "NonPositiveFence".to_owned(),
+        verdict: "Approve".to_owned(),
+        session_token_valid: true,
+        review_id_valid: true,
+        claim_id_valid: true,
+        fence_seq_positive: false,
+        findings_digest_valid: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = DecideReviewRequestShapeItfTrace {
+        states: vec![DecideReviewRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_decide_review_request_shape_trace(&trace),
+        vec![
+            "state[0]: decide review reject reason does not match validation facts",
+            "state[0]: decide review outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_request_review_request_shape_replay_reports_counterexample_shape() {
+    let state = RequestReviewRequestShapeState {
+        case_index: 6,
+        case: "InvalidReviewSubtaskId".to_owned(),
+        session_token_valid: true,
+        subtask_id_valid: true,
+        artifact_digest_valid: true,
+        explicit_review_subtask_present: true,
+        review_subtask_id_valid: false,
+        priority_valid: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = RequestReviewRequestShapeItfTrace {
+        states: vec![RequestReviewRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_request_review_request_shape_trace(&trace),
+        vec![
+            "state[0]: request review reject reason does not match validation facts",
+            "state[0]: request review outcome disagrees with validation facts",
         ]
     );
 }
