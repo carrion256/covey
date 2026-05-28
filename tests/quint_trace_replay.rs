@@ -7,11 +7,11 @@ use covey::{
     ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
     RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, ResolveConflictReq, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
-    RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
-    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
-    SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
-    VerifyLandingAuthorizationReq, WorkSubtask,
+    RequestReviewReq, Reservation, ReservationState, ResolveConflictReq, ReviewState,
+    ReviewSubtask, ReviewTarget, ReviewVerdict, RuntimeAttestation, ScopeClass, Session,
+    SessionHandle, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
+    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
+    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
@@ -113,6 +113,8 @@ const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRecordShape.itf.json");
+const COVEY_RESERVATION_RECORD_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReservationRecordShape.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -262,6 +264,16 @@ struct RuntimeAttestationRecordShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct RuntimeAttestationRecordShapeItfState {
     s: RuntimeAttestationRecordShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationRecordShapeItfTrace {
+    states: Vec<ReservationRecordShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationRecordShapeItfState {
+    s: ReservationRecordShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1713,6 +1725,43 @@ struct ReservationLifecycleRequestShapeState {
     extend_duration_positive: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationRecordShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    scope: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    lifecycle: String,
+    #[serde(rename = "scopeKeyPresent")]
+    scope_key_present: bool,
+    #[serde(rename = "scopeKeyNormalized")]
+    scope_key_normalized: bool,
+    #[serde(rename = "repoGlobalKeyCanonical")]
+    repo_global_key_canonical: bool,
+    #[serde(rename = "generatedMembersPresent")]
+    generated_members_present: bool,
+    #[serde(rename = "generatedMembersAllowed")]
+    generated_members_allowed: bool,
+    #[serde(rename = "generatedMembersNormalized")]
+    generated_members_normalized: bool,
+    #[serde(rename = "generatedMembersUnique")]
+    generated_members_unique: bool,
+    #[serde(
+        rename = "timestampShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    timestamp_shape: String,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -5322,6 +5371,185 @@ fn replay_reservation_lifecycle_request_shape_trace(
     violations
 }
 
+fn reservation_record_expected_reject(state: &ReservationRecordShapeState) -> &'static str {
+    if !state.scope_key_present {
+        "ScopeKeyMissing"
+    } else if !state.scope_key_normalized {
+        "ScopeKeyNotNormalized"
+    } else if state.scope != "GeneratedSet" && state.generated_members_present {
+        "GeneratedMembersForbidden"
+    } else if state.scope == "RepoGlobal" && !state.repo_global_key_canonical {
+        "RepoGlobalKeyInvalid"
+    } else if state.scope == "GeneratedSet" && !state.generated_members_present {
+        "GeneratedMembersMissing"
+    } else if state.scope == "GeneratedSet" && !state.generated_members_normalized {
+        "GeneratedMemberInvalid"
+    } else if state.scope == "GeneratedSet" && !state.generated_members_unique {
+        "GeneratedMemberDuplicate"
+    } else if state.timestamp_shape == "UpdatedBeforeCreatedShape" {
+        "UpdatedBeforeCreatedReject"
+    } else {
+        "NoReject"
+    }
+}
+
+fn reservation_record_scope_class(state: &ReservationRecordShapeState) -> ScopeClass {
+    match state.scope.as_str() {
+        "ExactPath" => ScopeClass::ExactPath,
+        "Subtree" => ScopeClass::Subtree,
+        "RepoGlobal" => ScopeClass::RepoGlobal,
+        "GeneratedSet" => ScopeClass::GeneratedSet,
+        scope => panic!("unexpected reservation record scope from ITF trace: {scope}"),
+    }
+}
+
+fn reservation_record_state(state: &ReservationRecordShapeState) -> ReservationState {
+    match state.lifecycle.as_str() {
+        "Active" => ReservationState::Active,
+        "Released" => ReservationState::Released,
+        "Expired" => ReservationState::Expired,
+        lifecycle => panic!("unexpected reservation record lifecycle from ITF trace: {lifecycle}"),
+    }
+}
+
+fn reservation_record_scope_key(state: &ReservationRecordShapeState) -> &'static str {
+    if !state.scope_key_present {
+        return " ";
+    }
+    if !state.scope_key_normalized {
+        return " src/lib.rs";
+    }
+    match state.scope.as_str() {
+        "ExactPath" => "src/lib.rs",
+        "Subtree" => "src",
+        "RepoGlobal" if state.repo_global_key_canonical => "repo",
+        "RepoGlobal" => "src",
+        "GeneratedSet" => "artifact-manifest",
+        scope => panic!("unexpected reservation record scope from ITF trace: {scope}"),
+    }
+}
+
+fn reservation_record_generated_members(state: &ReservationRecordShapeState) -> Vec<String> {
+    if !state.generated_members_present {
+        Vec::new()
+    } else if state.case == "GeneratedSetBlankMember" {
+        vec!["".to_owned()]
+    } else if !state.generated_members_normalized {
+        vec![" src/generated.rs".to_owned()]
+    } else if !state.generated_members_unique {
+        vec!["src/generated.rs".to_owned(), "src/generated.rs".to_owned()]
+    } else {
+        vec!["src/generated.rs".to_owned()]
+    }
+}
+
+fn reservation_record_timestamps(
+    state: &ReservationRecordShapeState,
+) -> (TimestampMs, TimestampMs) {
+    match state.timestamp_shape.as_str() {
+        "Monotonic" => (
+            TimestampMs::parse(100).expect("valid created_at"),
+            TimestampMs::parse(200).expect("valid updated_at"),
+        ),
+        "UpdatedBeforeCreatedShape" => (
+            TimestampMs::parse(200).expect("valid created_at"),
+            TimestampMs::parse(100).expect("valid updated_at"),
+        ),
+        other => panic!("unexpected reservation record timestamp shape: {other}"),
+    }
+}
+
+fn reservation_record_actual(state: &ReservationRecordShapeState) -> Option<Reservation> {
+    let (created_at, updated_at) = reservation_record_timestamps(state);
+    Reservation::try_from_parts(
+        covey::ReservationId::parse("reservation-1").expect("valid reservation id"),
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        reservation_record_scope_class(state),
+        reservation_record_scope_key(state),
+        reservation_record_generated_members(state),
+        LeaseDeadlineMs::parse(1_000).expect("valid lease deadline"),
+        reservation_record_state(state),
+        created_at,
+        updated_at,
+    )
+    .ok()
+}
+
+fn replay_reservation_record_shape_trace(trace: &ReservationRecordShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: reservation record scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = reservation_record_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: reservation record reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: reservation record outcome disagrees with row facts"
+            ));
+        }
+        let actual = reservation_record_actual(state);
+        if actual.is_some() != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: reservation record constructor disagrees with model"
+            ));
+        }
+        if let Some(reservation) = actual {
+            if reservation.state() != reservation_record_state(state) {
+                violations.push(format!(
+                    "state[{index}]: reservation record lifecycle projection disagrees with model"
+                ));
+            }
+            if reservation.scope_class() != reservation_record_scope_class(state) {
+                violations.push(format!(
+                    "state[{index}]: reservation record scope projection disagrees with model"
+                ));
+            }
+            if expected_accepted
+                && reservation.scope_class() != ScopeClass::GeneratedSet
+                && !reservation.generated_members().is_empty()
+            {
+                violations.push(format!(
+                    "state[{index}]: accepted non-generated reservation retained generated members"
+                ));
+            }
+            if expected_accepted
+                && reservation.scope_class() == ScopeClass::GeneratedSet
+                && reservation.generated_members().is_empty()
+            {
+                violations.push(format!(
+                    "state[{index}]: accepted generated-set reservation lost generated members"
+                ));
+            }
+            if expected_accepted
+                && reservation.scope_class() == ScopeClass::GeneratedSet
+                && !state.generated_members_allowed
+            {
+                violations.push(format!(
+                    "state[{index}]: accepted generated-set reservation had disallowed members"
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn conflict_resolution_expected_reject(state: &ConflictResolutionRequestState) -> &'static str {
     if !state.session_token_valid {
         "SessionTokenInvalid"
@@ -8425,6 +8653,12 @@ fn runtime_attestation_record_shape_trace() -> RuntimeAttestationRecordShapeItfT
 }
 
 #[fixture]
+fn reservation_record_shape_trace() -> ReservationRecordShapeItfTrace {
+    serde_json::from_str(COVEY_RESERVATION_RECORD_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -10167,6 +10401,55 @@ fn covey_replays_quint_reservation_lifecycle_request_shape_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_reservation_record_shape_itf_trace(
+    reservation_record_shape_trace: ReservationRecordShapeItfTrace,
+) {
+    assert!(
+        !reservation_record_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidExactPathActive",
+        "ValidSubtreeReleased",
+        "ValidRepoGlobalExpired",
+        "ValidGeneratedSetActive",
+    ] {
+        assert!(
+            reservation_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "ExactPathWithGeneratedMembers",
+        "SubtreeWithGeneratedMembers",
+        "RepoGlobalWrongKey",
+        "RepoGlobalWithGeneratedMembers",
+        "GeneratedSetWithoutMembers",
+        "GeneratedSetBlankMember",
+        "GeneratedSetPaddedMember",
+        "GeneratedSetDuplicateMembers",
+        "BlankScopeKey",
+        "PaddedScopeKey",
+        "UpdatedBeforeCreated",
+    ] {
+        assert!(
+            reservation_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_reservation_record_shape_trace(&reservation_record_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_conflict_resolution_request_itf_trace(
     conflict_resolution_request_trace: ConflictResolutionRequestItfTrace,
 ) {
@@ -11867,6 +12150,39 @@ fn covey_reservation_lifecycle_request_shape_replay_reports_counterexample_shape
         vec![
             "state[0]: reservation lifecycle request reject reason does not match validation facts",
             "state[0]: reservation lifecycle request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_reservation_record_shape_replay_reports_counterexample_shape() {
+    let state = ReservationRecordShapeState {
+        case_index: 15,
+        case: "UpdatedBeforeCreated".to_owned(),
+        scope: "ExactPath".to_owned(),
+        lifecycle: "Active".to_owned(),
+        scope_key_present: true,
+        scope_key_normalized: true,
+        repo_global_key_canonical: true,
+        generated_members_present: false,
+        generated_members_allowed: false,
+        generated_members_normalized: true,
+        generated_members_unique: true,
+        timestamp_shape: "UpdatedBeforeCreatedShape".to_owned(),
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ReservationRecordShapeItfTrace {
+        states: vec![ReservationRecordShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_reservation_record_shape_trace(&trace),
+        vec![
+            "state[0]: reservation record reject reason disagrees with row facts",
+            "state[0]: reservation record outcome disagrees with row facts",
         ]
     );
 }
