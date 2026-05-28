@@ -5,6 +5,8 @@ const COVEY_REVIEW_FOLLOWUP_ITF: &str = include_str!("fixtures/quint/CoveyReview
 const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
+const COVEY_SESSION_META_TASK_ITF: &str =
+    include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -34,6 +36,16 @@ struct QueueReservationItfTrace {
 #[derive(Debug, Deserialize)]
 struct QueueReservationItfState {
     s: QueueReservationState,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionMetaTaskItfTrace {
+    states: Vec<SessionMetaTaskItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionMetaTaskItfState {
+    s: SessionMetaTaskState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +106,22 @@ struct QueueReservationState {
         deserialize_with = "deserialize_itf_bigint"
     )]
     conflict_rank_floor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionMetaTaskState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    session: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    meta: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    subtasks: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    claim: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    queue: String,
+    #[serde(rename = "heartbeatFresh")]
+    heartbeat_fresh: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,6 +369,79 @@ fn queue_reservation_conflict_rank(state: &QueueReservationState) -> i64 {
     }
 }
 
+fn session_meta_terminal_meta(state: &SessionMetaTaskState) -> bool {
+    matches!(state.meta.as_str(), "Completed" | "MetaCancelled")
+}
+
+fn session_meta_open_queue(state: &SessionMetaTaskState) -> bool {
+    matches!(state.queue.as_str(), "Queued" | "InFlight")
+}
+
+fn replay_session_meta_task_trace(trace: &SessionMetaTaskItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if state.claim == "Held" && state.session != "ActiveWithSubtask" {
+            violations.push(format!(
+                "state[{index}]: held claim is not bound to active session occupancy"
+            ));
+        }
+        if state.session == "ActiveWithSubtask" && state.claim != "Held" {
+            violations.push(format!(
+                "state[{index}]: active subtask occupancy lacks held claim"
+            ));
+        }
+        if matches!(state.session.as_str(), "Stale" | "Exited") && state.claim == "Held" {
+            violations.push(format!(
+                "state[{index}]: inactive session still owns held claim"
+            ));
+        }
+        if matches!(state.session.as_str(), "Stale" | "Exited") && state.heartbeat_fresh {
+            violations.push(format!(
+                "state[{index}]: inactive session still has fresh heartbeat"
+            ));
+        }
+        if session_meta_terminal_meta(state) && state.claim == "Held" {
+            violations.push(format!(
+                "state[{index}]: terminal meta-task still has held claim"
+            ));
+        }
+        if session_meta_terminal_meta(state) && session_meta_open_queue(state) {
+            violations.push(format!(
+                "state[{index}]: terminal meta-task still has open ready queue"
+            ));
+        }
+        if state.meta == "Completed" && state.subtasks != "TerminalSubtasks" {
+            violations.push(format!(
+                "state[{index}]: completed meta-task lacks terminal subtask summary"
+            ));
+        }
+        if state.meta == "MetaCancelled" && state.subtasks != "TerminalSubtasks" {
+            violations.push(format!(
+                "state[{index}]: cancelled meta-task lacks terminal subtask summary"
+            ));
+        }
+        if state.meta == "Planning" && state.subtasks != "NoSubtasks" {
+            violations.push(format!("state[{index}]: planning meta-task has subtasks"));
+        }
+        if state.meta == "Active" && state.subtasks != "OpenSubtasks" {
+            violations.push(format!(
+                "state[{index}]: active meta-task lacks open subtask summary"
+            ));
+        }
+        if state.meta == "NoMeta"
+            && !(state.subtasks == "NoSubtasks"
+                && state.claim == "NoClaim"
+                && state.queue == "NoQueue")
+        {
+            violations.push(format!(
+                "state[{index}]: missing meta-task still has work state"
+            ));
+        }
+    }
+    violations
+}
+
 fn replay_core_lifecycle_trace(trace: &CoreItfTrace) -> Vec<String> {
     let mut violations = Vec::new();
     for (index, wrapped_state) in trace.states.iter().enumerate() {
@@ -496,6 +597,11 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
     serde_json::from_str(COVEY_QUEUE_RESERVATION_ITF).expect("fixture must be valid ITF JSON")
 }
 
+#[fixture]
+fn session_meta_task_trace() -> SessionMetaTaskItfTrace {
+    serde_json::from_str(COVEY_SESSION_META_TASK_ITF).expect("fixture must be valid ITF JSON")
+}
+
 #[rstest]
 fn covey_replays_quint_review_followup_itf_trace(review_followup_trace: ItfTrace) {
     assert!(
@@ -530,6 +636,20 @@ fn covey_replays_quint_queue_reservation_itf_trace(
     );
     assert_eq!(
         replay_queue_reservation_trace(&queue_reservation_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_session_meta_task_itf_trace(
+    session_meta_task_trace: SessionMetaTaskItfTrace,
+) {
+    assert!(
+        !session_meta_task_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert_eq!(
+        replay_session_meta_task_trace(&session_meta_task_trace),
         Vec::<String>::new()
     );
 }
@@ -628,6 +748,33 @@ fn covey_queue_reservation_replay_reports_counterexample_shape() {
             "state[0]: conflict exists without recorded overlap binding",
             "state[0]: conflict resolution moved below recorded floor",
             "state[0]: resolved conflict floor was downgraded",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_session_meta_task_replay_reports_counterexample_shape() {
+    let state = SessionMetaTaskState {
+        session: "Exited".to_owned(),
+        meta: "Completed".to_owned(),
+        subtasks: "OpenSubtasks".to_owned(),
+        claim: "Held".to_owned(),
+        queue: "InFlight".to_owned(),
+        heartbeat_fresh: true,
+    };
+    let trace = SessionMetaTaskItfTrace {
+        states: vec![SessionMetaTaskItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_session_meta_task_trace(&trace),
+        vec![
+            "state[0]: held claim is not bound to active session occupancy",
+            "state[0]: inactive session still owns held claim",
+            "state[0]: inactive session still has fresh heartbeat",
+            "state[0]: terminal meta-task still has held claim",
+            "state[0]: terminal meta-task still has open ready queue",
+            "state[0]: completed meta-task lacks terminal subtask summary",
         ]
     );
 }

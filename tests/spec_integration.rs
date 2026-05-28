@@ -4004,6 +4004,41 @@ fn stale_reap_immediately_expires_orphaned_claims_and_clears_session_and_subtask
 }
 
 #[test]
+fn exiting_session_immediately_expires_held_claim_and_clears_subtask() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (_, subtask_id) = seed_work_subtask(&rig);
+    let worker = register(
+        &covey,
+        "worker-exit-claim",
+        "worker-exit-claim",
+        SessionRole::Executor,
+    );
+
+    let _claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                covey::LeaseDurationMs::parse(30_000).expect("valid lease duration"),
+                id_key("claim-next-before-exit"),
+            )
+            .expect("valid claim-next request"),
+        )
+        .expect("claim")
+        .expect("claim result");
+
+    close_session(&covey, &worker).expect("exit session with active claim");
+
+    let exited_session = covey.session_status(&worker).expect("session");
+    assert_eq!(exited_session.session().state(), SessionState::Exited);
+    assert!(exited_session.session().active_subtask_id().is_none());
+
+    let subtask = covey.subtask_status(&subtask_id).expect("subtask");
+    assert!(subtask.claim().is_none());
+    assert_eq!(subtask.subtask().state(), SubtaskState::Available);
+}
+
+#[test]
 fn event_log_windows_are_strictly_monotonic_and_decode_to_typed_payloads() {
     let rig = Rig::new();
     let covey = rig.covey();

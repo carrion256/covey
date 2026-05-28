@@ -6,16 +6,18 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        EventType, ExitSessionReq, HeartbeatReq, ObjectType, RecordRuntimeAttestationReq,
-        RegisterSessionReq, RuntimeAttestation, SessionHandle, SessionRole, SessionState,
-        TimestampMs, session_state_name,
+        Claim, ClaimState, EventType, ExitSessionReq, HeartbeatReq, ObjectType,
+        RecordRuntimeAttestationReq, RegisterSessionReq, RuntimeAttestation, SessionHandle,
+        SessionRole, SessionState, SubtaskState, TimestampMs, claim_state_name, session_state_name,
+        subtask_state_name,
     },
     queries::{load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
-    store::append_session_event,
+    store::{append_session_event, reset_in_progress_review_for_expired_claim},
     validators::{
-        MAX_AGENT_ID_LEN, MAX_RUNTIME_FIELD_LEN, ensure_length, ensure_no_other_active_session,
-        ensure_non_empty, ensure_transition, require_active_session, require_session,
+        MAX_AGENT_ID_LEN, MAX_RUNTIME_FIELD_LEN, close_claim_and_detach, ensure_length,
+        ensure_no_other_active_session, ensure_non_empty, ensure_transition,
+        require_active_session, require_session,
     },
 };
 
@@ -275,6 +277,7 @@ impl Covey {
                             object: ObjectType::Session,
                         });
                     }
+                    expire_held_claims_for_exited_session(tx, req.session_token.as_str(), now)?;
                     append_session_event(
                         tx,
                         EventType::SessionExited,
@@ -383,6 +386,64 @@ impl Covey {
         );
         result
     }
+}
+
+fn expire_held_claims_for_exited_session(
+    tx: &rusqlite::Transaction<'_>,
+    session_token: &str,
+    now: i64,
+) -> Result<()> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT claim_id, subtask_id, owner_session_token, fence_seq, lease_deadline, state, created_at, updated_at
+        FROM claims
+        WHERE owner_session_token = ?1
+          AND state = ?2
+        ORDER BY created_at ASC, claim_id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![session_token, claim_state_name(ClaimState::Held)],
+        |row| {
+            Claim::try_from_parts(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                ClaimState::Held,
+                row.get(6)?,
+                row.get(7)?,
+            )
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                )
+            })
+        },
+    )?;
+    let claims = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for claim in &claims {
+        close_claim_and_detach(tx, claim, ClaimState::Expired, now)?;
+        reset_in_progress_review_for_expired_claim(tx, &claim.subtask_id, now)?;
+        tx.execute(
+            "UPDATE subtasks SET current_claim_id = NULL, state = CASE WHEN state IN (?3, ?4) THEN ?5 ELSE state END, updated_at = ?6 WHERE subtask_id = ?1 AND current_claim_id = ?2",
+            params![
+                claim.subtask_id,
+                claim.claim_id,
+                subtask_state_name(SubtaskState::Claimed),
+                subtask_state_name(SubtaskState::InProgress),
+                subtask_state_name(SubtaskState::Available),
+                now
+            ],
+        )?;
+    }
+
+    Ok(())
 }
 
 fn validate_runtime_attestation_req(
