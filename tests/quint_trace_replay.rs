@@ -1,8 +1,8 @@
 use covey::{
-    AbandonSubtaskReq, ArtifactKind, CancelMetaTaskReq, ClaimReadyQueueReq,
-    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
-    ExitSessionReq, HeartbeatReq, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
-    PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    AbandonSubtaskReq, ArtifactKind, CancelMetaTaskReq, ClaimNextReq, ClaimReadyQueueReq,
+    ClaimSubtaskReq, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
+    EnqueueForApplyReq, ExitSessionReq, HeartbeatReq, MarkAppliedReq, MarkInFlightReq,
+    OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, RenewClaimReq,
     RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
     ReviewVerdict, ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
@@ -42,6 +42,8 @@ const COVEY_META_TASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMetaTaskRequestShape.itf.json");
 const COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyCreateSubtaskRequestShape.itf.json");
+const COVEY_CLAIM_ACQUISITION_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyClaimAcquisitionRequestShape.itf.json");
 const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
@@ -247,6 +249,16 @@ struct CreateSubtaskRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct CreateSubtaskRequestShapeItfState {
     s: CreateSubtaskRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimAcquisitionRequestShapeItfTrace {
+    states: Vec<ClaimAcquisitionRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimAcquisitionRequestShapeItfState {
+    s: ClaimAcquisitionRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -954,6 +966,34 @@ struct CreateSubtaskRequestShapeState {
     title_valid: bool,
     #[serde(rename = "priorityValid")]
     priority_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimAcquisitionRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    operation: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "leaseDurationPositive")]
+    lease_duration_positive: bool,
+    #[serde(rename = "metaTaskIdPresent")]
+    meta_task_id_present: bool,
+    #[serde(rename = "metaTaskIdValid")]
+    meta_task_id_valid: bool,
+    #[serde(rename = "subtaskIdValid")]
+    subtask_id_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -2853,6 +2893,143 @@ fn replay_create_subtask_request_shape_trace(
         {
             violations.push(format!(
                 "state[{index}]: accepted create-subtask request has invalid subtask payload"
+            ));
+        }
+    }
+    violations
+}
+
+fn claim_acquisition_expected_reject(state: &ClaimAcquisitionRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if state.operation == "ClaimSubtask" && !state.subtask_id_valid {
+        "SubtaskIdInvalid"
+    } else if !state.lease_duration_positive {
+        "LeaseDurationInvalid"
+    } else if state.operation == "ClaimNextScoped" && !state.meta_task_id_valid {
+        "MetaTaskIdInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn claim_acquisition_lease_duration(state: &ClaimAcquisitionRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ClaimNextZeroLease" | "ClaimSubtaskZeroLease" => 0,
+        "ClaimNextNegativeLease" | "ClaimSubtaskNegativeLease" => -1,
+        _ => 30_000,
+    }
+}
+
+fn claim_acquisition_actual_accepts(state: &ClaimAcquisitionRequestShapeState) -> bool {
+    let session_token = if state.session_token_valid {
+        "session-1"
+    } else {
+        "session 1"
+    };
+    let idempotency_key = if state.idempotency_key_valid {
+        "idem-claim-acquisition"
+    } else {
+        " "
+    };
+    match state.operation.as_str() {
+        "ClaimNext" => ClaimNextReq::try_from_raw_parts(
+            session_token,
+            claim_acquisition_lease_duration(state),
+            idempotency_key,
+        )
+        .is_ok(),
+        "ClaimNextScoped" => ClaimNextReq::try_from_raw_parts_scoped(
+            session_token,
+            claim_acquisition_lease_duration(state),
+            if state.meta_task_id_present {
+                Some(
+                    if state.meta_task_id_valid {
+                        "meta-1"
+                    } else {
+                        "meta 1"
+                    }
+                    .to_owned(),
+                )
+            } else {
+                None
+            },
+            idempotency_key,
+        )
+        .is_ok(),
+        "ClaimSubtask" => ClaimSubtaskReq::try_from_raw_parts(
+            session_token,
+            if state.subtask_id_valid {
+                "subtask-1"
+            } else {
+                "subtask 1"
+            },
+            claim_acquisition_lease_duration(state),
+            idempotency_key,
+        )
+        .is_ok(),
+        _ => false,
+    }
+}
+
+fn replay_claim_acquisition_request_shape_trace(
+    trace: &ClaimAcquisitionRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: claim acquisition request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = claim_acquisition_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: claim acquisition request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: claim acquisition request outcome disagrees with validation facts"
+            ));
+        }
+        if claim_acquisition_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: claim acquisition request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.lease_duration_positive
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted claim acquisition request lacks session, lease, or idempotency key"
+            ));
+        }
+        if expected_accepted
+            && state.operation == "ClaimNextScoped"
+            && (!state.meta_task_id_present || !state.meta_task_id_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted scoped claim-next request lacks meta-task id"
+            ));
+        }
+        if expected_accepted && state.operation == "ClaimSubtask" && !state.subtask_id_valid {
+            violations.push(format!(
+                "state[{index}]: accepted claim-subtask request lacks subtask id"
             ));
         }
     }
@@ -6927,6 +7104,12 @@ fn create_subtask_request_shape_trace() -> CreateSubtaskRequestShapeItfTrace {
 }
 
 #[fixture]
+fn claim_acquisition_request_shape_trace() -> ClaimAcquisitionRequestShapeItfTrace {
+    serde_json::from_str(COVEY_CLAIM_ACQUISITION_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn view_attachment_shape_trace() -> ViewAttachmentShapeItfTrace {
     serde_json::from_str(COVEY_VIEW_ATTACHMENT_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -7637,6 +7820,52 @@ fn covey_replays_quint_create_subtask_request_shape_itf_trace(
     );
     assert_eq!(
         replay_create_subtask_request_shape_trace(&create_subtask_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_claim_acquisition_request_shape_itf_trace(
+    claim_acquisition_request_shape_trace: ClaimAcquisitionRequestShapeItfTrace,
+) {
+    assert!(
+        !claim_acquisition_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidClaimNext",
+        "ValidClaimNextScoped",
+        "ValidClaimSubtask",
+        "ClaimNextInvalidSessionToken",
+        "ClaimNextZeroLease",
+        "ClaimNextNegativeLease",
+        "ClaimNextBlankIdempotency",
+        "ClaimNextScopedInvalidMetaTaskId",
+        "ClaimSubtaskInvalidSessionToken",
+        "ClaimSubtaskInvalidSubtaskId",
+        "ClaimSubtaskZeroLease",
+        "ClaimSubtaskNegativeLease",
+        "ClaimSubtaskBlankIdempotency",
+    ] {
+        assert!(
+            claim_acquisition_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in ["ClaimNext", "ClaimNextScoped", "ClaimSubtask"] {
+        assert!(
+            claim_acquisition_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.operation == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    assert_eq!(
+        replay_claim_acquisition_request_shape_trace(&claim_acquisition_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -9277,6 +9506,36 @@ fn covey_bd_import_replay_reports_counterexample_shape() {
             "state[0]: imported BD rows did not become available work subtasks",
             "state[0]: BD import created live claim state",
             "state[0]: BD import counts do not match source eligibility",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_claim_acquisition_request_shape_replay_reports_counterexample_shape() {
+    let state = ClaimAcquisitionRequestShapeState {
+        case_index: 7,
+        case: "ClaimNextScopedInvalidMetaTaskId".to_owned(),
+        operation: "ClaimNextScoped".to_owned(),
+        session_token_valid: true,
+        lease_duration_positive: true,
+        meta_task_id_present: true,
+        meta_task_id_valid: false,
+        subtask_id_valid: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ClaimAcquisitionRequestShapeItfTrace {
+        states: vec![ClaimAcquisitionRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_claim_acquisition_request_shape_trace(&trace),
+        vec![
+            "state[0]: claim acquisition request reject reason does not match validation facts",
+            "state[0]: claim acquisition request outcome disagrees with validation facts",
         ]
     );
 }

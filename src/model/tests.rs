@@ -2831,6 +2831,22 @@ fn claim_acquisition_payloads_reject_invalid_targets_and_leases() {
         serde_json::from_value(value).expect("claim-next request deserializes");
     assert_eq!(decoded, claim_next);
 
+    let scoped_claim_next = ClaimNextReq::try_from_raw_parts_scoped(
+        "session-1",
+        30_000,
+        Some("meta-1".to_owned()),
+        "idem-claim-next-scoped",
+    )
+    .expect("valid scoped claim-next request");
+    assert_eq!(
+        scoped_claim_next
+            .meta_task_id
+            .as_ref()
+            .expect("scoped claim next has meta-task id")
+            .as_str(),
+        "meta-1"
+    );
+
     let invalid_next_session = serde_json::json!({
         "session_token": "session 1",
         "lease_duration_ms": 30_000,
@@ -2850,6 +2866,33 @@ fn claim_acquisition_payloads_reject_invalid_targets_and_leases() {
     });
     serde_json::from_value::<ClaimNextReq>(invalid_next_lease)
         .expect_err("claim-next request should reject non-positive leases");
+
+    let invalid_next_idempotency = serde_json::json!({
+        "session_token": "session-1",
+        "lease_duration_ms": 30_000,
+        "idempotency_key": " "
+    });
+    serde_json::from_value::<ClaimNextReq>(invalid_next_idempotency)
+        .expect_err("claim-next request should reject blank idempotency keys");
+
+    let invalid_next_meta = ClaimNextReq::try_from_raw_parts_scoped(
+        "session-1",
+        30_000,
+        Some("meta 1".to_owned()),
+        "idem-claim-next-scoped",
+    )
+    .expect_err("scoped claim-next request should reject invalid meta-task ids");
+    assert!(
+        invalid_next_meta
+            .to_string()
+            .contains("invalid meta_task_id"),
+        "unexpected error: {invalid_next_meta}"
+    );
+
+    let claim_subtask =
+        ClaimSubtaskReq::try_from_raw_parts("session-1", "subtask-1", 30_000, "idem-claim-subtask")
+            .expect("valid claim-subtask request");
+    assert_eq!(claim_subtask.subtask_id, "subtask-1");
 
     let invalid_target_session = serde_json::json!({
         "session_token": "session 1",
@@ -2881,6 +2924,15 @@ fn claim_acquisition_payloads_reject_invalid_targets_and_leases() {
     });
     serde_json::from_value::<ClaimSubtaskReq>(invalid_target_lease)
         .expect_err("claim-subtask request should reject non-positive leases");
+
+    let invalid_target_idempotency = serde_json::json!({
+        "session_token": "session-1",
+        "subtask_id": "subtask-1",
+        "lease_duration_ms": 30_000,
+        "idempotency_key": " "
+    });
+    serde_json::from_value::<ClaimSubtaskReq>(invalid_target_idempotency)
+        .expect_err("claim-subtask request should reject blank idempotency keys");
 }
 
 #[test]
