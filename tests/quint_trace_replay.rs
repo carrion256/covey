@@ -1,9 +1,10 @@
 use covey::{
-    ArtifactKind, ClaimReadyQueueReq, ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq,
-    MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
-    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
-    SettlementTarget, VerifyLandingAuthorizationReq,
+    AbandonSubtaskReq, ArtifactKind, ClaimReadyQueueReq, ConflictResolutionState, DecideReviewReq,
+    EnqueueForApplyReq, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
+    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
+    ReleaseClaimReq, RenewClaimReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
+    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass, SettlementTarget,
+    StartSubtaskReq, VerifyLandingAuthorizationReq,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -47,6 +48,8 @@ const COVEY_ENQUEUE_FOR_APPLY_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyEnqueueForApplyRequestShape.itf.json");
 const COVEY_CLAIM_READY_QUEUE_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyClaimReadyQueueRequestShape.itf.json");
+const COVEY_CLAIM_LIFECYCLE_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyClaimLifecycleRequestShape.itf.json");
 const COVEY_MARK_IN_FLIGHT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMarkInFlightRequestShape.itf.json");
 const COVEY_MARK_APPLIED_REQUEST_SHAPE_ITF: &str =
@@ -55,6 +58,8 @@ const COVEY_APPLY_VERIFICATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyVerificationRequestShape.itf.json");
 const COVEY_LANDING_AUTHORIZATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyLandingAuthorizationRequestShape.itf.json");
+const COVEY_LANDING_RECEIPT_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyLandingReceiptRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -277,6 +282,16 @@ struct ClaimReadyQueueRequestShapeItfState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ClaimLifecycleRequestShapeItfTrace {
+    states: Vec<ClaimLifecycleRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimLifecycleRequestShapeItfState {
+    s: ClaimLifecycleRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
 struct MarkInFlightRequestShapeItfTrace {
     states: Vec<MarkInFlightRequestShapeItfState>,
 }
@@ -314,6 +329,16 @@ struct LandingAuthorizationRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct LandingAuthorizationRequestShapeItfState {
     s: LandingAuthorizationRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingReceiptRequestShapeItfTrace {
+    states: Vec<LandingReceiptRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingReceiptRequestShapeItfState {
+    s: LandingReceiptRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1046,6 +1071,32 @@ struct ClaimReadyQueueRequestShapeState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ClaimLifecycleRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    operation: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "claimIdValid")]
+    claim_id_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "extendDurationPositive")]
+    extend_duration_positive: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct MarkInFlightRequestShapeState {
     #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
     case_index: i64,
@@ -1147,6 +1198,32 @@ struct LandingAuthorizationRequestShapeState {
     verdict_digest_valid: bool,
     #[serde(rename = "sealDigestValid")]
     seal_digest_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingReceiptRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "queueIdValid")]
+    queue_id_valid: bool,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "targetRefValid")]
+    target_ref_valid: bool,
+    #[serde(rename = "landedCommitOidValid")]
+    landed_commit_oid_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -3176,6 +3253,135 @@ fn replay_claim_ready_queue_request_shape_trace(
     violations
 }
 
+fn claim_lifecycle_expected_reject(state: &ClaimLifecycleRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.claim_id_valid {
+        "ClaimIdInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if state.operation == "RenewClaim" && !state.extend_duration_positive {
+        "LeaseDurationInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn claim_lifecycle_fence_seq(state: &ClaimLifecycleRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ZeroFence" => 0,
+        "NegativeFence" => -1,
+        _ => 1,
+    }
+}
+
+fn claim_lifecycle_extend_by_ms(state: &ClaimLifecycleRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ZeroRenewExtension" => 0,
+        "NegativeRenewExtension" => -1,
+        _ => 30_000,
+    }
+}
+
+fn claim_lifecycle_actual_accepts(state: &ClaimLifecycleRequestShapeState) -> bool {
+    let session_token = if state.session_token_valid {
+        "session-1"
+    } else {
+        "session 1"
+    };
+    let claim_id = if state.claim_id_valid { "claim-1" } else { "" };
+    let fence_seq = claim_lifecycle_fence_seq(state);
+    let idempotency_key = if state.idempotency_key_valid {
+        "idem-claim-lifecycle"
+    } else {
+        " "
+    };
+
+    match state.operation.as_str() {
+        "StartSubtask" => {
+            StartSubtaskReq::try_from_raw_parts(session_token, claim_id, fence_seq, idempotency_key)
+                .is_ok()
+        }
+        "AbandonSubtask" => AbandonSubtaskReq::try_from_raw_parts(
+            session_token,
+            claim_id,
+            fence_seq,
+            idempotency_key,
+        )
+        .is_ok(),
+        "ReleaseClaim" => {
+            ReleaseClaimReq::try_from_raw_parts(session_token, claim_id, fence_seq, idempotency_key)
+                .is_ok()
+        }
+        "RenewClaim" => RenewClaimReq::try_from_raw_parts(
+            session_token,
+            claim_id,
+            fence_seq,
+            claim_lifecycle_extend_by_ms(state),
+            idempotency_key,
+        )
+        .is_ok(),
+        _ => false,
+    }
+}
+
+fn replay_claim_lifecycle_request_shape_trace(
+    trace: &ClaimLifecycleRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: claim lifecycle scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = claim_lifecycle_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: claim lifecycle reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: claim lifecycle outcome disagrees with validation facts"
+            ));
+        }
+        if claim_lifecycle_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: claim lifecycle parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.claim_id_valid
+                || !state.fence_seq_positive
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted claim lifecycle request has invalid session, claim, fence, or idempotency key"
+            ));
+        }
+        if expected_accepted && state.operation == "RenewClaim" && !state.extend_duration_positive {
+            violations.push(format!(
+                "state[{index}]: accepted renew claim request has non-positive extension"
+            ));
+        }
+    }
+    violations
+}
+
 fn mark_in_flight_expected_reject(state: &MarkInFlightRequestShapeState) -> &'static str {
     if !state.session_token_valid {
         "SessionTokenInvalid"
@@ -3620,6 +3826,107 @@ fn replay_landing_authorization_request_shape_trace(
         {
             violations.push(format!(
                 "state[{index}]: accepted landing authorization has invalid verifier evidence"
+            ));
+        }
+    }
+    violations
+}
+
+fn landing_receipt_expected_reject(state: &LandingReceiptRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.queue_id_valid {
+        "QueueIdInvalid"
+    } else if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.target_ref_valid {
+        "TargetRefInvalid"
+    } else if !state.landed_commit_oid_valid {
+        "LandedCommitOidInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn landing_receipt_actual_accepts(state: &LandingReceiptRequestShapeState) -> bool {
+    RecordLandingReceiptReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        },
+        if state.queue_id_valid { "queue-1" } else { "" },
+        if state.artifact_digest_valid {
+            "blake3:artifact"
+        } else {
+            "artifact"
+        },
+        if state.fence_seq_positive { 1 } else { 0 },
+        if state.target_ref_valid {
+            "refs/heads/main"
+        } else {
+            "refs heads main"
+        },
+        if state.landed_commit_oid_valid {
+            "0123456789abcdef"
+        } else {
+            "not-a-hex-oid"
+        },
+    )
+    .is_ok()
+}
+
+fn replay_landing_receipt_request_shape_trace(
+    trace: &LandingReceiptRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: landing receipt scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = landing_receipt_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: landing receipt request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: landing receipt request outcome disagrees with validation facts"
+            ));
+        }
+        if landing_receipt_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: landing receipt request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.queue_id_valid
+                || !state.artifact_digest_valid
+                || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted landing receipt request has invalid queue artifact or fence"
+            ));
+        }
+        if expected_accepted && (!state.target_ref_valid || !state.landed_commit_oid_valid) {
+            violations.push(format!(
+                "state[{index}]: accepted landing receipt request has invalid landing identity"
             ));
         }
     }
@@ -6189,6 +6496,12 @@ fn claim_ready_queue_request_shape_trace() -> ClaimReadyQueueRequestShapeItfTrac
 }
 
 #[fixture]
+fn claim_lifecycle_request_shape_trace() -> ClaimLifecycleRequestShapeItfTrace {
+    serde_json::from_str(COVEY_CLAIM_LIFECYCLE_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn mark_in_flight_request_shape_trace() -> MarkInFlightRequestShapeItfTrace {
     serde_json::from_str(COVEY_MARK_IN_FLIGHT_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -6209,6 +6522,12 @@ fn apply_verification_request_shape_trace() -> ApplyVerificationRequestShapeItfT
 #[fixture]
 fn landing_authorization_request_shape_trace() -> LandingAuthorizationRequestShapeItfTrace {
     serde_json::from_str(COVEY_LANDING_AUTHORIZATION_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn landing_receipt_request_shape_trace() -> LandingReceiptRequestShapeItfTrace {
+    serde_json::from_str(COVEY_LANDING_RECEIPT_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
 }
 
@@ -7020,6 +7339,55 @@ fn covey_replays_quint_claim_ready_queue_request_shape_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_claim_lifecycle_request_shape_itf_trace(
+    claim_lifecycle_request_shape_trace: ClaimLifecycleRequestShapeItfTrace,
+) {
+    assert!(
+        !claim_lifecycle_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidStart",
+        "ValidAbandon",
+        "ValidRelease",
+        "ValidRenew",
+        "InvalidSessionToken",
+        "InvalidClaimId",
+        "ZeroFence",
+        "NegativeFence",
+        "ZeroRenewExtension",
+        "NegativeRenewExtension",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            claim_lifecycle_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in [
+        "StartSubtask",
+        "AbandonSubtask",
+        "ReleaseClaim",
+        "RenewClaim",
+    ] {
+        assert!(
+            claim_lifecycle_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.operation == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    assert_eq!(
+        replay_claim_lifecycle_request_shape_trace(&claim_lifecycle_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_mark_in_flight_request_shape_itf_trace(
     mark_in_flight_request_shape_trace: MarkInFlightRequestShapeItfTrace,
 ) {
@@ -7174,6 +7542,44 @@ fn covey_replays_quint_landing_authorization_request_shape_itf_trace(
         replay_landing_authorization_request_shape_trace(
             &landing_authorization_request_shape_trace
         ),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_landing_receipt_request_shape_itf_trace(
+    landing_receipt_request_shape_trace: LandingReceiptRequestShapeItfTrace,
+) {
+    assert!(
+        !landing_receipt_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidReceipt",
+        "InvalidSessionToken",
+        "InvalidQueueId",
+        "InvalidArtifactDigest",
+        "NonPositiveFence",
+        "InvalidTargetRef",
+        "InvalidCommitOid",
+    ] {
+        assert!(
+            landing_receipt_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        landing_receipt_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidReceipt" && state.s.accepted),
+        "fixture should cover accepted landing receipt request"
+    );
+    assert_eq!(
+        replay_landing_receipt_request_shape_trace(&landing_receipt_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -8410,6 +8816,35 @@ fn covey_claim_ready_queue_request_shape_replay_reports_counterexample_shape() {
 }
 
 #[rstest]
+fn covey_claim_lifecycle_request_shape_replay_reports_counterexample_shape() {
+    let state = ClaimLifecycleRequestShapeState {
+        case_index: 8,
+        case: "ZeroRenewExtension".to_owned(),
+        operation: "RenewClaim".to_owned(),
+        session_token_valid: true,
+        claim_id_valid: true,
+        fence_seq_positive: true,
+        extend_duration_positive: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ClaimLifecycleRequestShapeItfTrace {
+        states: vec![ClaimLifecycleRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_claim_lifecycle_request_shape_trace(&trace),
+        vec![
+            "state[0]: claim lifecycle reject reason does not match validation facts",
+            "state[0]: claim lifecycle outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
 fn covey_mark_in_flight_request_shape_replay_reports_counterexample_shape() {
     let state = MarkInFlightRequestShapeState {
         case_index: 3,
@@ -8524,6 +8959,35 @@ fn covey_landing_authorization_request_shape_replay_reports_counterexample_shape
         vec![
             "state[0]: landing authorization reject reason does not match validation facts",
             "state[0]: landing authorization outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_landing_receipt_request_shape_replay_reports_counterexample_shape() {
+    let state = LandingReceiptRequestShapeState {
+        case_index: 7,
+        case: "InvalidCommitOid".to_owned(),
+        session_token_valid: true,
+        queue_id_valid: true,
+        artifact_digest_valid: true,
+        fence_seq_positive: true,
+        target_ref_valid: true,
+        landed_commit_oid_valid: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = LandingReceiptRequestShapeItfTrace {
+        states: vec![LandingReceiptRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_landing_receipt_request_shape_trace(&trace),
+        vec![
+            "state[0]: landing receipt request reject reason does not match validation facts",
+            "state[0]: landing receipt request outcome disagrees with validation facts",
         ]
     );
 }
