@@ -2,6 +2,7 @@ use rstest::{fixture, rstest};
 use serde::Deserialize;
 
 const COVEY_REVIEW_FOLLOWUP_ITF: &str = include_str!("fixtures/quint/CoveyReviewFollowup.itf.json");
+const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -11,6 +12,41 @@ struct ItfTrace {
 #[derive(Debug, Deserialize)]
 struct ItfState {
     m: ReviewFollowupState,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreItfTrace {
+    states: Vec<CoreItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreItfState {
+    s: CoreLifecycleState,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreLifecycleState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    subtask: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    claim: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    session: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    review: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    queue: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    fence: String,
+    #[serde(rename = "activeSubtask")]
+    active_subtask: bool,
+    #[serde(rename = "artifactPresent")]
+    artifact_present: bool,
+    #[serde(rename = "reviewApproved")]
+    review_approved: bool,
+    #[serde(rename = "applyVerified")]
+    apply_verified: bool,
+    terminal: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,9 +267,95 @@ fn replay_review_followup_trace(trace: &ItfTrace) -> Vec<String> {
     violations
 }
 
+fn core_terminal_subtask(state: &CoreLifecycleState) -> bool {
+    matches!(state.subtask.as_str(), "Applied" | "Abandoned")
+}
+
+fn core_claim_live_subtask(state: &CoreLifecycleState) -> bool {
+    matches!(
+        state.subtask.as_str(),
+        "Claimed" | "InProgress" | "ArtifactPublished" | "ReviewPending"
+    )
+}
+
+fn core_queue_open(state: &CoreLifecycleState) -> bool {
+    matches!(state.queue.as_str(), "Queued" | "QueueInFlight")
+}
+
+fn replay_core_lifecycle_trace(trace: &CoreItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if state.claim == "Held"
+            && !(state.session == "ActiveSession"
+                && state.active_subtask
+                && core_claim_live_subtask(state))
+        {
+            violations.push(format!(
+                "state[{index}]: held claim is not bound to active session/subtask"
+            ));
+        }
+        if state.active_subtask && state.claim != "Held" {
+            violations.push(format!("state[{index}]: active subtask without held claim"));
+        }
+        if core_terminal_subtask(state) && state.claim == "Held" {
+            violations.push(format!("state[{index}]: terminal subtask has held claim"));
+        }
+        if state.review != "NoReview" && !state.artifact_present {
+            violations.push(format!("state[{index}]: review exists without artifact"));
+        }
+        if state.review == "Decided"
+            && !matches!(
+                state.subtask.as_str(),
+                "ChangesRequested" | "Approved" | "ReadyForApply" | "Applied"
+            )
+        {
+            violations.push(format!(
+                "state[{index}]: decided review is not reflected in subtask state"
+            ));
+        }
+        if state.queue != "NoQueue" && !state.review_approved {
+            violations.push(format!(
+                "state[{index}]: ready queue exists without approved review"
+            ));
+        }
+        if core_queue_open(state) && state.subtask != "ReadyForApply" {
+            violations.push(format!(
+                "state[{index}]: open ready queue is not bound to ready_for_apply subtask"
+            ));
+        }
+        if state.queue == "QueueApplied" && !(state.subtask == "Applied" && state.apply_verified) {
+            violations.push(format!(
+                "state[{index}]: applied queue lacks apply verification"
+            ));
+        }
+        if state.subtask == "Applied" && state.queue != "QueueApplied" {
+            violations.push(format!(
+                "state[{index}]: applied subtask lacks applied queue"
+            ));
+        }
+        if state.terminal != core_terminal_subtask(state) {
+            violations.push(format!(
+                "state[{index}]: terminal marker disagrees with subtask state"
+            ));
+        }
+        if matches!(state.fence.as_str(), "F1" | "F2") && state.claim == "NoClaim" {
+            violations.push(format!(
+                "state[{index}]: issued fence exists before any claim lifecycle"
+            ));
+        }
+    }
+    violations
+}
+
 #[fixture]
 fn review_followup_trace() -> ItfTrace {
     serde_json::from_str(COVEY_REVIEW_FOLLOWUP_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn core_lifecycle_trace() -> CoreItfTrace {
+    serde_json::from_str(COVEY_CORE_LIFECYCLE_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[rstest]
@@ -244,6 +366,18 @@ fn covey_replays_quint_review_followup_itf_trace(review_followup_trace: ItfTrace
     );
     assert_eq!(
         replay_review_followup_trace(&review_followup_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_core_lifecycle_itf_trace(core_lifecycle_trace: CoreItfTrace) {
+    assert!(
+        !core_lifecycle_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert_eq!(
+        replay_core_lifecycle_trace(&core_lifecycle_trace),
         Vec::<String>::new()
     );
 }
@@ -274,5 +408,37 @@ fn covey_replay_reports_quint_counterexample_shape() {
     assert_eq!(
         replay_review_followup_trace(&trace),
         vec!["state[0]: idle observed while work or repair exists"]
+    );
+}
+
+#[rstest]
+fn covey_core_lifecycle_replay_reports_counterexample_shape() {
+    let state = CoreLifecycleState {
+        subtask: "Applied".to_owned(),
+        claim: "Held".to_owned(),
+        session: "ExitedSession".to_owned(),
+        review: "Requested".to_owned(),
+        queue: "QueueApplied".to_owned(),
+        fence: "F1".to_owned(),
+        active_subtask: true,
+        artifact_present: false,
+        review_approved: false,
+        apply_verified: false,
+        terminal: false,
+    };
+    let trace = CoreItfTrace {
+        states: vec![CoreItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_core_lifecycle_trace(&trace),
+        vec![
+            "state[0]: held claim is not bound to active session/subtask",
+            "state[0]: terminal subtask has held claim",
+            "state[0]: review exists without artifact",
+            "state[0]: ready queue exists without approved review",
+            "state[0]: applied queue lacks apply verification",
+            "state[0]: terminal marker disagrees with subtask state",
+        ]
     );
 }
