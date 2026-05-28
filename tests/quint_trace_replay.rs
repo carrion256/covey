@@ -1,11 +1,11 @@
 use covey::{
     AbandonSubtaskReq, ArtifactKind, CancelMetaTaskReq, ClaimReadyQueueReq,
-    ConflictResolutionState, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq,
-    MarkAppliedReq, MarkInFlightReq, OverlapQueryReq, PublishArtifactReq,
-    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, RenewClaimReq, RepoopsAuthoritySnapshotReq,
-    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass,
-    SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
+    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
+    ExitSessionReq, HeartbeatReq, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
+    PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, RenewClaimReq,
+    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
+    ReviewVerdict, ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
     VerifyLandingAuthorizationReq,
 };
 use rstest::{fixture, rstest};
@@ -40,6 +40,8 @@ const COVEY_SESSION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionRequestShape.itf.json");
 const COVEY_META_TASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMetaTaskRequestShape.itf.json");
+const COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyCreateSubtaskRequestShape.itf.json");
 const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
@@ -235,6 +237,16 @@ struct MetaTaskRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct MetaTaskRequestShapeItfState {
     s: MetaTaskRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSubtaskRequestShapeItfTrace {
+    states: Vec<CreateSubtaskRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSubtaskRequestShapeItfState {
+    s: CreateSubtaskRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -914,6 +926,34 @@ struct MetaTaskRequestShapeState {
     prompt_text_valid: bool,
     #[serde(rename = "metaTaskIdValid")]
     meta_task_id_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSubtaskRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "metaTaskIdValid")]
+    meta_task_id_valid: bool,
+    #[serde(rename = "optionalSubtaskIdPresent")]
+    optional_subtask_id_present: bool,
+    #[serde(rename = "optionalSubtaskIdValid")]
+    optional_subtask_id_valid: bool,
+    #[serde(rename = "titleValid")]
+    title_valid: bool,
+    #[serde(rename = "priorityValid")]
+    priority_valid: bool,
     #[serde(rename = "idempotencyKeyValid")]
     idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
@@ -2688,6 +2728,131 @@ fn replay_meta_task_request_shape_trace(trace: &MetaTaskRequestShapeItfTrace) ->
         if expected_accepted && state.operation == "CancelMetaTask" && !state.meta_task_id_valid {
             violations.push(format!(
                 "state[{index}]: accepted cancel-meta-task request lacks meta-task id"
+            ));
+        }
+    }
+    violations
+}
+
+fn create_subtask_request_expected_reject(state: &CreateSubtaskRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.meta_task_id_valid {
+        "MetaTaskIdInvalid"
+    } else if !state.optional_subtask_id_valid {
+        "SubtaskIdInvalid"
+    } else if !state.title_valid {
+        "SubtaskTitleInvalid"
+    } else if !state.priority_valid {
+        "PriorityInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn create_subtask_request_priority(state: &CreateSubtaskRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "NegativePriority" => -1,
+        "PriorityTooHigh" => 1001,
+        _ => 10,
+    }
+}
+
+fn create_subtask_request_title(state: &CreateSubtaskRequestShapeState) -> &'static str {
+    match state.case.as_str() {
+        "BlankTitle" => "",
+        "PaddedTitle" => " padded ",
+        _ => "implement",
+    }
+}
+
+fn create_subtask_request_actual_accepts(state: &CreateSubtaskRequestShapeState) -> bool {
+    CreateSubtaskRequest::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        },
+        if state.meta_task_id_valid {
+            "meta-1"
+        } else {
+            "meta 1"
+        },
+        if state.optional_subtask_id_present {
+            Some(
+                if state.optional_subtask_id_valid {
+                    "subtask-1"
+                } else {
+                    "subtask 1"
+                }
+                .to_owned(),
+            )
+        } else {
+            None
+        },
+        create_subtask_request_title(state),
+        create_subtask_request_priority(state),
+        if state.idempotency_key_valid {
+            "idem-create-subtask"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_create_subtask_request_shape_trace(
+    trace: &CreateSubtaskRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: create-subtask request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = create_subtask_request_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: create-subtask request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: create-subtask request outcome disagrees with validation facts"
+            ));
+        }
+        if create_subtask_request_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: create-subtask request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.meta_task_id_valid
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted create-subtask request lacks session, meta-task, or idempotency key"
+            ));
+        }
+        if expected_accepted
+            && (!state.optional_subtask_id_valid || !state.title_valid || !state.priority_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted create-subtask request has invalid subtask payload"
             ));
         }
     }
@@ -6756,6 +6921,12 @@ fn meta_task_request_shape_trace() -> MetaTaskRequestShapeItfTrace {
 }
 
 #[fixture]
+fn create_subtask_request_shape_trace() -> CreateSubtaskRequestShapeItfTrace {
+    serde_json::from_str(COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn view_attachment_shape_trace() -> ViewAttachmentShapeItfTrace {
     serde_json::from_str(COVEY_VIEW_ATTACHMENT_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -7418,6 +7589,54 @@ fn covey_replays_quint_meta_task_request_shape_itf_trace(
     }
     assert_eq!(
         replay_meta_task_request_shape_trace(&meta_task_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_create_subtask_request_shape_itf_trace(
+    create_subtask_request_shape_trace: CreateSubtaskRequestShapeItfTrace,
+) {
+    assert!(
+        !create_subtask_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidWithoutSubtaskId",
+        "ValidWithSubtaskId",
+        "InvalidSessionToken",
+        "InvalidMetaTaskId",
+        "InvalidSubtaskId",
+        "BlankTitle",
+        "PaddedTitle",
+        "NegativePriority",
+        "PriorityTooHigh",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            create_subtask_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        create_subtask_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidWithoutSubtaskId" && state.s.accepted),
+        "fixture should cover accepted generated subtask ids"
+    );
+    assert!(
+        create_subtask_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidWithSubtaskId" && state.s.accepted),
+        "fixture should cover accepted caller-supplied subtask ids"
+    );
+    assert_eq!(
+        replay_create_subtask_request_shape_trace(&create_subtask_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -8914,6 +9133,36 @@ fn covey_meta_task_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: meta-task request reject reason does not match validation facts",
             "state[0]: meta-task request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_create_subtask_request_shape_replay_reports_counterexample_shape() {
+    let state = CreateSubtaskRequestShapeState {
+        case_index: 7,
+        case: "NegativePriority".to_owned(),
+        session_token_valid: true,
+        meta_task_id_valid: true,
+        optional_subtask_id_present: true,
+        optional_subtask_id_valid: true,
+        title_valid: true,
+        priority_valid: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = CreateSubtaskRequestShapeItfTrace {
+        states: vec![CreateSubtaskRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_create_subtask_request_shape_trace(&trace),
+        vec![
+            "state[0]: create-subtask request reject reason does not match validation facts",
+            "state[0]: create-subtask request outcome disagrees with validation facts",
         ]
     );
 }
