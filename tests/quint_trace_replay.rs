@@ -1,6 +1,7 @@
 use covey::{
-    ConflictResolutionState, OverlapQueryReq, RecordRuntimeAttestationReq,
-    RepoopsAuthoritySnapshotReq, RequestReservationReq, ResolveConflictReq, ScopeClass,
+    ArtifactKind, ConflictResolutionState, OverlapQueryReq, PublishArtifactReq,
+    RecordRuntimeAttestationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
+    ResolveConflictReq, ScopeClass,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -34,6 +35,8 @@ const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyViewAttachmentShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRuntimeAttestationRequestShape.itf.json");
+const COVEY_PUBLISH_ARTIFACT_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyPublishArtifactRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
@@ -203,6 +206,16 @@ struct RuntimeAttestationRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct RuntimeAttestationRequestShapeItfState {
     s: RuntimeAttestationRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishArtifactRequestShapeItfTrace {
+    states: Vec<PublishArtifactRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishArtifactRequestShapeItfState {
+    s: PublishArtifactRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -789,6 +802,40 @@ struct RuntimeAttestationRequestShapeState {
     idempotency_key_valid: bool,
     #[serde(rename = "flatSerializationPreservesIdentity")]
     flat_serialization_preserves_identity: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishArtifactRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "artifactKind", deserialize_with = "deserialize_itf_variant")]
+    artifact_kind: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "claimIdValid")]
+    claim_id_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "baseRevValid")]
+    base_rev_valid: bool,
+    #[serde(rename = "manifestPathPresent")]
+    manifest_path_present: bool,
+    #[serde(rename = "manifestPathNoControl")]
+    manifest_path_no_control: bool,
+    #[serde(rename = "changedPathsDigestValid")]
+    changed_paths_digest_valid: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -2249,6 +2296,140 @@ fn replay_runtime_attestation_request_shape_trace(
         if expected_accepted && !state.process_id_present && !state.container_id_present {
             violations.push(format!(
                 "state[{index}]: accepted runtime attestation request lacks runtime identity"
+            ));
+        }
+    }
+    violations
+}
+
+fn publish_artifact_expected_reject(state: &PublishArtifactRequestShapeState) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.claim_id_valid {
+        "ClaimIdInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if !state.base_rev_valid {
+        "BaseRevInvalid"
+    } else if !(state.manifest_path_present && state.manifest_path_no_control) {
+        "ManifestPathInvalid"
+    } else if !state.changed_paths_digest_valid {
+        "ChangedPathsDigestInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn publish_artifact_kind(state: &PublishArtifactRequestShapeState) -> ArtifactKind {
+    match state.artifact_kind.as_str() {
+        "PatchBundle" => ArtifactKind::PatchBundle,
+        "TreeBundle" => ArtifactKind::TreeBundle,
+        artifact_kind => panic!("unexpected artifact kind from ITF trace: {artifact_kind}"),
+    }
+}
+
+fn publish_artifact_actual_accepts(state: &PublishArtifactRequestShapeState) -> bool {
+    PublishArtifactReq::try_from_raw_parts(
+        if state.session_token_valid {
+            "session-1"
+        } else {
+            ""
+        },
+        if state.claim_id_valid { "claim-1" } else { "" },
+        if state.fence_seq_positive { 1 } else { 0 },
+        if state.artifact_digest_valid {
+            "blake3:artifact".to_owned()
+        } else {
+            "artifact".to_owned()
+        },
+        publish_artifact_kind(state),
+        if state.base_rev_valid {
+            "base".to_owned()
+        } else {
+            "base rev".to_owned()
+        },
+        if !state.manifest_path_present {
+            String::new()
+        } else if !state.manifest_path_no_control {
+            "manifest\n.json".to_owned()
+        } else {
+            "manifest.json".to_owned()
+        },
+        if state.changed_paths_digest_valid {
+            "blake3:paths".to_owned()
+        } else {
+            "paths".to_owned()
+        },
+        if state.idempotency_key_valid {
+            "idem-artifact"
+        } else {
+            " "
+        },
+    )
+    .is_ok()
+}
+
+fn replay_publish_artifact_request_shape_trace(
+    trace: &PublishArtifactRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: publish artifact request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = publish_artifact_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: publish artifact request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: publish artifact request outcome disagrees with validation facts"
+            ));
+        }
+        if publish_artifact_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: publish artifact request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid || !state.claim_id_valid || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted publish artifact request has invalid claim/fence identity"
+            ));
+        }
+        if expected_accepted
+            && (!state.artifact_digest_valid
+                || !state.base_rev_valid
+                || !state.manifest_path_present
+                || !state.manifest_path_no_control
+                || !state.changed_paths_digest_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted publish artifact request has invalid artifact evidence"
+            ));
+        }
+        if expected_accepted && !state.idempotency_key_valid {
+            violations.push(format!(
+                "state[{index}]: accepted publish artifact request lacks idempotency key"
             ));
         }
     }
@@ -4788,6 +4969,12 @@ fn runtime_attestation_request_shape_trace() -> RuntimeAttestationRequestShapeIt
 }
 
 #[fixture]
+fn publish_artifact_request_shape_trace() -> PublishArtifactRequestShapeItfTrace {
+    serde_json::from_str(COVEY_PUBLISH_ARTIFACT_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
     serde_json::from_str(COVEY_RESERVATION_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -5390,6 +5577,48 @@ fn covey_replays_quint_runtime_attestation_request_shape_itf_trace(
     );
     assert_eq!(
         replay_runtime_attestation_request_shape_trace(&runtime_attestation_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_publish_artifact_request_shape_itf_trace(
+    publish_artifact_request_shape_trace: PublishArtifactRequestShapeItfTrace,
+) {
+    assert!(
+        !publish_artifact_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidPatchBundle",
+        "ValidTreeBundle",
+        "InvalidSessionToken",
+        "InvalidClaimId",
+        "NonPositiveFence",
+        "InvalidArtifactDigest",
+        "InvalidBaseRev",
+        "EmptyManifestPath",
+        "ControlManifestPath",
+        "InvalidChangedPathsDigest",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            publish_artifact_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        publish_artifact_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.artifact_kind == "TreeBundle" && state.s.accepted),
+        "fixture should cover accepted non-patch artifact kinds"
+    );
+    assert_eq!(
+        replay_publish_artifact_request_shape_trace(&publish_artifact_request_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -6474,6 +6703,39 @@ fn covey_runtime_attestation_request_shape_replay_reports_counterexample_shape()
         vec![
             "state[0]: runtime attestation request reject reason does not match parser order",
             "state[0]: runtime attestation request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_publish_artifact_request_shape_replay_reports_counterexample_shape() {
+    let state = PublishArtifactRequestShapeState {
+        case_index: 8,
+        case: "EmptyManifestPath".to_owned(),
+        artifact_kind: "PatchBundle".to_owned(),
+        session_token_valid: true,
+        claim_id_valid: true,
+        fence_seq_positive: true,
+        artifact_digest_valid: true,
+        base_rev_valid: true,
+        manifest_path_present: false,
+        manifest_path_no_control: true,
+        changed_paths_digest_valid: true,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = PublishArtifactRequestShapeItfTrace {
+        states: vec![PublishArtifactRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_publish_artifact_request_shape_trace(&trace),
+        vec![
+            "state[0]: publish artifact request reject reason does not match validation facts",
+            "state[0]: publish artifact request outcome disagrees with validation facts",
         ]
     );
 }
