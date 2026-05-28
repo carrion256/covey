@@ -4599,6 +4599,14 @@ fn reservation_mutation_payloads_reject_invalid_ids_and_leases() {
     serde_json::from_value::<ReleaseReservationReq>(invalid_release_id)
         .expect_err("release reservation should reject invalid reservation ids");
 
+    let invalid_release_idempotency = serde_json::json!({
+        "session_token": "session-1",
+        "reservation_id": "reservation-1",
+        "idempotency_key": " "
+    });
+    serde_json::from_value::<ReleaseReservationReq>(invalid_release_idempotency)
+        .expect_err("release reservation should reject blank idempotency keys");
+
     let invalid_renew_session = serde_json::json!({
         "session_token": "",
         "reservation_id": "reservation-1",
@@ -4625,6 +4633,15 @@ fn reservation_mutation_payloads_reject_invalid_ids_and_leases() {
     });
     serde_json::from_value::<RenewReservationReq>(invalid_renew_duration)
         .expect_err("renew reservation should reject non-positive extension durations");
+
+    let invalid_renew_idempotency = serde_json::json!({
+        "session_token": "session-1",
+        "reservation_id": "reservation-1",
+        "extend_by_ms": 10_000,
+        "idempotency_key": " "
+    });
+    serde_json::from_value::<RenewReservationReq>(invalid_renew_idempotency)
+        .expect_err("renew reservation should reject blank idempotency keys");
 }
 
 #[test]

@@ -3,10 +3,10 @@ use covey::{
     ClaimSubtaskReq, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
     EnqueueForApplyReq, ExitSessionReq, HeartbeatReq, MarkAppliedReq, MarkInFlightReq,
     OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, RenewClaimReq,
-    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
-    ReviewVerdict, ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
+    RequestReviewReq, ResolveConflictReq, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use rstest::{fixture, rstest};
 use serde::Deserialize;
@@ -74,6 +74,8 @@ const COVEY_LANDING_RECEIPT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyLandingReceiptRequestShape.itf.json");
 const COVEY_RESERVATION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationRequestShape.itf.json");
+const COVEY_RESERVATION_LIFECYCLE_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReservationLifecycleRequestShape.itf.json");
 const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
     include_str!("fixtures/quint/CoveyConflictResolutionRequest.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
@@ -411,6 +413,16 @@ struct ReservationRequestShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ReservationRequestShapeItfState {
     s: ReservationRequestShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationLifecycleRequestShapeItfTrace {
+    states: Vec<ReservationLifecycleRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationLifecycleRequestShapeItfState {
+    s: ReservationLifecycleRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1450,6 +1462,30 @@ struct ReservationRequestShapeState {
     generated_members_normalized: bool,
     #[serde(rename = "generatedMembersUnique")]
     generated_members_unique: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationLifecycleRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    operation: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "reservationIdValid")]
+    reservation_id_valid: bool,
+    #[serde(rename = "extendDurationPositive")]
+    extend_duration_positive: bool,
+    #[serde(rename = "idempotencyKeyValid")]
+    idempotency_key_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -4855,6 +4891,121 @@ fn replay_reservation_request_shape_trace(trace: &ReservationRequestShapeItfTrac
     violations
 }
 
+fn reservation_lifecycle_expected_reject(
+    state: &ReservationLifecycleRequestShapeState,
+) -> &'static str {
+    if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.reservation_id_valid {
+        "ReservationIdInvalid"
+    } else if state.operation == "RenewReservation" && !state.extend_duration_positive {
+        "LeaseDurationInvalid"
+    } else if !state.idempotency_key_valid {
+        "IdempotencyKeyInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn reservation_lifecycle_extend_by_ms(state: &ReservationLifecycleRequestShapeState) -> i64 {
+    match state.case.as_str() {
+        "ZeroRenewExtension" => 0,
+        "NegativeRenewExtension" => -1,
+        _ => 10_000,
+    }
+}
+
+fn reservation_lifecycle_actual_accepts(state: &ReservationLifecycleRequestShapeState) -> bool {
+    let session_token = if state.session_token_valid {
+        "session-1"
+    } else {
+        "session 1"
+    };
+    let reservation_id = if state.reservation_id_valid {
+        "reservation-1"
+    } else {
+        ""
+    };
+    let idempotency_key = if state.idempotency_key_valid {
+        "idem-reservation-lifecycle"
+    } else {
+        " "
+    };
+    match state.operation.as_str() {
+        "ReleaseReservation" => ReleaseReservationReq::try_from_raw_parts(
+            session_token,
+            reservation_id,
+            idempotency_key,
+        )
+        .is_ok(),
+        "RenewReservation" => RenewReservationReq::try_from_raw_parts(
+            session_token,
+            reservation_id,
+            reservation_lifecycle_extend_by_ms(state),
+            idempotency_key,
+        )
+        .is_ok(),
+        _ => false,
+    }
+}
+
+fn replay_reservation_lifecycle_request_shape_trace(
+    trace: &ReservationLifecycleRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: reservation lifecycle request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = reservation_lifecycle_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: reservation lifecycle request reject reason does not match validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: reservation lifecycle request outcome disagrees with validation facts"
+            ));
+        }
+        if reservation_lifecycle_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: reservation lifecycle request parser disagrees with model"
+            ));
+        }
+        if expected_accepted
+            && (!state.session_token_valid
+                || !state.reservation_id_valid
+                || !state.idempotency_key_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted reservation lifecycle request lacks session, reservation, or idempotency key"
+            ));
+        }
+        if expected_accepted
+            && state.operation == "RenewReservation"
+            && !state.extend_duration_positive
+        {
+            violations.push(format!(
+                "state[{index}]: accepted reservation renewal has non-positive extension"
+            ));
+        }
+    }
+    violations
+}
+
 fn conflict_resolution_expected_reject(state: &ConflictResolutionRequestState) -> &'static str {
     if !state.session_token_valid {
         "SessionTokenInvalid"
@@ -7309,6 +7460,12 @@ fn reservation_request_shape_trace() -> ReservationRequestShapeItfTrace {
 }
 
 #[fixture]
+fn reservation_lifecycle_request_shape_trace() -> ReservationLifecycleRequestShapeItfTrace {
+    serde_json::from_str(COVEY_RESERVATION_LIFECYCLE_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn conflict_resolution_request_trace() -> ConflictResolutionRequestItfTrace {
     serde_json::from_str(COVEY_CONFLICT_RESOLUTION_REQUEST_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -8620,6 +8777,48 @@ fn covey_replays_quint_reservation_request_shape_itf_trace(
     );
     assert_eq!(
         replay_reservation_request_shape_trace(&reservation_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_reservation_lifecycle_request_shape_itf_trace(
+    reservation_lifecycle_request_shape_trace: ReservationLifecycleRequestShapeItfTrace,
+) {
+    assert!(
+        !reservation_lifecycle_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidRelease",
+        "ValidRenew",
+        "InvalidSessionToken",
+        "InvalidReservationId",
+        "ZeroRenewExtension",
+        "NegativeRenewExtension",
+        "BlankIdempotencyKey",
+    ] {
+        assert!(
+            reservation_lifecycle_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in ["ReleaseReservation", "RenewReservation"] {
+        assert!(
+            reservation_lifecycle_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.operation == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    assert_eq!(
+        replay_reservation_lifecycle_request_shape_trace(
+            &reservation_lifecycle_request_shape_trace
+        ),
         Vec::<String>::new()
     );
 }
@@ -10150,6 +10349,34 @@ fn covey_reservation_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: reservation request reject reason does not match validation facts",
             "state[0]: reservation request outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_reservation_lifecycle_request_shape_replay_reports_counterexample_shape() {
+    let state = ReservationLifecycleRequestShapeState {
+        case_index: 5,
+        case: "ZeroRenewExtension".to_owned(),
+        operation: "RenewReservation".to_owned(),
+        session_token_valid: true,
+        reservation_id_valid: true,
+        extend_duration_positive: false,
+        idempotency_key_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = ReservationLifecycleRequestShapeItfTrace {
+        states: vec![ReservationLifecycleRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_reservation_lifecycle_request_shape_trace(&trace),
+        vec![
+            "state[0]: reservation lifecycle request reject reason does not match validation facts",
+            "state[0]: reservation lifecycle request outcome disagrees with validation facts",
         ]
     );
 }
