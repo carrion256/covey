@@ -15,6 +15,8 @@ const COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryExit.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
+const COVEY_READY_QUEUE_CLAIM_SELECTION_ITF: &str =
+    include_str!("fixtures/quint/CoveyReadyQueueClaimSelection.itf.json");
 const COVEY_RESERVATION_OVERLAP_ITF: &str =
     include_str!("fixtures/quint/CoveyReservationOverlap.itf.json");
 const COVEY_APPLY_GATE_EVIDENCE_ITF: &str =
@@ -82,6 +84,16 @@ struct QueueReservationItfTrace {
 #[derive(Debug, Deserialize)]
 struct QueueReservationItfState {
     s: QueueReservationState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueClaimSelectionItfTrace {
+    states: Vec<ReadyQueueClaimSelectionItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueClaimSelectionItfState {
+    s: ReadyQueueClaimSelectionState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +294,55 @@ struct QueueReservationState {
         deserialize_with = "deserialize_itf_bigint"
     )]
     conflict_rank_floor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadyQueueClaimSelectionState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "roleApplyGate")]
+    role_apply_gate: bool,
+    #[serde(rename = "headState", deserialize_with = "deserialize_itf_variant")]
+    head_state: String,
+    #[serde(rename = "headExpired")]
+    head_expired: bool,
+    #[serde(rename = "headSubtaskReady")]
+    head_subtask_ready: bool,
+    #[serde(rename = "headArtifactMatches")]
+    head_artifact_matches: bool,
+    #[serde(rename = "headMetaSchedulable")]
+    head_meta_schedulable: bool,
+    #[serde(rename = "tailPresent")]
+    tail_present: bool,
+    #[serde(rename = "tailClaimable")]
+    tail_claimable: bool,
+    #[serde(rename = "headAction", deserialize_with = "deserialize_itf_variant")]
+    head_action: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    result: String,
+    #[serde(rename = "selectedHead")]
+    selected_head: bool,
+    #[serde(rename = "selectedTail")]
+    selected_tail: bool,
+    #[serde(
+        rename = "headFenceBefore",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    head_fence_before: i64,
+    #[serde(rename = "headFenceAfter", deserialize_with = "deserialize_itf_bigint")]
+    head_fence_after: i64,
+    #[serde(
+        rename = "tailFenceBefore",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    tail_fence_before: i64,
+    #[serde(rename = "tailFenceAfter", deserialize_with = "deserialize_itf_bigint")]
+    tail_fence_after: i64,
+    #[serde(rename = "eventEmitted")]
+    event_emitted: bool,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1492,6 +1553,105 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
         if state.conflict_rank_floor >= 2 && state.conflict != "Resolved" {
             violations.push(format!(
                 "state[{index}]: resolved conflict floor was downgraded"
+            ));
+        }
+    }
+    violations
+}
+
+fn replay_ready_queue_claim_selection_trace(
+    trace: &ReadyQueueClaimSelectionItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: ready-queue claim-selection scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+
+        if matches!(state.result.as_str(), "ClaimHead" | "ClaimTail") && !state.role_apply_gate {
+            violations.push(format!(
+                "{prefix}: ready-queue claim was granted to non-apply-gate role"
+            ));
+        }
+        if state.result == "ClaimHead"
+            && !(state.head_subtask_ready
+                && state.head_artifact_matches
+                && state.head_meta_schedulable)
+        {
+            violations.push(format!(
+                "{prefix}: head queue claim did not require ready artifact and schedulable meta-task"
+            ));
+        }
+        if state.case == "InvalidHeadSupersededTailClaimed"
+            && !(state.head_action == "SupersededHead"
+                && state.result == "ClaimTail"
+                && !state.selected_head)
+        {
+            violations.push(format!(
+                "{prefix}: invalid head was not superseded before claiming tail"
+            ));
+        }
+        if state.case == "MetaUnavailableHeadCancelledTailClaimed"
+            && !(state.head_action == "CancelledHead"
+                && state.result == "ClaimTail"
+                && !state.selected_head)
+        {
+            violations.push(format!(
+                "{prefix}: unavailable head was not cancelled before claiming tail"
+            ));
+        }
+        if state.case == "ExpiredHeadRequeuedThenClaimed"
+            && !(state.head_expired
+                && state.head_action == "RequeuedHead"
+                && state.result == "ClaimHead"
+                && state.selected_head)
+        {
+            violations.push(format!(
+                "{prefix}: expired in-flight head was not requeued before claim"
+            ));
+        }
+        if state.case == "ActiveInFlightHeadIgnoredTailClaimed"
+            && !(state.head_state == "InFlight"
+                && !state.head_expired
+                && state.head_action == "IgnoredHead"
+                && state.result == "ClaimTail"
+                && state.selected_tail)
+        {
+            violations.push(format!(
+                "{prefix}: active in-flight head blocked or displaced tail claim"
+            ));
+        }
+        if state.event_emitted != matches!(state.result.as_str(), "ClaimHead" | "ClaimTail") {
+            violations.push(format!(
+                "{prefix}: ready-queue in-flight event emission disagrees with claim result"
+            ));
+        }
+        let head_delta = state.head_fence_after - state.head_fence_before;
+        let tail_delta = state.tail_fence_after - state.tail_fence_before;
+        let expected_head_delta = i64::from(state.selected_head);
+        let expected_tail_delta = i64::from(state.selected_tail);
+        if head_delta != expected_head_delta || tail_delta != expected_tail_delta {
+            violations.push(format!(
+                "{prefix}: ready-queue fence advancement did not match selected queue"
+            ));
+        }
+        if state.selected_head && state.selected_tail {
+            violations.push(format!("{prefix}: ready-queue selected both head and tail"));
+        }
+        if state.result == "ClaimTail" && !(state.tail_present && state.tail_claimable) {
+            violations.push(format!(
+                "{prefix}: tail claim was returned without a claimable tail"
             ));
         }
     }
@@ -2964,6 +3124,12 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
 }
 
 #[fixture]
+fn ready_queue_claim_selection_trace() -> ReadyQueueClaimSelectionItfTrace {
+    serde_json::from_str(COVEY_READY_QUEUE_CLAIM_SELECTION_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn reservation_overlap_trace() -> ReservationOverlapItfTrace {
     serde_json::from_str(COVEY_RESERVATION_OVERLAP_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -3187,6 +3353,35 @@ fn covey_replays_quint_queue_reservation_itf_trace(
     );
     assert_eq!(
         replay_queue_reservation_trace(&queue_reservation_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_ready_queue_claim_selection_itf_trace(
+    ready_queue_claim_selection_trace: ReadyQueueClaimSelectionItfTrace,
+) {
+    assert!(
+        !ready_queue_claim_selection_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "InvalidHeadSupersededTailClaimed",
+        "MetaUnavailableHeadCancelledTailClaimed",
+        "ExpiredHeadRequeuedThenClaimed",
+        "ActiveInFlightHeadIgnoredTailClaimed",
+        "WrongRoleRejected",
+    ] {
+        assert!(
+            ready_queue_claim_selection_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert_eq!(
+        replay_ready_queue_claim_selection_trace(&ready_queue_claim_selection_trace),
         Vec::<String>::new()
     );
 }
@@ -3714,6 +3909,47 @@ fn covey_review_claim_reclaim_replay_reports_followup_binding_counterexample() {
     assert_eq!(
         replay_review_claim_reclaim_trace(&trace),
         vec!["state[0]: follow-up record lacks review/source/artifact/findings/reviewer binding"]
+    );
+}
+
+#[rstest]
+fn covey_ready_queue_claim_selection_replay_reports_counterexample_shape() {
+    let state = ReadyQueueClaimSelectionState {
+        case_index: 1,
+        case: "InvalidHeadSupersededTailClaimed".to_owned(),
+        role_apply_gate: false,
+        head_state: "InFlight".to_owned(),
+        head_expired: false,
+        head_subtask_ready: false,
+        head_artifact_matches: false,
+        head_meta_schedulable: false,
+        tail_present: false,
+        tail_claimable: false,
+        head_action: "ClaimedHead".to_owned(),
+        result: "ClaimHead".to_owned(),
+        selected_head: true,
+        selected_tail: true,
+        head_fence_before: 0,
+        head_fence_after: 0,
+        tail_fence_before: 0,
+        tail_fence_after: 2,
+        event_emitted: false,
+        evaluated: true,
+    };
+    let trace = ReadyQueueClaimSelectionItfTrace {
+        states: vec![ReadyQueueClaimSelectionItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_ready_queue_claim_selection_trace(&trace),
+        vec![
+            "state[0]: ready-queue claim was granted to non-apply-gate role",
+            "state[0]: head queue claim did not require ready artifact and schedulable meta-task",
+            "state[0]: invalid head was not superseded before claiming tail",
+            "state[0]: ready-queue in-flight event emission disagrees with claim result",
+            "state[0]: ready-queue fence advancement did not match selected queue",
+            "state[0]: ready-queue selected both head and tail",
+        ]
     );
 }
 
