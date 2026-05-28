@@ -786,17 +786,37 @@ impl Covey {
                     reason: "landing receipt claim fence does not match queue item".to_owned(),
                 });
             }
+            let existing_receipt = tx
+                .query_row(
+                    r#"
+                    SELECT target_ref, landed_commit_oid
+                    FROM landing_receipts
+                    WHERE queue_id = ?1
+                      AND artifact_digest = ?2
+                    LIMIT 1
+                    "#,
+                    params![req.queue_id.as_str(), req.artifact_digest.as_str()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((target_ref, landed_commit_oid)) = existing_receipt {
+                if target_ref == req.target_ref.as_str()
+                    && landed_commit_oid == req.landed_commit_oid.as_str()
+                {
+                    return Ok(());
+                }
+                return Err(CoveyError::ApplyGateEvidenceMissing {
+                    queue_id,
+                    reason: "landing receipt already recorded with different target or commit"
+                        .to_owned(),
+                });
+            }
             tx.execute(
                 r#"
                 INSERT INTO landing_receipts (
                     queue_id, artifact_digest, claim_fence_seq, target_ref, landed_commit_oid,
                     recorded_by_session, created_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                ON CONFLICT(queue_id, artifact_digest) DO UPDATE SET
-                    claim_fence_seq = excluded.claim_fence_seq,
-                    target_ref = excluded.target_ref,
-                    landed_commit_oid = excluded.landed_commit_oid,
-                    recorded_by_session = excluded.recorded_by_session
                 "#,
                 params![
                     req.queue_id.as_str(),

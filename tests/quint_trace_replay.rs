@@ -9,6 +9,7 @@ const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
 const COVEY_SESSION_META_TASK_ITF: &str =
     include_str!("fixtures/quint/CoveySessionMetaTask.itf.json");
+const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -58,6 +59,16 @@ struct SessionMetaTaskItfTrace {
 #[derive(Debug, Deserialize)]
 struct SessionMetaTaskItfState {
     s: SessionMetaTaskState,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingReceiptItfTrace {
+    states: Vec<LandingReceiptItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingReceiptItfState {
+    s: LandingReceiptState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +175,46 @@ struct ReviewFollowupState {
     r1: bool,
     r2: bool,
     r3: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LandingReceiptState {
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    queue: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    receipt: String,
+    #[serde(rename = "lastAttempt", deserialize_with = "deserialize_itf_variant")]
+    last_attempt: String,
+    #[serde(rename = "actorAuthorized")]
+    actor_authorized: bool,
+    #[serde(rename = "artifactMatches")]
+    artifact_matches: bool,
+    #[serde(rename = "fenceMatches")]
+    fence_matches: bool,
+    #[serde(rename = "receiptActorAuthorized")]
+    receipt_actor_authorized: bool,
+    #[serde(rename = "receiptArtifactMatches")]
+    receipt_artifact_matches: bool,
+    #[serde(rename = "receiptFenceMatches")]
+    receipt_fence_matches: bool,
+    #[serde(rename = "receiptTarget", deserialize_with = "deserialize_itf_variant")]
+    receipt_target: String,
+    #[serde(rename = "receiptCommit", deserialize_with = "deserialize_itf_variant")]
+    receipt_commit: String,
+    #[serde(
+        rename = "attemptedTarget",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    attempted_target: String,
+    #[serde(
+        rename = "attemptedCommit",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    attempted_commit: String,
+    #[serde(rename = "receiptCreatedByLastAttempt")]
+    receipt_created_by_last_attempt: bool,
+    #[serde(rename = "divergentAttemptRejected")]
+    divergent_attempt_rejected: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,7 +468,9 @@ fn replay_review_claim_reclaim_trace(trace: &ReviewClaimReclaimItfTrace) -> Vec<
             ));
         }
         if state.claim == "Expired" && state.review == "Decided" {
-            violations.push(format!("state[{index}]: expired review claim decided review"));
+            violations.push(format!(
+                "state[{index}]: expired review claim decided review"
+            ));
         }
         if state.stale_decision_rejected
             && !(state.review == "Requested" && state.review_subtask == "Available")
@@ -449,9 +502,7 @@ fn replay_review_claim_reclaim_trace(trace: &ReviewClaimReclaimItfTrace) -> Vec<
             ));
         }
         if !state.artifact_current && state.review == "Decided" {
-            violations.push(format!(
-                "state[{index}]: stale artifact review was decided"
-            ));
+            violations.push(format!("state[{index}]: stale artifact review was decided"));
         }
         if state.claim == "Held" && state.current_fence <= state.expired_fence {
             violations.push(format!(
@@ -702,6 +753,95 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
     violations
 }
 
+fn replay_landing_receipt_trace(trace: &LandingReceiptItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let receipt_recorded = state.receipt == "ReceiptRecorded";
+        if receipt_recorded && state.queue != "Applied" {
+            violations.push(format!(
+                "state[{index}]: landing receipt exists before applied queue"
+            ));
+        }
+        if receipt_recorded && !state.receipt_actor_authorized {
+            violations.push(format!(
+                "state[{index}]: landing receipt lacks authorized recorder"
+            ));
+        }
+        if receipt_recorded && !(state.receipt_artifact_matches && state.receipt_fence_matches) {
+            violations.push(format!(
+                "state[{index}]: landing receipt lacks artifact/fence match"
+            ));
+        }
+        if receipt_recorded
+            && (state.receipt_target == "NoTarget" || state.receipt_commit == "NoCommit")
+        {
+            violations.push(format!(
+                "state[{index}]: landing receipt lacks target or commit binding"
+            ));
+        }
+        if state.queue == "Superseded" && receipt_recorded {
+            violations.push(format!(
+                "state[{index}]: superseded queue recorded landing receipt"
+            ));
+        }
+        if state.last_attempt == "Accepted" && !receipt_recorded {
+            violations.push(format!(
+                "state[{index}]: accepted landing receipt attempt did not record receipt"
+            ));
+        }
+        if state.last_attempt == "ReplayedSame"
+            && !(receipt_recorded
+                && state.receipt_target == state.attempted_target
+                && state.receipt_commit == state.attempted_commit)
+        {
+            violations.push(format!(
+                "state[{index}]: replayed landing receipt changed recorded receipt"
+            ));
+        }
+        let divergent_attempt = receipt_recorded
+            && state.attempted_target != "NoTarget"
+            && state.attempted_commit != "NoCommit"
+            && (state.receipt_target != state.attempted_target
+                || state.receipt_commit != state.attempted_commit);
+        if divergent_attempt
+            && !(state.last_attempt == "Rejected" && state.divergent_attempt_rejected)
+        {
+            violations.push(format!(
+                "state[{index}]: divergent landing receipt attempt was not rejected"
+            ));
+        }
+        if state.last_attempt == "Rejected" && state.receipt_created_by_last_attempt {
+            violations.push(format!(
+                "state[{index}]: rejected landing receipt attempt created receipt"
+            ));
+        }
+        if state.receipt_actor_authorized && !receipt_recorded {
+            violations.push(format!(
+                "state[{index}]: receipt recorder binding exists without receipt"
+            ));
+        }
+        if (state.receipt_artifact_matches || state.receipt_fence_matches) && !receipt_recorded {
+            violations.push(format!(
+                "state[{index}]: receipt match binding exists without receipt"
+            ));
+        }
+        if state.receipt_created_by_last_attempt && state.last_attempt != "Accepted" {
+            violations.push(format!(
+                "state[{index}]: non-accepted attempt marked receipt creation"
+            ));
+        }
+        if state.last_attempt == "Accepted"
+            && !(state.actor_authorized && state.artifact_matches && state.fence_matches)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted receipt attempt lacked live preconditions"
+            ));
+        }
+    }
+    violations
+}
+
 #[fixture]
 fn review_followup_trace() -> ItfTrace {
     serde_json::from_str(COVEY_REVIEW_FOLLOWUP_ITF).expect("fixture must be valid ITF JSON")
@@ -709,8 +849,7 @@ fn review_followup_trace() -> ItfTrace {
 
 #[fixture]
 fn review_claim_reclaim_trace() -> ReviewClaimReclaimItfTrace {
-    serde_json::from_str(COVEY_REVIEW_CLAIM_RECLAIM_ITF)
-        .expect("fixture must be valid ITF JSON")
+    serde_json::from_str(COVEY_REVIEW_CLAIM_RECLAIM_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -726,6 +865,11 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
 #[fixture]
 fn session_meta_task_trace() -> SessionMetaTaskItfTrace {
     serde_json::from_str(COVEY_SESSION_META_TASK_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn landing_receipt_trace() -> LandingReceiptItfTrace {
+    serde_json::from_str(COVEY_LANDING_RECEIPT_ITF).expect("fixture must be valid ITF JSON")
 }
 
 #[rstest]
@@ -790,6 +934,39 @@ fn covey_replays_quint_session_meta_task_itf_trace(
     );
     assert_eq!(
         replay_session_meta_task_trace(&session_meta_task_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_landing_receipt_itf_trace(landing_receipt_trace: LandingReceiptItfTrace) {
+    assert!(
+        !landing_receipt_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert!(
+        landing_receipt_trace
+            .states
+            .iter()
+            .any(|state| state.s.receipt == "ReceiptRecorded"),
+        "fixture should cover a recorded landing receipt"
+    );
+    assert!(
+        landing_receipt_trace
+            .states
+            .iter()
+            .any(|state| state.s.last_attempt == "ReplayedSame"),
+        "fixture should cover idempotent same-receipt replay"
+    );
+    assert!(
+        landing_receipt_trace
+            .states
+            .iter()
+            .any(|state| state.s.divergent_attempt_rejected),
+        "fixture should cover divergent receipt rejection"
+    );
+    assert_eq!(
+        replay_landing_receipt_trace(&landing_receipt_trace),
         Vec::<String>::new()
     );
 }
@@ -946,6 +1123,43 @@ fn covey_session_meta_task_replay_reports_counterexample_shape() {
             "state[0]: terminal meta-task still has held claim",
             "state[0]: terminal meta-task still has open ready queue",
             "state[0]: completed meta-task lacks terminal subtask summary",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_landing_receipt_replay_reports_counterexample_shape() {
+    let state = LandingReceiptState {
+        queue: "Superseded".to_owned(),
+        receipt: "ReceiptRecorded".to_owned(),
+        last_attempt: "Rejected".to_owned(),
+        actor_authorized: false,
+        artifact_matches: false,
+        fence_matches: false,
+        receipt_actor_authorized: false,
+        receipt_artifact_matches: false,
+        receipt_fence_matches: true,
+        receipt_target: "TargetMain".to_owned(),
+        receipt_commit: "CommitA".to_owned(),
+        attempted_target: "TargetRelease".to_owned(),
+        attempted_commit: "CommitB".to_owned(),
+        receipt_created_by_last_attempt: true,
+        divergent_attempt_rejected: false,
+    };
+    let trace = LandingReceiptItfTrace {
+        states: vec![LandingReceiptItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_landing_receipt_trace(&trace),
+        vec![
+            "state[0]: landing receipt exists before applied queue",
+            "state[0]: landing receipt lacks authorized recorder",
+            "state[0]: landing receipt lacks artifact/fence match",
+            "state[0]: superseded queue recorded landing receipt",
+            "state[0]: divergent landing receipt attempt was not rejected",
+            "state[0]: rejected landing receipt attempt created receipt",
+            "state[0]: non-accepted attempt marked receipt creation",
         ]
     );
 }

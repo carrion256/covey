@@ -947,6 +947,39 @@ fn landing_receipt_records_landed_commit_after_apply(rig: Rig) {
             .expect("valid landing receipt request"),
         )
         .expect("record landing receipt");
+    rig.covey
+        .record_landing_receipt(
+            RecordLandingReceiptReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id.clone(),
+                digest,
+                claim.claim_fence_seq,
+                "origin/main",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("valid replayed landing receipt request"),
+        )
+        .expect("same landing receipt is idempotent");
+
+    let divergent = rig
+        .covey
+        .record_landing_receipt(
+            RecordLandingReceiptReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id.clone(),
+                digest,
+                claim.claim_fence_seq,
+                "origin/main",
+                "1111111111111111111111111111111111111111",
+            )
+            .expect("valid divergent landing receipt request"),
+        )
+        .expect_err("divergent landing receipt must not rewrite settlement evidence");
+    assert!(matches!(
+        divergent,
+        CoveyError::ApplyGateEvidenceMissing { ref reason, .. }
+            if reason == "landing receipt already recorded with different target or commit"
+    ));
 
     let conn = Connection::open(&rig.db_path).expect("open db");
     let receipt: (String, String, String) = conn
