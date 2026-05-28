@@ -1,15 +1,16 @@
 use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
-    ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, ConflictResolutionState,
-    CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, FenceSeq,
-    HeartbeatReq, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask, MetaTaskId,
-    MetaTaskState, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
-    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, ResolveConflictReq,
-    ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
-    SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
+    ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, CommandTranscriptDigest,
+    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
+    ExitSessionReq, FenceSeq, HeartbeatReq, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq,
+    MetaTask, MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq, ProviderId, PublishArtifactReq,
+    ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
+    RequestReviewReq, ResolveConflictReq, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
+    RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
+    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
     VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         ready_queue_proof_row_lifecycle_accepts_for_model,
@@ -110,6 +111,8 @@ const COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyProofRowLifecycle.itf.json");
 const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
+const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyRuntimeAttestationRecordShape.itf.json");
 
 #[derive(Debug, Deserialize)]
 struct ItfTrace {
@@ -249,6 +252,16 @@ struct RecordLifecycleShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct RecordLifecycleShapeItfState {
     s: RecordLifecycleShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationRecordShapeItfTrace {
+    states: Vec<RuntimeAttestationRecordShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationRecordShapeItfState {
+    s: RuntimeAttestationRecordShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -964,6 +977,45 @@ struct RecordLifecycleShapeState {
     text_shape: String,
     #[serde(rename = "tickShape", deserialize_with = "deserialize_itf_variant")]
     tick_shape: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationRecordShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "providerRunShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    provider_run_shape: String,
+    #[serde(
+        rename = "runtimeIdentityShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    runtime_identity_shape: String,
+    #[serde(
+        rename = "timestampShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    timestamp_shape: String,
+    #[serde(rename = "agentShape", deserialize_with = "deserialize_itf_variant")]
+    agent_shape: String,
+    #[serde(rename = "processPresent")]
+    process_present: bool,
+    #[serde(rename = "containerPresent")]
+    container_present: bool,
+    #[serde(rename = "providerRunRefPresent")]
+    provider_run_ref_present: bool,
+    #[serde(rename = "legacyProviderRunMissing")]
+    legacy_provider_run_missing: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -6949,6 +7001,181 @@ fn replay_record_lifecycle_shape_trace(trace: &RecordLifecycleShapeItfTrace) -> 
     violations
 }
 
+fn runtime_attestation_record_expected_reject(
+    state: &RuntimeAttestationRecordShapeState,
+) -> &'static str {
+    match state.provider_run_shape.as_str() {
+        "InvalidProviderRunId" => "InvalidProviderRunIdReject",
+        "InvalidProviderRunIssuer" => "InvalidProviderRunIssuerReject",
+        "PartialLegacyId" | "PartialLegacyIssuer" => "PartialProviderRunIdentityReject",
+        _ => match state.runtime_identity_shape.as_str() {
+            "InvalidProcessId" => "InvalidProcessIdReject",
+            "InvalidContainerId" => "InvalidContainerIdReject",
+            "MissingRuntimeIdentityShape" => "MissingRuntimeIdentityReject",
+            _ => match state.timestamp_shape.as_str() {
+                "EndedBeforeStartedShape" => "EndedBeforeStartedReject",
+                "RecordedBeforeEndedShape" => "RecordedBeforeEndedReject",
+                _ => match state.agent_shape.as_str() {
+                    "InvalidPrincipal" => "InvalidPrincipalReject",
+                    "InvalidInstance" => "InvalidInstanceReject",
+                    _ => "NoReject",
+                },
+            },
+        },
+    }
+}
+
+fn runtime_attestation_record_provider_run(
+    state: &RuntimeAttestationRecordShapeState,
+) -> (&'static str, &'static str) {
+    match state.provider_run_shape.as_str() {
+        "LegacyMissingProviderRun" => (
+            "__covey_missing_provider_run_id__",
+            "__covey_missing_provider_run_id_issuer__",
+        ),
+        "PartialLegacyId" => ("__covey_missing_provider_run_id__", "provider-issuer-1"),
+        "PartialLegacyIssuer" => ("provider-run-1", "__covey_missing_provider_run_id_issuer__"),
+        "InvalidProviderRunId" => ("provider-run-1 ", "provider-issuer-1"),
+        "InvalidProviderRunIssuer" => ("provider-run-1", " provider-issuer-1"),
+        "ObservedProviderRun" => ("provider-run-1", "provider-issuer-1"),
+        other => panic!("unexpected provider run shape {other}"),
+    }
+}
+
+fn runtime_attestation_record_runtime_identity(
+    state: &RuntimeAttestationRecordShapeState,
+) -> (Option<String>, Option<String>) {
+    match state.runtime_identity_shape.as_str() {
+        "ProcessOnly" => (Some("1234".to_owned()), None),
+        "ContainerOnly" => (None, Some("container-1".to_owned())),
+        "ProcessAndContainer" => (Some("1234".to_owned()), Some("container-1".to_owned())),
+        "MissingRuntimeIdentityShape" => (None, None),
+        "InvalidProcessId" => (Some(" 1234".to_owned()), None),
+        "InvalidContainerId" => (None, Some("container-1 ".to_owned())),
+        other => panic!("unexpected runtime identity shape {other}"),
+    }
+}
+
+fn runtime_attestation_record_timestamps(
+    state: &RuntimeAttestationRecordShapeState,
+) -> (TimestampMs, TimestampMs, TimestampMs) {
+    match state.timestamp_shape.as_str() {
+        "MonotonicRuntimeSpan" => (
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(11).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        ),
+        "EndedBeforeStartedShape" => (
+            TimestampMs::parse(11).expect("valid started_at"),
+            TimestampMs::parse(10).expect("valid ended_at"),
+            TimestampMs::parse(12).expect("valid recorded_at"),
+        ),
+        "RecordedBeforeEndedShape" => (
+            TimestampMs::parse(10).expect("valid started_at"),
+            TimestampMs::parse(12).expect("valid ended_at"),
+            TimestampMs::parse(11).expect("valid recorded_at"),
+        ),
+        other => panic!("unexpected runtime attestation timestamp shape {other}"),
+    }
+}
+
+fn runtime_attestation_record_actual(
+    state: &RuntimeAttestationRecordShapeState,
+) -> Option<RuntimeAttestation> {
+    let (provider_run_id, provider_run_id_issuer) = runtime_attestation_record_provider_run(state);
+    let (process_id, container_id) = runtime_attestation_record_runtime_identity(state);
+    let (started_at, ended_at, recorded_at) = runtime_attestation_record_timestamps(state);
+    RuntimeAttestation::try_from_parts(
+        SessionToken::parse("session-1").expect("valid session token"),
+        if state.agent_shape == "InvalidPrincipal" {
+            "agent 1"
+        } else {
+            "agent-1"
+        },
+        if state.agent_shape == "InvalidInstance" {
+            ""
+        } else {
+            "instance-1"
+        },
+        SessionRole::Executor,
+        ProviderId::parse("provider-1").expect("valid provider"),
+        ModelId::parse("model-1").expect("valid model"),
+        provider_run_id,
+        provider_run_id_issuer,
+        process_id,
+        container_id,
+        CommandTranscriptDigest::parse("blake3:transcript").expect("valid transcript digest"),
+        started_at,
+        ended_at,
+        recorded_at,
+    )
+    .ok()
+}
+
+fn replay_runtime_attestation_record_shape_trace(
+    trace: &RuntimeAttestationRecordShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: runtime attestation record scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = runtime_attestation_record_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        let actual = runtime_attestation_record_actual(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: runtime attestation record reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: runtime attestation record outcome disagrees with row facts"
+            ));
+        }
+        if actual.is_some() != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: runtime attestation record constructor disagrees with model"
+            ));
+        }
+        if let Some(attestation) = actual {
+            if state.process_present != attestation.process_id().is_some()
+                || state.container_present != attestation.container_id().is_some()
+            {
+                violations.push(format!(
+                    "state[{index}]: runtime attestation identity projection disagrees with model"
+                ));
+            }
+            if state.provider_run_ref_present != attestation.provider_run_ref().is_some()
+                || state.legacy_provider_run_missing != attestation.provider_run_identity_missing()
+            {
+                violations.push(format!(
+                    "state[{index}]: provider-run projection disagrees with model"
+                ));
+            }
+            if attestation.provider_run_ref().is_some()
+                && attestation.provider_run_identity_missing()
+            {
+                violations.push(format!(
+                    "state[{index}]: provider-run observed and legacy-missing states overlap"
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn apply_gate_live_review_ok(state: &ApplyGateEvidenceState) -> bool {
     state.review_exists
         && state.review_decided
@@ -8192,6 +8419,12 @@ fn record_lifecycle_shape_trace() -> RecordLifecycleShapeItfTrace {
 }
 
 #[fixture]
+fn runtime_attestation_record_shape_trace() -> RuntimeAttestationRecordShapeItfTrace {
+    serde_json::from_str(COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_gate_evidence_trace() -> ApplyGateEvidenceItfTrace {
     serde_json::from_str(COVEY_APPLY_GATE_EVIDENCE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -8906,6 +9139,55 @@ fn covey_replays_quint_record_lifecycle_shape_itf_trace(
     }
     assert_eq!(
         replay_record_lifecycle_shape_trace(&record_lifecycle_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_runtime_attestation_record_shape_itf_trace(
+    runtime_attestation_record_shape_trace: RuntimeAttestationRecordShapeItfTrace,
+) {
+    assert!(
+        !runtime_attestation_record_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidProcessObservedProviderRun",
+        "ValidContainerObservedProviderRun",
+        "ValidProcessAndContainerObservedProviderRun",
+        "ValidLegacyMissingProviderRun",
+    ] {
+        assert!(
+            runtime_attestation_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "MissingRuntimeIdentity",
+        "PaddedProcessId",
+        "PaddedContainerId",
+        "PartialLegacyMissingProviderRunId",
+        "PartialLegacyMissingProviderRunIssuer",
+        "PaddedProviderRunId",
+        "PaddedProviderRunIssuer",
+        "EndedBeforeStarted",
+        "RecordedBeforeEnded",
+        "InvalidAgentPrincipal",
+        "InvalidAgentInstance",
+    ] {
+        assert!(
+            runtime_attestation_record_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_runtime_attestation_record_shape_trace(&runtime_attestation_record_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -10718,6 +11000,34 @@ fn covey_record_lifecycle_shape_replay_reports_counterexample_shape() {
             "state[0]: record lifecycle outcome disagrees with row facts",
             "state[0]: terminal session accepted with active subtask",
         ]
+    );
+}
+
+#[rstest]
+fn covey_runtime_attestation_record_shape_replay_reports_counterexample_shape() {
+    let state = RuntimeAttestationRecordShapeState {
+        case_index: 4,
+        case: "ValidLegacyMissingProviderRun".to_owned(),
+        provider_run_shape: "LegacyMissingProviderRun".to_owned(),
+        runtime_identity_shape: "ProcessOnly".to_owned(),
+        timestamp_shape: "MonotonicRuntimeSpan".to_owned(),
+        agent_shape: "ValidAgent".to_owned(),
+        process_present: true,
+        container_present: false,
+        provider_run_ref_present: true,
+        legacy_provider_run_missing: false,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        evaluated: true,
+    };
+    let trace = RuntimeAttestationRecordShapeItfTrace {
+        states: vec![RuntimeAttestationRecordShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_runtime_attestation_record_shape_trace(&trace),
+        vec!["state[0]: provider-run projection disagrees with model"]
     );
 }
 
