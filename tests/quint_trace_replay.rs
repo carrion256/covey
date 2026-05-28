@@ -31,6 +31,8 @@ const COVEY_VIEW_ATTACHMENT_SHAPE_ITF: &str =
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
+const COVEY_BD_IMPORT_ITEM_OUTCOME_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyBdImportItemOutcomeShape.itf.json");
 const COVEY_CLAIM_DEPENDENCY_GATE_ITF: &str =
     include_str!("fixtures/quint/CoveyClaimDependencyGate.itf.json");
 const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
@@ -199,6 +201,16 @@ struct BdImportItfTrace {
 #[derive(Debug, Deserialize)]
 struct BdImportItfState {
     s: BdImportState,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportItemOutcomeShapeItfTrace {
+    states: Vec<BdImportItemOutcomeShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportItemOutcomeShapeItfState {
+    s: BdImportItemOutcomeShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -802,6 +814,23 @@ struct BdImportState {
     claim_created: bool,
     #[serde(rename = "sessionActiveSubtaskSet")]
     session_active_subtask_set: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BdImportItemOutcomeShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "subtaskIdPresent")]
+    subtask_id_present: bool,
+    #[serde(rename = "skipReason", deserialize_with = "deserialize_itf_variant")]
+    skip_reason: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
     evaluated: bool,
 }
 
@@ -3265,6 +3294,86 @@ fn replay_bd_import_trace(trace: &BdImportItfTrace) -> Vec<String> {
     violations
 }
 
+fn bd_import_item_expected_reject(state: &BdImportItemOutcomeShapeState) -> &'static str {
+    if state.skip_reason == "DeterministicDuplicate" && !state.subtask_id_present {
+        "DuplicateMissingSubtaskReject"
+    } else if state.skip_reason == "InvalidRow" && state.subtask_id_present {
+        "InvalidRowHasSubtaskReject"
+    } else if state.skip_reason == "NoSkipReason" && !state.subtask_id_present {
+        "MissingSubtaskAndSkipReasonReject"
+    } else {
+        "NoReject"
+    }
+}
+
+fn bd_import_item_expected_outcome(state: &BdImportItemOutcomeShapeState) -> &'static str {
+    let reject = bd_import_item_expected_reject(state);
+    if reject != "NoReject" {
+        "Rejected"
+    } else if state.skip_reason == "NoSkipReason" {
+        "Imported"
+    } else if state.skip_reason == "DeterministicDuplicate" {
+        "SkippedDuplicate"
+    } else {
+        "SkippedInvalidRow"
+    }
+}
+
+fn replay_bd_import_item_outcome_shape_trace(
+    trace: &BdImportItemOutcomeShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: BD import item scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = bd_import_item_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "{prefix}: BD import item reject reason does not match outcome shape"
+            ));
+        }
+        if state.outcome != bd_import_item_expected_outcome(state) {
+            violations.push(format!(
+                "{prefix}: BD import item outcome does not match subtask/skip shape"
+            ));
+        }
+        if state.outcome == "Imported"
+            && !(state.subtask_id_present && state.skip_reason == "NoSkipReason")
+        {
+            violations.push(format!(
+                "{prefix}: imported BD item lacks subtask or has skip reason"
+            ));
+        }
+        if state.outcome == "SkippedDuplicate"
+            && !(state.subtask_id_present && state.skip_reason == "DeterministicDuplicate")
+        {
+            violations.push(format!(
+                "{prefix}: duplicate BD item lacks duplicate subtask binding"
+            ));
+        }
+        if state.outcome == "SkippedInvalidRow"
+            && (state.subtask_id_present || state.skip_reason != "InvalidRow")
+        {
+            violations.push(format!(
+                "{prefix}: invalid-row BD item carried subtask or wrong skip reason"
+            ));
+        }
+    }
+    violations
+}
+
 fn claim_dependency_role_can_claim(role: ClaimDependencyRole, kind: ClaimDependencyKind) -> bool {
     matches!(
         (role, kind),
@@ -3874,6 +3983,12 @@ fn bd_import_trace() -> BdImportItfTrace {
 }
 
 #[fixture]
+fn bd_import_item_outcome_shape_trace() -> BdImportItemOutcomeShapeItfTrace {
+    serde_json::from_str(COVEY_BD_IMPORT_ITEM_OUTCOME_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn claim_dependency_gate_trace() -> ClaimDependencyGateItfTrace {
     serde_json::from_str(COVEY_CLAIM_DEPENDENCY_GATE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -4453,6 +4568,50 @@ fn covey_replays_quint_bd_import_itf_trace(bd_import_trace: BdImportItfTrace) {
     );
     assert_eq!(
         replay_bd_import_trace(&bd_import_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_bd_import_item_outcome_shape_itf_trace(
+    bd_import_item_outcome_shape_trace: BdImportItemOutcomeShapeItfTrace,
+) {
+    assert!(
+        !bd_import_item_outcome_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ImportedWithSubtask",
+        "DuplicateWithSubtask",
+        "InvalidRowWithoutSubtask",
+        "DuplicateMissingSubtask",
+        "InvalidRowWithSubtask",
+        "MissingSubtaskAndSkipReason",
+    ] {
+        assert!(
+            bd_import_item_outcome_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in [
+        "Imported",
+        "SkippedDuplicate",
+        "SkippedInvalidRow",
+        "Rejected",
+    ] {
+        assert!(
+            bd_import_item_outcome_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.outcome == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert_eq!(
+        replay_bd_import_item_outcome_shape_trace(&bd_import_item_outcome_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -5226,6 +5385,31 @@ fn covey_view_attachment_shape_replay_reports_counterexample_shape() {
             "state[0]: accepted subtask status has invalid claim attachment",
             "state[0]: accepted subtask status has invalid artifact attachment",
             "state[0]: accepted subtask status has foreign collection attachment",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_bd_import_item_outcome_replay_reports_counterexample_shape() {
+    let state = BdImportItemOutcomeShapeState {
+        case_index: 4,
+        case: "DuplicateMissingSubtask".to_owned(),
+        subtask_id_present: false,
+        skip_reason: "DeterministicDuplicate".to_owned(),
+        outcome: "SkippedDuplicate".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        evaluated: true,
+    };
+    let trace = BdImportItemOutcomeShapeItfTrace {
+        states: vec![BdImportItemOutcomeShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_bd_import_item_outcome_shape_trace(&trace),
+        vec![
+            "state[0]: BD import item reject reason does not match outcome shape",
+            "state[0]: BD import item outcome does not match subtask/skip shape",
+            "state[0]: duplicate BD item lacks duplicate subtask binding",
         ]
     );
 }
