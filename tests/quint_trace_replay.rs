@@ -121,6 +121,8 @@ const COVEY_CLAIM_DEPENDENCY_GATE_ITF: &str =
 const COVEY_MUTATION_IDEMPOTENCY_ITF: &str =
     include_str!("fixtures/quint/CoveyMutationIdempotency.itf.json");
 const COVEY_EVENT_LOG_ITF: &str = include_str!("fixtures/quint/CoveyEventLog.itf.json");
+const COVEY_CURRENT_CLAIM_FENCE_ITF: &str =
+    include_str!("fixtures/quint/CoveyCurrentClaimFence.itf.json");
 const COVEY_REPOOPS_SNAPSHOT_ITF: &str =
     include_str!("fixtures/quint/CoveyRepoopsSnapshot.itf.json");
 const COVEY_REPOOPS_SNAPSHOT_REQUEST_SHAPE_ITF: &str =
@@ -272,6 +274,16 @@ struct RepoopsSnapshotItfTrace {
 #[derive(Debug, Deserialize)]
 struct RepoopsSnapshotItfState {
     s: RepoopsSnapshotState,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentClaimFenceItfTrace {
+    states: Vec<CurrentClaimFenceItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentClaimFenceItfState {
+    s: CurrentClaimFenceState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1196,6 +1208,38 @@ struct TransitionMatrixState {
     allowed_by_matrix: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentClaimFenceState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionPresent")]
+    session_present: bool,
+    #[serde(rename = "sessionActive")]
+    session_active: bool,
+    #[serde(rename = "claimPresent")]
+    claim_present: bool,
+    #[serde(rename = "ownerMatches")]
+    owner_matches: bool,
+    #[serde(rename = "fenceMatches")]
+    fence_matches: bool,
+    #[serde(rename = "claimHeld")]
+    claim_held: bool,
+    #[serde(rename = "leaseLive")]
+    lease_live: bool,
+    accepted: bool,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    #[serde(rename = "claimReturned")]
+    claim_returned: bool,
+    #[serde(rename = "stateMutated")]
+    state_mutated: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
     evaluated: bool,
 }
 
@@ -8299,6 +8343,88 @@ fn replay_repoops_snapshot_trace(trace: &RepoopsSnapshotItfTrace) -> Vec<String>
     violations
 }
 
+fn current_claim_fence_expected_reject(state: &CurrentClaimFenceState) -> &'static str {
+    if !state.session_present {
+        "SessionMissing"
+    } else if !state.session_active {
+        "SessionNotActive"
+    } else if !state.claim_present {
+        "ClaimMissing"
+    } else if !state.owner_matches {
+        "NotClaimOwner"
+    } else if !state.fence_matches {
+        "StaleFenceToken"
+    } else if !state.claim_held {
+        "ClaimNotHeld"
+    } else if !state.lease_live {
+        "LeaseExpired"
+    } else {
+        "NoReject"
+    }
+}
+
+fn replay_current_claim_fence_trace(trace: &CurrentClaimFenceItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: current-claim fence scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.state_mutated || state.mutation_authority_granted {
+            violations.push(format!(
+                "{prefix}: current-claim validator mutated state or granted authority"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+
+        let expected_reject = current_claim_fence_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "{prefix}: current-claim reject reason disagrees with validation facts"
+            ));
+        }
+        if state.accepted != expected_accepted {
+            violations.push(format!(
+                "{prefix}: current-claim acceptance disagrees with validation facts"
+            ));
+        }
+        if state.claim_returned != expected_accepted {
+            violations.push(format!(
+                "{prefix}: current-claim return value disagrees with accepted state"
+            ));
+        }
+        if state.accepted
+            && !(state.session_present
+                && state.session_active
+                && state.claim_present
+                && state.owner_matches
+                && state.fence_matches
+                && state.claim_held
+                && state.lease_live)
+        {
+            violations.push(format!(
+                "{prefix}: accepted current claim lacks active owner fence or lease facts"
+            ));
+        }
+        if !state.accepted && state.claim_returned {
+            violations.push(format!(
+                "{prefix}: rejected current claim returned a claim handle"
+            ));
+        }
+    }
+    violations
+}
+
 fn repoops_snapshot_request_expected_reject(
     state: &RepoopsSnapshotRequestShapeState,
 ) -> &'static str {
@@ -11853,6 +11979,11 @@ fn repoops_snapshot_trace() -> RepoopsSnapshotItfTrace {
 }
 
 #[fixture]
+fn current_claim_fence_trace() -> CurrentClaimFenceItfTrace {
+    serde_json::from_str(COVEY_CURRENT_CLAIM_FENCE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn repoops_snapshot_request_shape_trace() -> RepoopsSnapshotRequestShapeItfTrace {
     serde_json::from_str(COVEY_REPOOPS_SNAPSHOT_REQUEST_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -12590,6 +12721,38 @@ fn covey_replays_quint_repoops_snapshot_itf_trace(repoops_snapshot_trace: Repoop
     );
     assert_eq!(
         replay_repoops_snapshot_trace(&repoops_snapshot_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_current_claim_fence_itf_trace(
+    current_claim_fence_trace: CurrentClaimFenceItfTrace,
+) {
+    assert!(
+        !current_claim_fence_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "CurrentHeldLive",
+        "MissingSession",
+        "SessionExited",
+        "MissingClaim",
+        "WrongOwner",
+        "StaleFence",
+        "ReleasedClaim",
+        "ExpiredLease",
+    ] {
+        assert!(
+            current_claim_fence_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected:?}"
+        );
+    }
+    assert_eq!(
+        replay_current_claim_fence_trace(&current_claim_fence_trace),
         Vec::<String>::new()
     );
 }
@@ -15403,6 +15566,41 @@ fn covey_repoops_snapshot_replay_reports_token_leak_counterexample_shape() {
             "state[0]: repoops snapshot accepted with failed gate",
             "state[0]: in-progress repoops claim lacks token reference",
             "state[0]: repoops snapshot exposed raw session token",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_current_claim_fence_replay_reports_counterexample_shape() {
+    let state = CurrentClaimFenceState {
+        case_index: 5,
+        case: "StaleFence".to_owned(),
+        session_present: true,
+        session_active: true,
+        claim_present: true,
+        owner_matches: true,
+        fence_matches: false,
+        claim_held: true,
+        lease_live: true,
+        accepted: true,
+        reject_reason: "NoReject".to_owned(),
+        claim_returned: true,
+        state_mutated: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = CurrentClaimFenceItfTrace {
+        states: vec![CurrentClaimFenceItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_current_claim_fence_trace(&trace),
+        vec![
+            "state[0]: current-claim validator mutated state or granted authority",
+            "state[0]: current-claim reject reason disagrees with validation facts",
+            "state[0]: current-claim acceptance disagrees with validation facts",
+            "state[0]: current-claim return value disagrees with accepted state",
+            "state[0]: accepted current claim lacks active owner fence or lease facts",
         ]
     );
 }
