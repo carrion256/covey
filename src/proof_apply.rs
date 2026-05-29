@@ -990,6 +990,77 @@ pub fn ready_queue_proof_row_lifecycle_accepts_for_model(
     .is_ok()
 }
 
+/// Replays apply-verification proof row parsing for external formal-model
+/// tests.
+///
+/// This is not a scheduling or settlement API. It exists so integration tests
+/// can bind Quint traces to the same private row constructor used by apply
+/// proof verification.
+#[doc(hidden)]
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn apply_verification_proof_row_accepts_for_model(
+    queue_id_valid: bool,
+    artifact_digest_valid: bool,
+    review_id_valid: bool,
+    findings_digest_valid: bool,
+    claim_fence_seq: i64,
+    verifier_valid: bool,
+    verdict_digest_valid: bool,
+    seal_digest_valid: bool,
+    recorded_by_session_valid: bool,
+    created_at: i64,
+) -> bool {
+    ApplyVerificationRow::from_db_parts(
+        if queue_id_valid { "queue-1" } else { "queue 1" }.into(),
+        if artifact_digest_valid {
+            "blake3:artifact"
+        } else {
+            "artifact"
+        }
+        .into(),
+        if review_id_valid {
+            "review-1"
+        } else {
+            "review 1"
+        }
+        .into(),
+        if findings_digest_valid {
+            "blake3:findings"
+        } else {
+            "findings"
+        }
+        .into(),
+        claim_fence_seq,
+        if verifier_valid {
+            "mutai-rs"
+        } else {
+            "mutai rs"
+        }
+        .into(),
+        if verdict_digest_valid {
+            "blake3:verdict"
+        } else {
+            "verdict"
+        }
+        .into(),
+        if seal_digest_valid {
+            "blake3:seal"
+        } else {
+            "seal"
+        }
+        .into(),
+        if recorded_by_session_valid {
+            "session-apply"
+        } else {
+            "session apply"
+        }
+        .into(),
+        created_at,
+    )
+    .is_ok()
+}
+
 impl Serialize for ReadyQueueRow {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1037,17 +1108,27 @@ impl ApplyVerificationRow {
         recorded_by_session: String,
         created_at: i64,
     ) -> Result<Self, ApplyProofError> {
+        let queue_id = parse_proof_field(queue_id, "queue_id")?;
+        let artifact_digest = parse_proof_field(artifact_digest, "artifact_digest")?;
+        let review_id = parse_proof_field(review_id, "review_id")?;
+        let findings_digest = parse_proof_field(findings_digest, "findings_digest")?;
+        let claim_fence_seq = parse_fence_seq(claim_fence_seq)?;
+        let verifier = parse_proof_field(verifier, "verifier")?;
+        let verdict_digest = parse_proof_field(verdict_digest, "verdict_digest")?;
+        let seal_digest = parse_proof_field(seal_digest, "seal_digest")?;
+        let recorded_by_session = parse_proof_field(recorded_by_session, "recorded_by_session")?;
+        let created_at = parse_timestamp_ms(created_at, "apply verification created_at")?;
         Ok(Self {
-            queue_id: parse_proof_field(queue_id, "queue_id")?,
-            artifact_digest: parse_proof_field(artifact_digest, "artifact_digest")?,
-            review_id: parse_proof_field(review_id, "review_id")?,
-            findings_digest: parse_proof_field(findings_digest, "findings_digest")?,
-            claim_fence_seq: parse_fence_seq(claim_fence_seq)?,
-            verifier: parse_proof_field(verifier, "verifier")?,
-            verdict_digest: parse_proof_field(verdict_digest, "verdict_digest")?,
-            seal_digest: parse_proof_field(seal_digest, "seal_digest")?,
-            recorded_by_session: parse_proof_field(recorded_by_session, "recorded_by_session")?,
-            created_at,
+            queue_id,
+            artifact_digest,
+            review_id,
+            findings_digest,
+            claim_fence_seq,
+            verifier,
+            verdict_digest,
+            seal_digest,
+            recorded_by_session,
+            created_at: created_at.get(),
         })
     }
 }
@@ -4286,6 +4367,26 @@ mod tests {
                 .to_string()
                 .contains("invalid ready queue claim_fence_seq in proof row"),
             "unexpected error: {invalid_fence}"
+        );
+
+        let invalid_created_at = ApplyVerificationRow::from_db_parts(
+            "queue-1".into(),
+            "blake3:artifact".into(),
+            "review-1".into(),
+            "blake3:findings".into(),
+            7,
+            "mutai-rs".into(),
+            "blake3:verdict".into(),
+            "blake3:seal".into(),
+            "session-apply".into(),
+            -1,
+        )
+        .expect_err("apply verification proof rows should require non-negative created_at");
+        assert!(
+            invalid_created_at
+                .to_string()
+                .contains("invalid apply verification created_at"),
+            "unexpected error: {invalid_created_at}"
         );
     }
 

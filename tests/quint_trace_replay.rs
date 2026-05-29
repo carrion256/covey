@@ -11,10 +11,11 @@ use covey::{
     RequestReviewReq, Reservation, ReservationOverlapConflictPayload, ReservationState,
     ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
     RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
-    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    SessionStatus, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
     VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
+        apply_verification_proof_row_accepts_for_model,
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
     },
@@ -51,6 +52,8 @@ const COVEY_SESSION_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionRequestShape.itf.json");
 const COVEY_SESSION_HANDLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionHandleShape.itf.json");
+const COVEY_SESSION_STATUS_VIEW_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveySessionStatusViewShape.itf.json");
 const COVEY_META_TASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMetaTaskRequestShape.itf.json");
 const COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF: &str =
@@ -117,6 +120,8 @@ const COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySubtaskDomainLifecycleShape.itf.json");
 const COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyProofRowLifecycle.itf.json");
+const COVEY_APPLY_VERIFICATION_PROOF_ROW_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyApplyVerificationProofRowShape.itf.json");
 const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
@@ -261,6 +266,16 @@ struct ApplyProofRowLifecycleItfState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApplyVerificationProofRowShapeItfTrace {
+    states: Vec<ApplyVerificationProofRowShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyVerificationProofRowShapeItfState {
+    s: ApplyVerificationProofRowShapeState,
+}
+
+#[derive(Debug, Deserialize)]
 struct RecordLifecycleShapeItfTrace {
     states: Vec<RecordLifecycleShapeItfState>,
 }
@@ -368,6 +383,16 @@ struct SessionHandleShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct SessionHandleShapeItfState {
     s: SessionHandleShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStatusViewShapeItfTrace {
+    states: Vec<SessionStatusViewShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStatusViewShapeItfState {
+    s: SessionStatusViewShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1030,6 +1055,44 @@ struct ApplyProofRowLifecycleState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApplyVerificationProofRowShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "queueIdValid")]
+    queue_id_valid: bool,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "reviewIdValid")]
+    review_id_valid: bool,
+    #[serde(rename = "findingsDigestValid")]
+    findings_digest_valid: bool,
+    #[serde(rename = "fenceSeqPositive")]
+    fence_seq_positive: bool,
+    #[serde(rename = "verifierValid")]
+    verifier_valid: bool,
+    #[serde(rename = "verdictDigestValid")]
+    verdict_digest_valid: bool,
+    #[serde(rename = "sealDigestValid")]
+    seal_digest_valid: bool,
+    #[serde(rename = "recordedBySessionValid")]
+    recorded_by_session_valid: bool,
+    #[serde(rename = "createdAtNonNegative")]
+    created_at_non_negative: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    #[serde(rename = "scheduledWork")]
+    scheduled_work: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RecordLifecycleShapeState {
     #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
     case_index: i64,
@@ -1321,6 +1384,35 @@ struct SessionHandleShapeState {
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
     reject_reason: String,
     accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStatusViewShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "sessionLifecycle",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    session_lifecycle: String,
+    #[serde(
+        rename = "activeSubtaskView",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    active_subtask_view: String,
+    #[serde(rename = "sessionHasActiveSubtaskId")]
+    session_has_active_subtask_id: bool,
+    #[serde(rename = "acceptedSessionPreserved")]
+    accepted_session_preserved: bool,
+    #[serde(rename = "acceptedActiveSubtaskPreserved")]
+    accepted_active_subtask_preserved: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
     evaluated: bool,
 }
 
@@ -3424,6 +3516,156 @@ fn replay_session_handle_shape_trace(trace: &SessionHandleShapeItfTrace) -> Vec<
         {
             violations.push(format!(
                 "state[{index}]: accepted session handle lacks validated identity"
+            ));
+        }
+    }
+    violations
+}
+
+fn session_status_expected_reject(state: &SessionStatusViewShapeState) -> &'static str {
+    if state.session_lifecycle == "InvalidSession" {
+        "InvalidSessionLifecycleReject"
+    } else if state.session_lifecycle == "ActiveWithSubtask"
+        && state.active_subtask_view == "NoView"
+    {
+        "MissingActiveSubtaskViewReject"
+    } else if state.session_lifecycle == "ActiveWithSubtask"
+        && state.active_subtask_view == "MismatchedView"
+    {
+        "MismatchedActiveSubtaskViewReject"
+    } else if state.session_lifecycle != "ActiveWithSubtask"
+        && state.active_subtask_view != "NoView"
+    {
+        "UnexpectedActiveSubtaskViewReject"
+    } else {
+        "NoReject"
+    }
+}
+
+fn session_status_expected_outcome(
+    state: &SessionStatusViewShapeState,
+    expected_reject: &str,
+) -> &'static str {
+    if expected_reject != "NoReject" {
+        "Rejected"
+    } else if state.session_lifecycle == "ActiveWithSubtask" {
+        "AcceptedWithActiveSubtask"
+    } else {
+        "AcceptedWithoutActiveSubtask"
+    }
+}
+
+fn session_status_session_state(state: &SessionStatusViewShapeState) -> &'static str {
+    match state.session_lifecycle.as_str() {
+        "Stale" | "InvalidSession" if state.case.starts_with("Stale") => "stale",
+        "Exited" | "InvalidSession" => "exited",
+        _ => "active",
+    }
+}
+
+fn session_status_active_subtask_id(state: &SessionStatusViewShapeState) -> Option<&'static str> {
+    if state.session_has_active_subtask_id {
+        Some("subtask-1")
+    } else {
+        None
+    }
+}
+
+fn session_status_active_subtask_json(
+    state: &SessionStatusViewShapeState,
+) -> Option<serde_json::Value> {
+    if state.active_subtask_view == "NoView" {
+        return None;
+    }
+    Some(serde_json::json!({
+        "subtask_id": if state.active_subtask_view == "MatchingView" {
+            "subtask-1"
+        } else {
+            "subtask-2"
+        },
+        "meta_task_id": "meta-1",
+        "title": "session status work",
+        "kind": "work",
+        "review_target": null,
+        "state": "claimed",
+        "active_claim_id": "claim-1",
+        "artifact_digest": null,
+        "priority": 10,
+        "created_at": 100,
+        "updated_at": 101,
+    }))
+}
+
+fn session_status_json(state: &SessionStatusViewShapeState) -> serde_json::Value {
+    serde_json::json!({
+        "session": {
+            "session_token": "session-1",
+            "agent_principal_id": "principal-1",
+            "agent_instance_id": "instance-1",
+            "role": "executor",
+            "state": session_status_session_state(state),
+            "active_subtask_id": session_status_active_subtask_id(state),
+            "last_heartbeat_at": 100,
+            "last_heartbeat_tick": 100,
+            "created_at": 100,
+            "updated_at": 101,
+        },
+        "active_subtask": session_status_active_subtask_json(state),
+    })
+}
+
+fn session_status_actual_accepts(state: &SessionStatusViewShapeState) -> bool {
+    serde_json::from_value::<SessionStatus>(session_status_json(state)).is_ok()
+}
+
+fn replay_session_status_view_shape_trace(trace: &SessionStatusViewShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: session status scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = session_status_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        let expected_outcome = session_status_expected_outcome(state, expected_reject);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: session status reject reason does not match view shape"
+            ));
+        }
+        if state.outcome != expected_outcome {
+            violations.push(format!(
+                "state[{index}]: session status outcome disagrees with view shape"
+            ));
+        }
+        if session_status_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: session status parser disagrees with model"
+            ));
+        }
+        if state.outcome == "AcceptedWithActiveSubtask"
+            && (!state.session_has_active_subtask_id
+                || !state.accepted_session_preserved
+                || !state.accepted_active_subtask_preserved)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted active session status did not preserve session and subtask"
+            ));
+        }
+        if state.outcome == "AcceptedWithoutActiveSubtask"
+            && (state.session_has_active_subtask_id || !state.accepted_session_preserved)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted idle/terminal session status carried active subtask state"
             ));
         }
     }
@@ -7721,6 +7963,128 @@ fn replay_apply_proof_row_lifecycle_trace(trace: &ApplyProofRowLifecycleItfTrace
     violations
 }
 
+fn apply_verification_proof_row_expected_reject(
+    state: &ApplyVerificationProofRowShapeState,
+) -> &'static str {
+    if !state.queue_id_valid {
+        "QueueIdInvalid"
+    } else if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if !state.review_id_valid {
+        "ReviewIdInvalid"
+    } else if !state.findings_digest_valid {
+        "FindingsDigestInvalid"
+    } else if !state.fence_seq_positive {
+        "FenceSeqInvalid"
+    } else if !state.verifier_valid {
+        "VerifierInvalid"
+    } else if !state.verdict_digest_valid {
+        "VerdictDigestInvalid"
+    } else if !state.seal_digest_valid {
+        "SealDigestInvalid"
+    } else if !state.recorded_by_session_valid {
+        "RecordedBySessionInvalid"
+    } else if !state.created_at_non_negative {
+        "CreatedAtInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn apply_verification_proof_row_actual_accepts(
+    state: &ApplyVerificationProofRowShapeState,
+) -> bool {
+    apply_verification_proof_row_accepts_for_model(
+        state.queue_id_valid,
+        state.artifact_digest_valid,
+        state.review_id_valid,
+        state.findings_digest_valid,
+        if state.fence_seq_positive { 7 } else { 0 },
+        state.verifier_valid,
+        state.verdict_digest_valid,
+        state.seal_digest_valid,
+        state.recorded_by_session_valid,
+        if state.created_at_non_negative {
+            100
+        } else {
+            -1
+        },
+    )
+}
+
+fn replay_apply_verification_proof_row_shape_trace(
+    trace: &ApplyVerificationProofRowShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: apply verification proof row scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = apply_verification_proof_row_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: apply verification proof row reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: apply verification proof row outcome disagrees with row facts"
+            ));
+        }
+        if apply_verification_proof_row_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: apply verification proof row constructor disagrees with model"
+            ));
+        }
+        if state.accepted
+            && (!state.queue_id_valid || !state.review_id_valid || !state.fence_seq_positive)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted apply verification proof row has invalid queue review or fence"
+            ));
+        }
+        if state.accepted && (!state.artifact_digest_valid || !state.findings_digest_valid) {
+            violations.push(format!(
+                "state[{index}]: accepted apply verification proof row has invalid artifact or findings digest"
+            ));
+        }
+        if state.accepted
+            && (!state.verifier_valid
+                || !state.verdict_digest_valid
+                || !state.seal_digest_valid
+                || !state.recorded_by_session_valid
+                || !state.created_at_non_negative)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted apply verification proof row has invalid verifier evidence"
+            ));
+        }
+        if state.scheduled_work {
+            violations.push(format!(
+                "state[{index}]: apply verification proof row parsing scheduled work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "state[{index}]: apply verification proof row parsing granted mutation authority"
+            ));
+        }
+    }
+    violations
+}
+
 fn record_lifecycle_session_state(state: &RecordLifecycleShapeState) -> SessionState {
     match state.session_lifecycle.as_str() {
         "Active" => SessionState::Active,
@@ -9983,6 +10347,12 @@ fn apply_proof_row_lifecycle_trace() -> ApplyProofRowLifecycleItfTrace {
 }
 
 #[fixture]
+fn apply_verification_proof_row_shape_trace() -> ApplyVerificationProofRowShapeItfTrace {
+    serde_json::from_str(COVEY_APPLY_VERIFICATION_PROOF_ROW_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn record_lifecycle_shape_trace() -> RecordLifecycleShapeItfTrace {
     serde_json::from_str(COVEY_RECORD_LIFECYCLE_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -10033,6 +10403,12 @@ fn session_request_shape_trace() -> SessionRequestShapeItfTrace {
 #[fixture]
 fn session_handle_shape_trace() -> SessionHandleShapeItfTrace {
     serde_json::from_str(COVEY_SESSION_HANDLE_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn session_status_view_shape_trace() -> SessionStatusViewShapeItfTrace {
+    serde_json::from_str(COVEY_SESSION_STATUS_VIEW_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -10696,6 +11072,47 @@ fn covey_replays_quint_apply_proof_row_lifecycle_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_apply_verification_proof_row_shape_itf_trace(
+    apply_verification_proof_row_shape_trace: ApplyVerificationProofRowShapeItfTrace,
+) {
+    assert!(
+        !apply_verification_proof_row_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert!(
+        apply_verification_proof_row_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidProofRow" && state.s.accepted),
+        "fixture should cover accepted apply-verification proof row"
+    );
+    for expected in [
+        "InvalidQueueId",
+        "InvalidArtifactDigest",
+        "InvalidReviewId",
+        "InvalidFindingsDigest",
+        "NonPositiveFence",
+        "InvalidVerifier",
+        "InvalidVerdictDigest",
+        "InvalidSealDigest",
+        "InvalidRecordedBySession",
+        "NegativeCreatedAt",
+    ] {
+        assert!(
+            apply_verification_proof_row_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_apply_verification_proof_row_shape_trace(&apply_verification_proof_row_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_record_lifecycle_shape_itf_trace(
     record_lifecycle_shape_trace: RecordLifecycleShapeItfTrace,
 ) {
@@ -10955,6 +11372,54 @@ fn covey_replays_quint_session_handle_shape_itf_trace(
     }
     assert_eq!(
         replay_session_handle_shape_trace(&session_handle_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_session_status_view_shape_itf_trace(
+    session_status_view_shape_trace: SessionStatusViewShapeItfTrace,
+) {
+    assert!(
+        !session_status_view_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ActiveIdleWithoutView",
+        "ActiveIdleWithView",
+        "ActiveWithMatchingView",
+        "ActiveWithMissingView",
+        "ActiveWithMismatchedView",
+        "StaleWithoutView",
+        "StaleWithView",
+        "ExitedWithoutView",
+        "ExitedWithView",
+        "StaleWithActiveSubtaskId",
+        "ExitedWithActiveSubtaskId",
+    ] {
+        assert!(
+            session_status_view_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in [
+        "AcceptedWithoutActiveSubtask",
+        "AcceptedWithActiveSubtask",
+        "Rejected",
+    ] {
+        assert!(
+            session_status_view_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.outcome == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert_eq!(
+        replay_session_status_view_shape_trace(&session_status_view_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -12978,6 +13443,44 @@ fn covey_apply_proof_row_lifecycle_replay_reports_counterexample_shape() {
 }
 
 #[rstest]
+fn covey_apply_verification_proof_row_shape_replay_reports_counterexample_shape() {
+    let state = ApplyVerificationProofRowShapeState {
+        case_index: 6,
+        case: "NonPositiveFence".to_owned(),
+        queue_id_valid: true,
+        artifact_digest_valid: true,
+        review_id_valid: true,
+        findings_digest_valid: true,
+        fence_seq_positive: false,
+        verifier_valid: true,
+        verdict_digest_valid: true,
+        seal_digest_valid: true,
+        recorded_by_session_valid: true,
+        created_at_non_negative: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        scheduled_work: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = ApplyVerificationProofRowShapeItfTrace {
+        states: vec![ApplyVerificationProofRowShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_apply_verification_proof_row_shape_trace(&trace),
+        vec![
+            "state[0]: apply verification proof row reject reason disagrees with row facts",
+            "state[0]: apply verification proof row outcome disagrees with row facts",
+            "state[0]: accepted apply verification proof row has invalid queue review or fence",
+            "state[0]: apply verification proof row parsing scheduled work",
+            "state[0]: apply verification proof row parsing granted mutation authority",
+        ]
+    );
+}
+
+#[rstest]
 fn covey_record_lifecycle_shape_replay_reports_counterexample_shape() {
     let state = RecordLifecycleShapeState {
         case_index: 5,
@@ -13239,6 +13742,33 @@ fn covey_session_handle_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: session handle reject reason does not match validation facts",
             "state[0]: session handle outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_session_status_view_shape_replay_reports_counterexample_shape() {
+    let state = SessionStatusViewShapeState {
+        case_index: 4,
+        case: "ActiveWithMismatchedView".to_owned(),
+        session_lifecycle: "ActiveWithSubtask".to_owned(),
+        active_subtask_view: "MismatchedView".to_owned(),
+        session_has_active_subtask_id: true,
+        accepted_session_preserved: true,
+        accepted_active_subtask_preserved: true,
+        outcome: "AcceptedWithActiveSubtask".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        evaluated: true,
+    };
+    let trace = SessionStatusViewShapeItfTrace {
+        states: vec![SessionStatusViewShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_session_status_view_shape_trace(&trace),
+        vec![
+            "state[0]: session status reject reason does not match view shape",
+            "state[0]: session status outcome disagrees with view shape",
         ]
     );
 }
