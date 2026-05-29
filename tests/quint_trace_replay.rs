@@ -2,18 +2,18 @@ use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
     ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, CommandTranscriptDigest,
     Conflict, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
-    ExitSessionReq, FenceSeq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq,
+    ExitSessionReq, FailedReviewVerdict, FenceSeq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq,
     LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask,
     MetaTaskId, MetaTaskState, MetaTaskStatus, ModelId, OverlapQueryReq, ProviderId,
     PublishArtifactReq, ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq,
     RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
     ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq,
     RequestReservationReq, RequestReviewReq, Reservation, ReservationOverlapConflictPayload,
-    ReservationState, ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget,
-    ReviewVerdict, RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole,
-    SessionState, SessionStatus, SessionToken, SettlementTarget, StartSubtaskReq,
-    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
-    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
+    ReservationState, ResolveConflictReq, Review, ReviewDecisionResult, ReviewId, ReviewState,
+    ReviewSubtask, ReviewTarget, ReviewVerdict, RuntimeAttestation, ScopeClass, Session,
+    SessionHandle, SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority,
+    SupersedeQueueItemReq, TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         apply_verification_proof_row_accepts_for_model, artifact_proof_row_accepts_for_model,
         ready_queue_proof_row_lifecycle_accepts_for_model,
@@ -39,6 +39,8 @@ const COVEY_STALE_CLAIM_RECOVERY_LEASE_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryLease.itf.json");
 const COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryExit.itf.json");
+const COVEY_STALE_SESSION_MAINTENANCE_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyStaleSessionMaintenanceShape.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
 const COVEY_RESERVATION_EXPIRY_MAINTENANCE_SHAPE_ITF: &str =
@@ -77,6 +79,8 @@ const COVEY_PUBLISH_ARTIFACT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyPublishArtifactRequestShape.itf.json");
 const COVEY_DECIDE_REVIEW_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyDecideReviewRequestShape.itf.json");
+const COVEY_REVIEW_DECISION_RESULT_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReviewDecisionResultShape.itf.json");
 const COVEY_REQUEST_REVIEW_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRequestReviewRequestShape.itf.json");
 const COVEY_ENQUEUE_FOR_APPLY_REQUEST_SHAPE_ITF: &str =
@@ -196,6 +200,16 @@ struct StaleClaimRecoveryItfTrace {
 #[derive(Debug, Deserialize)]
 struct StaleClaimRecoveryItfState {
     s: StaleClaimRecoveryState,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleSessionMaintenanceShapeItfTrace {
+    states: Vec<StaleSessionMaintenanceShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleSessionMaintenanceShapeItfState {
+    s: StaleSessionMaintenanceShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -549,6 +563,16 @@ struct DecideReviewRequestShapeItfState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReviewDecisionResultShapeItfTrace {
+    states: Vec<ReviewDecisionResultShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewDecisionResultShapeItfState {
+    s: ReviewDecisionResultShapeState,
+}
+
+#[derive(Debug, Deserialize)]
 struct RequestReviewRequestShapeItfTrace {
     states: Vec<RequestReviewRequestShapeItfState>,
 }
@@ -811,6 +835,57 @@ struct StaleClaimRecoveryState {
     exited_with_held_claim: bool,
     #[serde(rename = "staleMutationRejected")]
     stale_mutation_rejected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleSessionMaintenanceShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "beforeSession", deserialize_with = "deserialize_itf_variant")]
+    before_session: String,
+    #[serde(rename = "afterSession", deserialize_with = "deserialize_itf_variant")]
+    after_session: String,
+    #[serde(rename = "heartbeatStale")]
+    heartbeat_stale: bool,
+    #[serde(rename = "beforeClaim", deserialize_with = "deserialize_itf_variant")]
+    before_claim: String,
+    #[serde(rename = "afterClaim", deserialize_with = "deserialize_itf_variant")]
+    after_claim: String,
+    #[serde(rename = "leaseExpired")]
+    lease_expired: bool,
+    #[serde(rename = "beforeSubtask", deserialize_with = "deserialize_itf_variant")]
+    before_subtask: String,
+    #[serde(rename = "afterSubtask", deserialize_with = "deserialize_itf_variant")]
+    after_subtask: String,
+    #[serde(rename = "beforeSessionActiveSubtask")]
+    before_session_active_subtask: bool,
+    #[serde(rename = "afterSessionActiveSubtask")]
+    after_session_active_subtask: bool,
+    #[serde(rename = "selectedForSessionReap")]
+    selected_for_session_reap: bool,
+    #[serde(rename = "selectedForClaimExpiry")]
+    selected_for_claim_expiry: bool,
+    #[serde(
+        rename = "staleSessionCount",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    stale_session_count: i64,
+    #[serde(
+        rename = "expiredClaimCount",
+        deserialize_with = "deserialize_itf_bigint"
+    )]
+    expired_claim_count: i64,
+    #[serde(rename = "sessionsReapedEventEmitted")]
+    sessions_reaped_event_emitted: bool,
+    #[serde(rename = "claimEventEmitted")]
+    claim_event_emitted: bool,
+    #[serde(rename = "executorClaimCreated")]
+    executor_claim_created: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1911,6 +1986,37 @@ struct DecideReviewRequestShapeState {
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
     reject_reason: String,
     accepted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewDecisionResultShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "reviewIdPresent")]
+    review_id_present: bool,
+    #[serde(rename = "failedVerdict", deserialize_with = "deserialize_itf_variant")]
+    failed_verdict: String,
+    #[serde(rename = "followupPresent")]
+    followup_present: bool,
+    #[serde(rename = "resultVerdict", deserialize_with = "deserialize_itf_variant")]
+    result_verdict: String,
+    #[serde(rename = "resultFollowupPresent")]
+    result_followup_present: bool,
+    #[serde(rename = "shapeValid")]
+    shape_valid: bool,
+    #[serde(rename = "applyQueued")]
+    apply_queued: bool,
+    #[serde(rename = "landingAuthorized")]
+    landing_authorized: bool,
+    #[serde(rename = "executorClaimCreated")]
+    executor_claim_created: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
     evaluated: bool,
 }
 
@@ -5169,6 +5275,120 @@ fn replay_decide_review_request_shape_trace(
     violations
 }
 
+fn review_decision_result_expected_valid(state: &ReviewDecisionResultShapeState) -> bool {
+    state.review_id_present
+        && match state.outcome.as_str() {
+            "Approved" => !state.followup_present,
+            "Failed" => {
+                matches!(
+                    state.failed_verdict.as_str(),
+                    "ChangesRequested" | "Blocked"
+                ) && state.followup_present
+            }
+            _ => false,
+        }
+}
+
+fn review_decision_result_expected_verdict(state: &ReviewDecisionResultShapeState) -> &str {
+    if state.outcome == "Approved" {
+        "Approve"
+    } else {
+        state.failed_verdict.as_str()
+    }
+}
+
+fn review_decision_result_actual(
+    state: &ReviewDecisionResultShapeState,
+) -> Option<(ReviewVerdict, bool)> {
+    if !review_decision_result_expected_valid(state) {
+        return None;
+    }
+    let review_id = ReviewId::parse("review-1").expect("valid review id");
+    let result = match state.outcome.as_str() {
+        "Approved" => ReviewDecisionResult::Approved { review_id },
+        "Failed" => {
+            let verdict = match state.failed_verdict.as_str() {
+                "ChangesRequested" => FailedReviewVerdict::ChangesRequested,
+                "Blocked" => FailedReviewVerdict::Blocked,
+                verdict => panic!("unexpected valid failed review verdict: {verdict}"),
+            };
+            ReviewDecisionResult::Failed {
+                review_id,
+                verdict,
+                followup_subtask_id: SubtaskId::parse("followup-1").expect("valid subtask id"),
+            }
+        }
+        outcome => panic!("unexpected valid review decision outcome: {outcome}"),
+    };
+    Some((result.verdict(), result.followup_subtask_id().is_some()))
+}
+
+fn replay_review_decision_result_shape_trace(
+    trace: &ReviewDecisionResultShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: review decision result scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.apply_queued || state.landing_authorized {
+            violations.push(format!(
+                "{prefix}: review decision result queued apply or authorized landing"
+            ));
+        }
+        if state.executor_claim_created || state.mutation_authority_granted {
+            violations.push(format!(
+                "{prefix}: review decision result created executor work or granted mutation authority"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+        let expected_valid = review_decision_result_expected_valid(state);
+        if state.shape_valid != expected_valid {
+            violations.push(format!(
+                "{prefix}: review decision result validity disagrees with outcome evidence"
+            ));
+        }
+        if state.result_verdict != review_decision_result_expected_verdict(state) {
+            violations.push(format!(
+                "{prefix}: review decision result verdict disagrees with outcome"
+            ));
+        }
+        if state.shape_valid && state.result_followup_present != (state.outcome == "Failed") {
+            violations.push(format!(
+                "{prefix}: review decision result followup presence disagrees with outcome"
+            ));
+        }
+        if let Some((actual_verdict, actual_followup_present)) =
+            review_decision_result_actual(state)
+        {
+            let expected_verdict = match state.result_verdict.as_str() {
+                "Approve" => ReviewVerdict::Approve,
+                "ChangesRequested" => ReviewVerdict::ChangesRequested,
+                "Blocked" => ReviewVerdict::Blocked,
+                verdict => panic!("unexpected result verdict from ITF trace: {verdict}"),
+            };
+            if actual_verdict != expected_verdict
+                || actual_followup_present != state.result_followup_present
+            {
+                violations.push(format!(
+                    "{prefix}: Rust review decision result accessors disagree with model"
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn request_review_expected_reject(state: &RequestReviewRequestShapeState) -> &'static str {
     if !state.session_token_valid {
         "SessionTokenInvalid"
@@ -7275,6 +7495,126 @@ fn replay_stale_claim_recovery_trace(trace: &StaleClaimRecoveryItfTrace) -> Vec<
         if state.new_session != "ActiveSession" && state.new_active_subtask {
             violations.push(format!(
                 "state[{index}]: inactive new session retained active subtask"
+            ));
+        }
+    }
+    violations
+}
+
+fn stale_session_expected_reap(state: &StaleSessionMaintenanceShapeState) -> bool {
+    state.before_session == "Active" && state.heartbeat_stale
+}
+
+fn stale_session_expected_claim_expiry(state: &StaleSessionMaintenanceShapeState) -> bool {
+    state.before_claim == "Held"
+        && (state.lease_expired
+            || stale_session_expected_reap(state)
+            || matches!(state.before_session.as_str(), "Stale" | "Exited"))
+}
+
+fn stale_session_expected_subtask_after(
+    state: &StaleSessionMaintenanceShapeState,
+    claim_selected: bool,
+) -> &str {
+    if claim_selected && matches!(state.before_subtask.as_str(), "Claimed" | "InProgress") {
+        "Available"
+    } else {
+        state.before_subtask.as_str()
+    }
+}
+
+fn replay_stale_session_maintenance_shape_trace(
+    trace: &StaleSessionMaintenanceShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: stale-session maintenance scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.executor_claim_created {
+            violations.push(format!(
+                "{prefix}: stale-session maintenance created executor work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "{prefix}: stale-session maintenance granted mutation authority"
+            ));
+        }
+        if state.claim_event_emitted {
+            violations.push(format!(
+                "{prefix}: reap_stale_sessions emitted a claim-expired event"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+
+        let expected_reap = stale_session_expected_reap(state);
+        let expected_claim_expiry = stale_session_expected_claim_expiry(state);
+        if state.selected_for_session_reap != expected_reap {
+            violations.push(format!(
+                "{prefix}: stale-session selector disagrees with active stale heartbeat facts"
+            ));
+        }
+        if state.stale_session_count != if expected_reap { 1 } else { 0 } {
+            violations.push(format!(
+                "{prefix}: stale-session count disagrees with selected session"
+            ));
+        }
+        if state.sessions_reaped_event_emitted != (state.stale_session_count > 0) {
+            violations.push(format!(
+                "{prefix}: sessions-reaped event disagrees with stale-session count"
+            ));
+        }
+        if expected_reap && state.after_session != "Stale" {
+            violations.push(format!(
+                "{prefix}: selected active stale session did not become stale"
+            ));
+        }
+        if !expected_reap && state.after_session != state.before_session {
+            violations.push(format!("{prefix}: non-selected session changed state"));
+        }
+        if state.selected_for_claim_expiry != expected_claim_expiry {
+            violations.push(format!(
+                "{prefix}: claim expiry selector disagrees with lease or inactive owner facts"
+            ));
+        }
+        if state.expired_claim_count != if expected_claim_expiry { 1 } else { 0 } {
+            violations.push(format!(
+                "{prefix}: expired-claim count disagrees with selected claim"
+            ));
+        }
+        if expected_claim_expiry && state.after_claim != "Expired" {
+            violations.push(format!("{prefix}: selected held claim did not expire"));
+        }
+        if !expected_claim_expiry && state.after_claim != state.before_claim {
+            violations.push(format!("{prefix}: non-selected claim changed state"));
+        }
+        if expected_claim_expiry && state.after_session_active_subtask {
+            violations.push(format!(
+                "{prefix}: expired claim left session active_subtask attached"
+            ));
+        }
+        if !expected_claim_expiry
+            && state.after_session_active_subtask != state.before_session_active_subtask
+        {
+            violations.push(format!(
+                "{prefix}: non-expired claim changed session active_subtask attachment"
+            ));
+        }
+        if state.after_subtask != stale_session_expected_subtask_after(state, expected_claim_expiry)
+        {
+            violations.push(format!(
+                "{prefix}: stale-session maintenance updated subtask state incorrectly"
             ));
         }
     }
@@ -11259,6 +11599,12 @@ fn stale_claim_recovery_exit_trace() -> StaleClaimRecoveryItfTrace {
 }
 
 #[fixture]
+fn stale_session_maintenance_shape_trace() -> StaleSessionMaintenanceShapeItfTrace {
+    serde_json::from_str(COVEY_STALE_SESSION_MAINTENANCE_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn queue_reservation_trace() -> QueueReservationItfTrace {
     serde_json::from_str(COVEY_QUEUE_RESERVATION_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -11444,6 +11790,12 @@ fn publish_artifact_request_shape_trace() -> PublishArtifactRequestShapeItfTrace
 #[fixture]
 fn decide_review_request_shape_trace() -> DecideReviewRequestShapeItfTrace {
     serde_json::from_str(COVEY_DECIDE_REVIEW_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn review_decision_result_shape_trace() -> ReviewDecisionResultShapeItfTrace {
+    serde_json::from_str(COVEY_REVIEW_DECISION_RESULT_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
 }
 
@@ -11766,6 +12118,58 @@ fn covey_replays_quint_stale_claim_recovery_exit_itf_trace(
     );
     assert_eq!(
         replay_stale_claim_recovery_trace(&stale_claim_recovery_exit_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_stale_session_maintenance_shape_itf_trace(
+    stale_session_maintenance_shape_trace: StaleSessionMaintenanceShapeItfTrace,
+) {
+    assert!(
+        !stale_session_maintenance_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ActiveFreshNoClaim",
+        "ActiveStaleNoClaim",
+        "ActiveStaleHeldClaimed",
+        "ActiveFreshExpiredLeaseClaimed",
+        "ActiveFreshLiveHeldClaimed",
+        "StaleHeldClaimed",
+        "ExitedHeldInProgress",
+    ] {
+        assert!(
+            stale_session_maintenance_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        stale_session_maintenance_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.selected_for_session_reap
+                && state.s.selected_for_claim_expiry
+                && state.s.after_session == "Stale"
+                && state.s.after_claim == "Expired"
+                && state.s.after_subtask == "Available"),
+        "fixture should cover stale-session reap expiring and detaching a held claim"
+    );
+    assert!(
+        stale_session_maintenance_shape_trace
+            .states
+            .iter()
+            .any(|state| !state.s.selected_for_session_reap
+                && state.s.selected_for_claim_expiry
+                && state.s.before_session == "Active"
+                && state.s.after_session == "Active"),
+        "fixture should cover expired claim lease without session reaping"
+    );
+    assert_eq!(
+        replay_stale_session_maintenance_shape_trace(&stale_session_maintenance_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -13036,6 +13440,46 @@ fn covey_replays_quint_decide_review_request_shape_itf_trace(
     }
     assert_eq!(
         replay_decide_review_request_shape_trace(&decide_review_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_review_decision_result_shape_itf_trace(
+    review_decision_result_shape_trace: ReviewDecisionResultShapeItfTrace,
+) {
+    assert!(
+        !review_decision_result_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ApprovedResult",
+        "FailedChangesRequestedResult",
+        "FailedBlockedResult",
+        "InvalidApprovedWithFollowup",
+        "InvalidFailedMissingFollowup",
+        "InvalidFailedApproveVerdict",
+        "InvalidMissingReviewId",
+    ] {
+        assert!(
+            review_decision_result_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in ["Approve", "ChangesRequested", "Blocked"] {
+        assert!(
+            review_decision_result_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.shape_valid && state.s.result_verdict == expected),
+            "fixture should cover valid {expected} result verdict"
+        );
+    }
+    assert_eq!(
+        replay_review_decision_result_shape_trace(&review_decision_result_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -14525,6 +14969,53 @@ fn covey_stale_claim_recovery_replay_reports_counterexample_shape() {
 }
 
 #[rstest]
+fn covey_stale_session_maintenance_replay_reports_counterexample_shape() {
+    let state = StaleSessionMaintenanceShapeState {
+        case_index: 1,
+        case: "ActiveStaleHeldClaimed".to_owned(),
+        before_session: "Active".to_owned(),
+        after_session: "Active".to_owned(),
+        heartbeat_stale: true,
+        before_claim: "Held".to_owned(),
+        after_claim: "Held".to_owned(),
+        lease_expired: false,
+        before_subtask: "Claimed".to_owned(),
+        after_subtask: "Claimed".to_owned(),
+        before_session_active_subtask: true,
+        after_session_active_subtask: true,
+        selected_for_session_reap: false,
+        selected_for_claim_expiry: false,
+        stale_session_count: 0,
+        expired_claim_count: 0,
+        sessions_reaped_event_emitted: false,
+        claim_event_emitted: true,
+        executor_claim_created: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = StaleSessionMaintenanceShapeItfTrace {
+        states: vec![StaleSessionMaintenanceShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_stale_session_maintenance_shape_trace(&trace),
+        vec![
+            "state[0]: stale-session maintenance created executor work",
+            "state[0]: stale-session maintenance granted mutation authority",
+            "state[0]: reap_stale_sessions emitted a claim-expired event",
+            "state[0]: stale-session selector disagrees with active stale heartbeat facts",
+            "state[0]: stale-session count disagrees with selected session",
+            "state[0]: selected active stale session did not become stale",
+            "state[0]: claim expiry selector disagrees with lease or inactive owner facts",
+            "state[0]: expired-claim count disagrees with selected claim",
+            "state[0]: selected held claim did not expire",
+            "state[0]: expired claim left session active_subtask attached",
+            "state[0]: stale-session maintenance updated subtask state incorrectly",
+        ]
+    );
+}
+
+#[rstest]
 fn covey_queue_reservation_replay_reports_counterexample_shape() {
     let state = QueueReservationState {
         queue: "Applied".to_owned(),
@@ -15616,6 +16107,40 @@ fn covey_decide_review_request_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: decide review reject reason does not match validation facts",
             "state[0]: decide review outcome disagrees with validation facts",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_review_decision_result_shape_replay_reports_counterexample_shape() {
+    let state = ReviewDecisionResultShapeState {
+        case_index: 4,
+        case: "InvalidFailedMissingFollowup".to_owned(),
+        outcome: "Failed".to_owned(),
+        review_id_present: true,
+        failed_verdict: "ChangesRequested".to_owned(),
+        followup_present: false,
+        result_verdict: "Approve".to_owned(),
+        result_followup_present: false,
+        shape_valid: true,
+        apply_queued: true,
+        landing_authorized: true,
+        executor_claim_created: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = ReviewDecisionResultShapeItfTrace {
+        states: vec![ReviewDecisionResultShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_review_decision_result_shape_trace(&trace),
+        vec![
+            "state[0]: review decision result queued apply or authorized landing",
+            "state[0]: review decision result created executor work or granted mutation authority",
+            "state[0]: review decision result validity disagrees with outcome evidence",
+            "state[0]: review decision result verdict disagrees with outcome",
+            "state[0]: review decision result followup presence disagrees with outcome",
         ]
     );
 }
