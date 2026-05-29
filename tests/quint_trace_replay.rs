@@ -41,6 +41,8 @@ const COVEY_STALE_CLAIM_RECOVERY_EXIT_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryExit.itf.json");
 const COVEY_QUEUE_RESERVATION_ITF: &str =
     include_str!("fixtures/quint/CoveyQueueReservation.itf.json");
+const COVEY_RESERVATION_EXPIRY_MAINTENANCE_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReservationExpiryMaintenanceShape.itf.json");
 const COVEY_READY_QUEUE_CLAIM_SELECTION_ITF: &str =
     include_str!("fixtures/quint/CoveyReadyQueueClaimSelection.itf.json");
 const COVEY_READY_QUEUE_METRICS_ITF: &str =
@@ -204,6 +206,16 @@ struct QueueReservationItfTrace {
 #[derive(Debug, Deserialize)]
 struct QueueReservationItfState {
     s: QueueReservationState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationExpiryMaintenanceShapeItfTrace {
+    states: Vec<ReservationExpiryMaintenanceShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationExpiryMaintenanceShapeItfState {
+    s: ReservationExpiryMaintenanceShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -834,6 +846,46 @@ struct QueueReservationState {
         deserialize_with = "deserialize_itf_bigint"
     )]
     conflict_rank_floor: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReservationExpiryMaintenanceShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "beforeReservation",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    before_reservation: String,
+    #[serde(
+        rename = "afterReservation",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    after_reservation: String,
+    #[serde(rename = "leaseExpired")]
+    lease_expired: bool,
+    #[serde(
+        rename = "beforeConflict",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    before_conflict: String,
+    #[serde(rename = "afterConflict", deserialize_with = "deserialize_itf_variant")]
+    after_conflict: String,
+    #[serde(rename = "conflictBoundToReservation")]
+    conflict_bound_to_reservation: bool,
+    #[serde(rename = "selectedForExpiry")]
+    selected_for_expiry: bool,
+    #[serde(rename = "expiredCount", deserialize_with = "deserialize_itf_bigint")]
+    expired_count: i64,
+    #[serde(rename = "eventEmitted")]
+    event_emitted: bool,
+    #[serde(rename = "executorClaimCreated")]
+    executor_claim_created: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7310,6 +7362,96 @@ fn replay_queue_reservation_trace(trace: &QueueReservationItfTrace) -> Vec<Strin
     violations
 }
 
+fn reservation_expiry_expected_selected(state: &ReservationExpiryMaintenanceShapeState) -> bool {
+    state.before_reservation == "Active" && state.lease_expired
+}
+
+fn reservation_expiry_expected_conflict_after(
+    state: &ReservationExpiryMaintenanceShapeState,
+) -> &str {
+    if state.selected_for_expiry
+        && state.conflict_bound_to_reservation
+        && matches!(state.before_conflict.as_str(), "Open" | "Acknowledged")
+    {
+        "Resolved"
+    } else {
+        state.before_conflict.as_str()
+    }
+}
+
+fn replay_reservation_expiry_maintenance_shape_trace(
+    trace: &ReservationExpiryMaintenanceShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: reservation-expiry maintenance scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.executor_claim_created {
+            violations.push(format!(
+                "{prefix}: reservation-expiry maintenance created executor work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "{prefix}: reservation-expiry maintenance granted mutation authority"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+
+        let expected_selected = reservation_expiry_expected_selected(state);
+        if state.selected_for_expiry != expected_selected {
+            violations.push(format!(
+                "{prefix}: reservation expiry selector disagrees with active expired lease facts"
+            ));
+        }
+        if state.expired_count != if expected_selected { 1 } else { 0 } {
+            violations.push(format!(
+                "{prefix}: expired count disagrees with selected reservation"
+            ));
+        }
+        if state.event_emitted != (state.expired_count > 0) {
+            violations.push(format!(
+                "{prefix}: reservations-expired event disagrees with expired count"
+            ));
+        }
+        if expected_selected && state.after_reservation != "Expired" {
+            violations.push(format!(
+                "{prefix}: selected active expired reservation did not become expired"
+            ));
+        }
+        if !expected_selected && state.after_reservation != state.before_reservation {
+            violations.push(format!("{prefix}: non-selected reservation changed state"));
+        }
+        if state.after_conflict != reservation_expiry_expected_conflict_after(state) {
+            violations.push(format!(
+                "{prefix}: conflict resolution disagrees with selected expired reservation"
+            ));
+        }
+        if state.before_conflict == "NoConflict" && state.after_conflict != "NoConflict" {
+            violations.push(format!(
+                "{prefix}: reservation expiry created a synthetic conflict"
+            ));
+        }
+        if state.before_conflict == "Resolved" && state.after_conflict != "Resolved" {
+            violations.push(format!(
+                "{prefix}: reservation expiry downgraded a resolved conflict"
+            ));
+        }
+    }
+    violations
+}
+
 fn replay_ready_queue_claim_selection_trace(
     trace: &ReadyQueueClaimSelectionItfTrace,
 ) -> Vec<String> {
@@ -11122,6 +11264,12 @@ fn queue_reservation_trace() -> QueueReservationItfTrace {
 }
 
 #[fixture]
+fn reservation_expiry_maintenance_shape_trace() -> ReservationExpiryMaintenanceShapeItfTrace {
+    serde_json::from_str(COVEY_RESERVATION_EXPIRY_MAINTENANCE_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn ready_queue_claim_selection_trace() -> ReadyQueueClaimSelectionItfTrace {
     serde_json::from_str(COVEY_READY_QUEUE_CLAIM_SELECTION_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -11632,6 +11780,57 @@ fn covey_replays_quint_queue_reservation_itf_trace(
     );
     assert_eq!(
         replay_queue_reservation_trace(&queue_reservation_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_reservation_expiry_maintenance_shape_itf_trace(
+    reservation_expiry_maintenance_shape_trace: ReservationExpiryMaintenanceShapeItfTrace,
+) {
+    assert!(
+        !reservation_expiry_maintenance_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ActiveExpiredNoConflict",
+        "ActiveExpiredOpenConflict",
+        "ActiveExpiredAcknowledgedConflict",
+        "ActiveLiveNoExpire",
+        "ReleasedExpiredLease",
+        "AlreadyExpiredTerminal",
+        "MissingReservation",
+    ] {
+        assert!(
+            reservation_expiry_maintenance_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        reservation_expiry_maintenance_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.selected_for_expiry
+                && state.s.before_conflict == "Open"
+                && state.s.after_conflict == "Resolved"),
+        "fixture should cover open conflict resolution on expiry"
+    );
+    assert!(
+        reservation_expiry_maintenance_shape_trace
+            .states
+            .iter()
+            .any(|state| !state.s.selected_for_expiry
+                && state.s.expired_count == 0
+                && !state.s.event_emitted),
+        "fixture should cover no-op maintenance without event emission"
+    );
+    assert_eq!(
+        replay_reservation_expiry_maintenance_shape_trace(
+            &reservation_expiry_maintenance_shape_trace
+        ),
         Vec::<String>::new()
     );
 }
@@ -14389,6 +14588,41 @@ fn covey_queue_reservation_replay_reports_stale_queued_evidence_counterexample()
         vec![
             "state[0]: queue claim liveness disagrees with queue state",
             "state[0]: queued item retained stale claim or verification",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_reservation_expiry_maintenance_replay_reports_counterexample_shape() {
+    let state = ReservationExpiryMaintenanceShapeState {
+        case_index: 1,
+        case: "ActiveExpiredOpenConflict".to_owned(),
+        before_reservation: "Active".to_owned(),
+        after_reservation: "Active".to_owned(),
+        lease_expired: true,
+        before_conflict: "Open".to_owned(),
+        after_conflict: "Open".to_owned(),
+        conflict_bound_to_reservation: true,
+        selected_for_expiry: false,
+        expired_count: 0,
+        event_emitted: true,
+        executor_claim_created: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = ReservationExpiryMaintenanceShapeItfTrace {
+        states: vec![ReservationExpiryMaintenanceShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_reservation_expiry_maintenance_shape_trace(&trace),
+        vec![
+            "state[0]: reservation-expiry maintenance created executor work",
+            "state[0]: reservation-expiry maintenance granted mutation authority",
+            "state[0]: reservation expiry selector disagrees with active expired lease facts",
+            "state[0]: expired count disagrees with selected reservation",
+            "state[0]: reservations-expired event disagrees with expired count",
+            "state[0]: selected active expired reservation did not become expired",
         ]
     );
 }
