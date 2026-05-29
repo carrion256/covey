@@ -2,17 +2,18 @@ use covey::{
     AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
     ClaimNextReq, ClaimReadyQueueReq, ClaimState, ClaimSubtaskReq, CommandTranscriptDigest,
     Conflict, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
-    ExitSessionReq, FenceSeq, HeartbeatReq, ImportBdV1Req, LandingAuthorizationStatus,
-    LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, ModelId,
-    OverlapQueryReq, ProviderId, PublishArtifactReq, ReadyQueueItem, ReadyQueueState,
-    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RepoopsAuthoritySnapshotReq, RequestReservationReq, RequestReviewReq, Reservation,
-    ReservationOverlapConflictPayload, ReservationState, ResolveConflictReq, Review, ReviewState,
-    ReviewSubtask, ReviewTarget, ReviewVerdict, RuntimeAttestation, ScopeClass, Session,
-    SessionHandle, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
-    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
-    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
+    ExitSessionReq, FenceSeq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq,
+    LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask,
+    MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq, ProviderId, PublishArtifactReq,
+    ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
+    RequestReviewReq, Reservation, ReservationOverlapConflictPayload, ReservationState,
+    ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
+    RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
+    SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
+    VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
@@ -94,6 +95,8 @@ const COVEY_CONFLICT_RESOLUTION_REQUEST_ITF: &str =
     include_str!("fixtures/quint/CoveyConflictResolutionRequest.itf.json");
 const COVEY_LANDING_RECEIPT_ITF: &str = include_str!("fixtures/quint/CoveyLandingReceipt.itf.json");
 const COVEY_OPENSPEC_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyOpenSpecImport.itf.json");
+const COVEY_OPENSPEC_IMPORT_REQUEST_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyOpenSpecImportRequestShape.itf.json");
 const COVEY_BD_IMPORT_ITF: &str = include_str!("fixtures/quint/CoveyBdImport.itf.json");
 const COVEY_BD_IMPORT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyBdImportRequestShape.itf.json");
@@ -585,6 +588,16 @@ struct OpenSpecImportItfTrace {
 #[derive(Debug, Deserialize)]
 struct OpenSpecImportItfState {
     s: OpenSpecImportState,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSpecImportRequestShapeItfTrace {
+    states: Vec<OpenSpecImportRequestShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSpecImportRequestShapeItfState {
+    s: OpenSpecImportRequestShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2216,6 +2229,42 @@ struct BdImportRequestShapeState {
     new_prompt_selector_preserved: bool,
     #[serde(rename = "beadsDbPathPreserved")]
     beads_db_path_preserved: bool,
+    #[serde(rename = "coveyStateMutated")]
+    covey_state_mutated: bool,
+    #[serde(rename = "schedulerAction")]
+    scheduler_action: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSpecImportRequestShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    mode: String,
+    #[serde(rename = "sessionShape", deserialize_with = "deserialize_itf_variant")]
+    session_shape: String,
+    #[serde(rename = "changeIdValid")]
+    change_id_valid: bool,
+    #[serde(
+        rename = "projectRootShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    project_root_shape: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    #[serde(rename = "sessionTokenPreserved")]
+    session_token_preserved: bool,
+    #[serde(rename = "writeSessionTokenPreserved")]
+    write_session_token_preserved: bool,
+    #[serde(rename = "changeIdPreserved")]
+    change_id_preserved: bool,
+    #[serde(rename = "projectRootPreserved")]
+    project_root_preserved: bool,
     #[serde(rename = "coveyStateMutated")]
     covey_state_mutated: bool,
     #[serde(rename = "schedulerAction")]
@@ -8779,6 +8828,163 @@ fn bd_import_request_expected_reject(state: &BdImportRequestShapeState) -> &'sta
     }
 }
 
+fn openspec_import_request_expected_reject(
+    state: &OpenSpecImportRequestShapeState,
+) -> &'static str {
+    match state.session_shape.as_str() {
+        "InvalidSession" => "SessionTokenInvalid",
+        "NoSession" if state.mode == "Write" => "WriteSessionRequired",
+        _ if !state.change_id_valid => "ChangeIdInvalid",
+        _ if state.project_root_shape != "ValidRoot" => "ProjectRootInvalid",
+        _ => "NoReject",
+    }
+}
+
+fn openspec_import_request_raw_parts(
+    state: &OpenSpecImportRequestShapeState,
+) -> (Option<String>, String, String, bool) {
+    let session_token = match state.session_shape.as_str() {
+        "NoSession" => None,
+        "ValidSession" => Some("session-1".to_owned()),
+        "InvalidSession" => Some("session 1".to_owned()),
+        other => panic!("unexpected OpenSpec import session shape from ITF trace: {other}"),
+    };
+    let change_id = if state.change_id_valid {
+        "change-1"
+    } else {
+        "Change_1"
+    }
+    .to_owned();
+    let project_root = match state.project_root_shape.as_str() {
+        "ValidRoot" => "/repo",
+        "EmptyRoot" => "",
+        "WhitespaceRoot" => " /repo",
+        other => panic!("unexpected OpenSpec import project root shape from ITF trace: {other}"),
+    }
+    .to_owned();
+    let dry_run = match state.mode.as_str() {
+        "DryRun" => true,
+        "Write" => false,
+        other => panic!("unexpected OpenSpec import mode from ITF trace: {other}"),
+    };
+    (session_token, change_id, project_root, dry_run)
+}
+
+fn openspec_import_request_actual(
+    state: &OpenSpecImportRequestShapeState,
+) -> Result<ImportOpenSpecReq, String> {
+    let (session_token, change_id, project_root, dry_run) =
+        openspec_import_request_raw_parts(state);
+    ImportOpenSpecReq::from_flat_mode(session_token, change_id, project_root, dry_run)
+        .map_err(|err| err.to_string())
+}
+
+fn openspec_import_request_actual_reject(error: &str) -> &'static str {
+    if error.contains("write mode requires") {
+        "WriteSessionRequired"
+    } else if error.contains("session_token") {
+        "SessionTokenInvalid"
+    } else if error.contains("change_id") {
+        "ChangeIdInvalid"
+    } else if error.contains("project_root") {
+        "ProjectRootInvalid"
+    } else {
+        panic!("unexpected OpenSpec import request validation error: {error}")
+    }
+}
+
+fn replay_openspec_import_request_shape_trace(
+    trace: &OpenSpecImportRequestShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: OpenSpec import request scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.covey_state_mutated || state.scheduler_action {
+            violations.push(format!(
+                "{prefix}: OpenSpec import request shape mutated Covey state or scheduled work"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = openspec_import_request_expected_reject(state);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "{prefix}: OpenSpec import request reject reason disagrees with modeled fields"
+            ));
+        }
+        let expected_accepted = expected_reject == "NoReject";
+        if (state.outcome == "Accepted") != expected_accepted {
+            violations.push(format!(
+                "{prefix}: OpenSpec import request outcome disagrees with modeled fields"
+            ));
+        }
+        match openspec_import_request_actual(state) {
+            Ok(req) => {
+                if !expected_accepted {
+                    violations.push(format!(
+                        "{prefix}: OpenSpec import request parser accepted rejected model state"
+                    ));
+                    continue;
+                }
+                if (req.is_dry_run() != (state.mode == "DryRun"))
+                    || (req.session_token().is_some() != state.session_token_preserved)
+                    || (req.write_session_token().is_some() != state.write_session_token_preserved)
+                {
+                    violations.push(format!(
+                        "{prefix}: OpenSpec import request mode/session preservation disagrees with Rust contract"
+                    ));
+                }
+                if (req.change_id.as_str() == "change-1") != state.change_id_preserved {
+                    violations.push(format!(
+                        "{prefix}: OpenSpec import request change id preservation disagrees with Rust contract"
+                    ));
+                }
+                if (req.project_root.as_str() == "/repo") != state.project_root_preserved {
+                    violations.push(format!(
+                        "{prefix}: OpenSpec import request project root preservation disagrees with Rust contract"
+                    ));
+                }
+            }
+            Err(error) => {
+                if expected_accepted {
+                    violations.push(format!(
+                        "{prefix}: OpenSpec import request parser rejected accepted model state"
+                    ));
+                    continue;
+                }
+                let actual_reject = openspec_import_request_actual_reject(&error);
+                if actual_reject != expected_reject {
+                    violations.push(format!(
+                        "{prefix}: OpenSpec import request parser reject reason disagrees with model"
+                    ));
+                }
+            }
+        }
+        if state.outcome == "Rejected"
+            && (state.session_token_preserved
+                || state.write_session_token_preserved
+                || state.change_id_preserved
+                || state.project_root_preserved)
+        {
+            violations.push(format!(
+                "{prefix}: rejected OpenSpec import request preserved boundary fields"
+            ));
+        }
+    }
+    violations
+}
+
 fn bd_import_request_raw_parts(
     state: &BdImportRequestShapeState,
 ) -> (String, String, Option<String>, Option<String>, String) {
@@ -9961,6 +10167,12 @@ fn landing_receipt_trace() -> LandingReceiptItfTrace {
 #[fixture]
 fn openspec_import_trace() -> OpenSpecImportItfTrace {
     serde_json::from_str(COVEY_OPENSPEC_IMPORT_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn openspec_import_request_shape_trace() -> OpenSpecImportRequestShapeItfTrace {
+    serde_json::from_str(COVEY_OPENSPEC_IMPORT_REQUEST_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -11927,6 +12139,74 @@ fn covey_replays_quint_openspec_import_itf_trace(openspec_import_trace: OpenSpec
 }
 
 #[rstest]
+fn covey_replays_quint_openspec_import_request_shape_itf_trace(
+    openspec_import_request_shape_trace: OpenSpecImportRequestShapeItfTrace,
+) {
+    assert!(
+        !openspec_import_request_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "DryRunAnonymousValid",
+        "DryRunAttributedValid",
+        "WriteValid",
+        "InvalidDryRunSession",
+        "InvalidWriteSession",
+        "MissingWriteSession",
+        "MissingWriteSessionInvalidChange",
+        "InvalidSessionInvalidProjectRoot",
+        "InvalidChangeId",
+        "EmptyProjectRoot",
+        "WhitespaceProjectRoot",
+    ] {
+        assert!(
+            openspec_import_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    for expected in [
+        "SessionTokenInvalid",
+        "WriteSessionRequired",
+        "ChangeIdInvalid",
+        "ProjectRootInvalid",
+    ] {
+        assert!(
+            openspec_import_request_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.reject_reason == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        openspec_import_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.mode == "DryRun"
+                && state.s.session_shape == "NoSession"
+                && state.s.outcome == "Accepted"
+                && !state.s.write_session_token_preserved),
+        "fixture should cover anonymous dry-run import"
+    );
+    assert!(
+        openspec_import_request_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.mode == "Write"
+                && state.s.session_shape == "ValidSession"
+                && state.s.write_session_token_preserved),
+        "fixture should cover write-mode session preservation"
+    );
+    assert_eq!(
+        replay_openspec_import_request_shape_trace(&openspec_import_request_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_bd_import_itf_trace(bd_import_trace: BdImportItfTrace) {
     assert!(
         !bd_import_trace.states.is_empty(),
@@ -13822,6 +14102,39 @@ fn covey_bd_import_request_shape_replay_reports_counterexample_shape() {
             "state[0]: BD import request shape mutated Covey state or scheduled work",
             "state[0]: BD import request reject reason disagrees with modeled fields",
             "state[0]: BD import request outcome disagrees with modeled fields",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_openspec_import_request_shape_replay_reports_counterexample_shape() {
+    let state = OpenSpecImportRequestShapeState {
+        case_index: 7,
+        case: "MissingWriteSessionInvalidChange".to_owned(),
+        mode: "Write".to_owned(),
+        session_shape: "NoSession".to_owned(),
+        change_id_valid: false,
+        project_root_shape: "ValidRoot".to_owned(),
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        session_token_preserved: true,
+        write_session_token_preserved: true,
+        change_id_preserved: true,
+        project_root_preserved: true,
+        covey_state_mutated: true,
+        scheduler_action: true,
+        evaluated: true,
+    };
+    let trace = OpenSpecImportRequestShapeItfTrace {
+        states: vec![OpenSpecImportRequestShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_openspec_import_request_shape_trace(&trace),
+        vec![
+            "state[0]: OpenSpec import request shape mutated Covey state or scheduled work",
+            "state[0]: OpenSpec import request reject reason disagrees with modeled fields",
+            "state[0]: OpenSpec import request outcome disagrees with modeled fields",
         ]
     );
 }
