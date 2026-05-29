@@ -127,6 +127,8 @@ const COVEY_REPOOPS_SNAPSHOT_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRepoopsSnapshotRequestShape.itf.json");
 const COVEY_TRANSITION_MATRIX_ITF: &str =
     include_str!("fixtures/quint/CoveyTransitionMatrix.itf.json");
+const COVEY_ROLE_GATE_POLICY_ITF: &str =
+    include_str!("fixtures/quint/CoveyRoleGatePolicy.itf.json");
 const COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySubtaskDomainLifecycleShape.itf.json");
 const COVEY_ARTIFACT_PROOF_ROW_SHAPE_ITF: &str =
@@ -290,6 +292,16 @@ struct TransitionMatrixItfTrace {
 #[derive(Debug, Deserialize)]
 struct TransitionMatrixItfState {
     s: TransitionMatrixState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleGatePolicyItfTrace {
+    states: Vec<RoleGatePolicyItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleGatePolicyItfState {
+    s: RoleGatePolicyState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1184,6 +1196,37 @@ struct TransitionMatrixState {
     allowed_by_matrix: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleGatePolicyState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    operation: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    role: String,
+    #[serde(rename = "executorAllowed")]
+    executor_allowed: bool,
+    #[serde(rename = "reviewerAllowed")]
+    reviewer_allowed: bool,
+    #[serde(rename = "orchestratorAllowed")]
+    orchestrator_allowed: bool,
+    #[serde(rename = "applyGateAllowed")]
+    apply_gate_allowed: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    decision: String,
+    #[serde(rename = "claimCreated")]
+    claim_created: bool,
+    #[serde(rename = "queueMutated")]
+    queue_mutated: bool,
+    #[serde(rename = "reservationMutated")]
+    reservation_mutated: bool,
+    #[serde(rename = "importWritten")]
+    import_written: bool,
     evaluated: bool,
 }
 
@@ -8530,6 +8573,179 @@ fn replay_transition_matrix_trace(trace: &TransitionMatrixItfTrace) -> Vec<Strin
     violations
 }
 
+fn role_gate_expected_allowed(operation: &str, role: &str) -> bool {
+    match operation {
+        "ClaimWork" => role == "Executor",
+        "ClaimReview" => role == "Reviewer",
+        "RequestReview" => matches!(role, "Executor" | "Orchestrator"),
+        "DecideReview" => role == "Reviewer",
+        "EnqueueForApply" => matches!(role, "Orchestrator" | "ApplyGate"),
+        "ApplyQueueMutation" => role == "ApplyGate",
+        "VerifyLandingAuthorization" | "RecordLandingReceipt" | "SupersedeQueueItem" => {
+            matches!(role, "Orchestrator" | "ApplyGate")
+        }
+        "ReservationMutation" | "ImportPlanning" => role == "Orchestrator",
+        _ => false,
+    }
+}
+
+fn role_gate_expected_role_for_case(case: &str) -> &'static str {
+    match case {
+        "ClaimWorkExecutor"
+        | "ClaimReviewExecutor"
+        | "RequestReviewExecutor"
+        | "DecideReviewExecutor"
+        | "EnqueueExecutor"
+        | "ReservationExecutor" => "Executor",
+        "ClaimWorkReviewer"
+        | "ClaimReviewReviewer"
+        | "RequestReviewReviewer"
+        | "DecideReviewReviewer" => "Reviewer",
+        "RequestReviewOrchestrator"
+        | "EnqueueOrchestrator"
+        | "ApplyQueueOrchestrator"
+        | "VerifyLandingOrchestrator"
+        | "RecordReceiptOrchestrator"
+        | "SupersedeOrchestrator"
+        | "ReservationOrchestrator"
+        | "ImportOrchestrator" => "Orchestrator",
+        _ => "ApplyGate",
+    }
+}
+
+fn role_gate_expected_roles(state: &RoleGatePolicyState) -> (bool, bool, bool, bool) {
+    (
+        role_gate_expected_allowed(&state.operation, "Executor"),
+        role_gate_expected_allowed(&state.operation, "Reviewer"),
+        role_gate_expected_allowed(&state.operation, "Orchestrator"),
+        role_gate_expected_allowed(&state.operation, "ApplyGate"),
+    )
+}
+
+fn replay_role_gate_policy_trace(trace: &RoleGatePolicyItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        let prefix = format!("state[{index}]");
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "{prefix}: role-gate policy scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+
+        let expected_allowed = role_gate_expected_allowed(&state.operation, &state.role);
+        let expected_decision = if expected_allowed {
+            "Allow"
+        } else {
+            "DenyWrongRole"
+        };
+        let expected_role = role_gate_expected_role_for_case(&state.case);
+        if state.role != expected_role {
+            violations.push(format!(
+                "{prefix}: role-gate case disagrees with scenario role"
+            ));
+        }
+        if state.decision != expected_decision {
+            violations.push(format!(
+                "{prefix}: role-gate decision disagrees with operation policy"
+            ));
+        }
+        let modeled_allowed = state.decision == "Allow";
+
+        let expected_roles = role_gate_expected_roles(state);
+        if (
+            state.executor_allowed,
+            state.reviewer_allowed,
+            state.orchestrator_allowed,
+            state.apply_gate_allowed,
+        ) != expected_roles
+        {
+            violations.push(format!(
+                "{prefix}: role-gate allowed role set disagrees with operation"
+            ));
+        }
+
+        if state.operation == "ClaimWork" && modeled_allowed != (state.role == "Executor") {
+            violations.push(format!("{prefix}: executor/work claim policy drifted"));
+        }
+        if matches!(state.operation.as_str(), "ClaimReview" | "DecideReview")
+            && modeled_allowed != (state.role == "Reviewer")
+        {
+            violations.push(format!("{prefix}: reviewer review policy drifted"));
+        }
+        if state.operation == "RequestReview"
+            && modeled_allowed != matches!(state.role.as_str(), "Executor" | "Orchestrator")
+        {
+            violations.push(format!("{prefix}: request-review role policy drifted"));
+        }
+        if state.operation == "EnqueueForApply"
+            && modeled_allowed != matches!(state.role.as_str(), "Orchestrator" | "ApplyGate")
+        {
+            violations.push(format!("{prefix}: enqueue role policy drifted"));
+        }
+        if state.operation == "ApplyQueueMutation" && modeled_allowed != (state.role == "ApplyGate")
+        {
+            violations.push(format!(
+                "{prefix}: apply queue mutation role policy drifted"
+            ));
+        }
+        if matches!(
+            state.operation.as_str(),
+            "VerifyLandingAuthorization" | "RecordLandingReceipt" | "SupersedeQueueItem"
+        ) && modeled_allowed != matches!(state.role.as_str(), "Orchestrator" | "ApplyGate")
+        {
+            violations.push(format!(
+                "{prefix}: landing proof/receipt role policy drifted"
+            ));
+        }
+        if matches!(
+            state.operation.as_str(),
+            "ReservationMutation" | "ImportPlanning"
+        ) && modeled_allowed != (state.role == "Orchestrator")
+        {
+            violations.push(format!("{prefix}: reservation/import role policy drifted"));
+        }
+
+        let expected_claim_created =
+            expected_allowed && matches!(state.operation.as_str(), "ClaimWork" | "ClaimReview");
+        let expected_queue_mutated = expected_allowed
+            && matches!(
+                state.operation.as_str(),
+                "EnqueueForApply" | "ApplyQueueMutation" | "SupersedeQueueItem"
+            );
+        let expected_reservation_mutated =
+            expected_allowed && state.operation == "ReservationMutation";
+        let expected_import_written = expected_allowed && state.operation == "ImportPlanning";
+        if state.claim_created != expected_claim_created
+            || state.queue_mutated != expected_queue_mutated
+            || state.reservation_mutated != expected_reservation_mutated
+            || state.import_written != expected_import_written
+        {
+            violations.push(format!(
+                "{prefix}: allowed role side effects disagree with operation"
+            ));
+        }
+        if !expected_allowed
+            && (state.claim_created
+                || state.queue_mutated
+                || state.reservation_mutated
+                || state.import_written)
+        {
+            violations.push(format!(
+                "{prefix}: denied wrong-role operation produced side effects"
+            ));
+        }
+    }
+    violations
+}
+
 fn subtask_domain_lifecycle_expected_reject(
     state: &SubtaskDomainLifecycleShapeState,
 ) -> &'static str {
@@ -11648,6 +11864,11 @@ fn transition_matrix_trace() -> TransitionMatrixItfTrace {
 }
 
 #[fixture]
+fn role_gate_policy_trace() -> RoleGatePolicyItfTrace {
+    serde_json::from_str(COVEY_ROLE_GATE_POLICY_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn subtask_domain_lifecycle_shape_trace() -> SubtaskDomainLifecycleShapeItfTrace {
     serde_json::from_str(COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -12443,6 +12664,35 @@ fn covey_replays_quint_transition_matrix_itf_trace(
     }
     assert_eq!(
         replay_transition_matrix_trace(&transition_matrix_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_role_gate_policy_itf_trace(role_gate_policy_trace: RoleGatePolicyItfTrace) {
+    assert!(
+        !role_gate_policy_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ClaimWorkExecutor",
+        "ClaimWorkReviewer",
+        "ClaimReviewReviewer",
+        "RequestReviewOrchestrator",
+        "ApplyQueueOrchestrator",
+        "ReservationExecutor",
+        "ImportApplyGate",
+    ] {
+        assert!(
+            role_gate_policy_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected:?}"
+        );
+    }
+    assert_eq!(
+        replay_role_gate_policy_trace(&role_gate_policy_trace),
         Vec::<String>::new()
     );
 }
@@ -15211,6 +15461,68 @@ fn covey_transition_matrix_replay_reports_counterexample_shape() {
             "state[0]: transition matrix outcome disagrees with expected edge set",
             "state[0]: work subtask bypassed ready_for_apply before applied",
         ]
+    );
+}
+
+#[rstest]
+fn covey_role_gate_policy_replay_reports_counterexample_shape() {
+    let state = RoleGatePolicyState {
+        case_index: 21,
+        case: "ReservationExecutor".to_owned(),
+        operation: "ReservationMutation".to_owned(),
+        role: "Executor".to_owned(),
+        executor_allowed: true,
+        reviewer_allowed: false,
+        orchestrator_allowed: false,
+        apply_gate_allowed: false,
+        decision: "Allow".to_owned(),
+        claim_created: true,
+        queue_mutated: false,
+        reservation_mutated: true,
+        import_written: false,
+        evaluated: true,
+    };
+    let trace = RoleGatePolicyItfTrace {
+        states: vec![RoleGatePolicyItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_role_gate_policy_trace(&trace),
+        vec![
+            "state[0]: role-gate decision disagrees with operation policy",
+            "state[0]: role-gate allowed role set disagrees with operation",
+            "state[0]: reservation/import role policy drifted",
+            "state[0]: allowed role side effects disagree with operation",
+            "state[0]: denied wrong-role operation produced side effects",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_role_gate_policy_replay_reports_case_role_counterexample_shape() {
+    let state = RoleGatePolicyState {
+        case_index: 4,
+        case: "ClaimReviewExecutor".to_owned(),
+        operation: "ClaimReview".to_owned(),
+        role: "ApplyGate".to_owned(),
+        executor_allowed: false,
+        reviewer_allowed: true,
+        orchestrator_allowed: false,
+        apply_gate_allowed: false,
+        decision: "DenyWrongRole".to_owned(),
+        claim_created: false,
+        queue_mutated: false,
+        reservation_mutated: false,
+        import_written: false,
+        evaluated: true,
+    };
+    let trace = RoleGatePolicyItfTrace {
+        states: vec![RoleGatePolicyItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_role_gate_policy_trace(&trace),
+        vec!["state[0]: role-gate case disagrees with scenario role"]
     );
 }
 
