@@ -2892,6 +2892,65 @@ fn session_from_raw_row_parts(
     )
 }
 
+/// Replays session proof row parsing for external formal-model tests.
+///
+/// This is not a scheduling or settlement API. It exists so integration tests
+/// can bind Quint traces to the same private row constructor used by apply
+/// proof verification.
+#[doc(hidden)]
+#[must_use]
+pub fn session_proof_row_accepts_for_model(
+    session_token_valid: bool,
+    agent_principal_valid: bool,
+    agent_instance_valid: bool,
+    role_shape: &str,
+    state_shape: &str,
+    role_value: &str,
+    session_state_value: &str,
+) -> bool {
+    let raw_role = if role_shape == "InvalidRoleShape" {
+        "worker"
+    } else {
+        match role_value {
+            "ReviewerRole" => "reviewer",
+            "ApplyGateRole" => "apply_gate",
+            _ => "executor",
+        }
+    };
+    let raw_state = if state_shape == "InvalidStateShape" {
+        "running"
+    } else {
+        match session_state_value {
+            "StaleState" => "stale",
+            "ExitedState" => "exited",
+            _ => "active",
+        }
+    };
+    session_from_raw_row_parts(
+        if session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        }
+        .into(),
+        if agent_principal_valid {
+            "principal-1"
+        } else {
+            "principal 1"
+        }
+        .into(),
+        if agent_instance_valid {
+            "instance-1"
+        } else {
+            "instance 1"
+        }
+        .into(),
+        raw_role.into(),
+        raw_state.into(),
+    )
+    .is_ok()
+}
+
 impl SessionRow {
     fn from_db_parts(
         session_token: String,

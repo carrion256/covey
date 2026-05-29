@@ -17,7 +17,7 @@ use covey::{
     proof_apply::{
         apply_verification_proof_row_accepts_for_model, artifact_proof_row_accepts_for_model,
         ready_queue_proof_row_lifecycle_accepts_for_model,
-        review_proof_row_lifecycle_accepts_for_model,
+        review_proof_row_lifecycle_accepts_for_model, session_proof_row_accepts_for_model,
     },
 };
 use rstest::{fixture, rstest};
@@ -126,6 +126,8 @@ const COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyProofRowLifecycle.itf.json");
 const COVEY_APPLY_VERIFICATION_PROOF_ROW_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyVerificationProofRowShape.itf.json");
+const COVEY_SESSION_PROOF_ROW_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveySessionProofRowShape.itf.json");
 const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
@@ -287,6 +289,16 @@ struct ApplyVerificationProofRowShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct ApplyVerificationProofRowShapeItfState {
     s: ApplyVerificationProofRowShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionProofRowShapeItfTrace {
+    states: Vec<SessionProofRowShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionProofRowShapeItfState {
+    s: SessionProofRowShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1135,6 +1147,41 @@ struct ApplyVerificationProofRowShapeState {
     recorded_by_session_valid: bool,
     #[serde(rename = "createdAtNonNegative")]
     created_at_non_negative: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    #[serde(rename = "scheduledWork")]
+    scheduled_work: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionProofRowShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "agentPrincipalValid")]
+    agent_principal_valid: bool,
+    #[serde(rename = "agentInstanceValid")]
+    agent_instance_valid: bool,
+    #[serde(rename = "roleShape", deserialize_with = "deserialize_itf_variant")]
+    role_shape: String,
+    #[serde(rename = "stateShape", deserialize_with = "deserialize_itf_variant")]
+    state_shape: String,
+    #[serde(rename = "roleValue", deserialize_with = "deserialize_itf_variant")]
+    role_value: String,
+    #[serde(
+        rename = "sessionStateValue",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    session_state_value: String,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -8384,6 +8431,125 @@ fn replay_apply_verification_proof_row_shape_trace(
     violations
 }
 
+fn session_proof_row_expected_reject(state: &SessionProofRowShapeState) -> &'static str {
+    if state.role_shape == "InvalidRoleShape" {
+        "InvalidRoleReject"
+    } else if state.state_shape == "InvalidStateShape" {
+        "InvalidStateReject"
+    } else if !state.session_token_valid {
+        "SessionTokenInvalid"
+    } else if !state.agent_principal_valid {
+        "AgentPrincipalInvalid"
+    } else if !state.agent_instance_valid {
+        "AgentInstanceInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn session_proof_row_actual_accepts(state: &SessionProofRowShapeState) -> bool {
+    session_proof_row_accepts_for_model(
+        state.session_token_valid,
+        state.agent_principal_valid,
+        state.agent_instance_valid,
+        &state.role_shape,
+        &state.state_shape,
+        &state.role_value,
+        &state.session_state_value,
+    )
+}
+
+fn replay_session_proof_row_shape_trace(trace: &SessionProofRowShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: session proof row scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = session_proof_row_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: session proof row reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: session proof row outcome disagrees with row facts"
+            ));
+        }
+        if session_proof_row_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: session proof row constructor disagrees with model"
+            ));
+        }
+        if state.accepted && (state.role_shape != "ValidRole" || state.state_shape != "ValidState")
+        {
+            violations.push(format!(
+                "state[{index}]: accepted session proof row has invalid role or state"
+            ));
+        }
+        if state.accepted
+            && (!matches!(
+                state.role_value.as_str(),
+                "ExecutorRole" | "ReviewerRole" | "ApplyGateRole"
+            ) || !matches!(
+                state.session_state_value.as_str(),
+                "ActiveState" | "StaleState" | "ExitedState"
+            ))
+        {
+            violations.push(format!(
+                "state[{index}]: accepted session proof row has unknown role or state value"
+            ));
+        }
+        if matches!(
+            state.case.as_str(),
+            "ValidExecutorActive" | "ValidReviewerStale" | "ValidApplyGateExited"
+        ) {
+            let expected_pair = match state.case.as_str() {
+                "ValidReviewerStale" => ("ReviewerRole", "StaleState"),
+                "ValidApplyGateExited" => ("ApplyGateRole", "ExitedState"),
+                _ => ("ExecutorRole", "ActiveState"),
+            };
+            if state.role_value != expected_pair.0 || state.session_state_value != expected_pair.1 {
+                violations.push(format!(
+                    "state[{index}]: session proof row valid case does not preserve role/state"
+                ));
+            }
+        }
+        if state.accepted
+            && (!state.session_token_valid
+                || !state.agent_principal_valid
+                || !state.agent_instance_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted session proof row has invalid identity"
+            ));
+        }
+        if state.scheduled_work {
+            violations.push(format!(
+                "state[{index}]: session proof row parsing scheduled work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "state[{index}]: session proof row parsing granted mutation authority"
+            ));
+        }
+    }
+    violations
+}
+
 fn record_lifecycle_session_state(state: &RecordLifecycleShapeState) -> SessionState {
     match state.session_lifecycle.as_str() {
         "Active" => SessionState::Active,
@@ -10658,6 +10824,11 @@ fn apply_verification_proof_row_shape_trace() -> ApplyVerificationProofRowShapeI
 }
 
 #[fixture]
+fn session_proof_row_shape_trace() -> SessionProofRowShapeItfTrace {
+    serde_json::from_str(COVEY_SESSION_PROOF_ROW_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn record_lifecycle_shape_trace() -> RecordLifecycleShapeItfTrace {
     serde_json::from_str(COVEY_RECORD_LIFECYCLE_SHAPE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -11456,6 +11627,48 @@ fn covey_replays_quint_apply_verification_proof_row_shape_itf_trace(
     }
     assert_eq!(
         replay_apply_verification_proof_row_shape_trace(&apply_verification_proof_row_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_session_proof_row_shape_itf_trace(
+    session_proof_row_shape_trace: SessionProofRowShapeItfTrace,
+) {
+    assert!(
+        !session_proof_row_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidExecutorActive",
+        "ValidReviewerStale",
+        "ValidApplyGateExited",
+    ] {
+        assert!(
+            session_proof_row_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "InvalidSessionToken",
+        "InvalidAgentPrincipal",
+        "InvalidAgentInstance",
+        "InvalidRole",
+        "InvalidState",
+    ] {
+        assert!(
+            session_proof_row_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_session_proof_row_shape_trace(&session_proof_row_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -13901,6 +14114,42 @@ fn covey_apply_verification_proof_row_shape_replay_reports_counterexample_shape(
             "state[0]: accepted apply verification proof row has invalid queue review or fence",
             "state[0]: apply verification proof row parsing scheduled work",
             "state[0]: apply verification proof row parsing granted mutation authority",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_session_proof_row_shape_replay_reports_counterexample_shape() {
+    let state = SessionProofRowShapeState {
+        case_index: 7,
+        case: "InvalidRole".to_owned(),
+        session_token_valid: true,
+        agent_principal_valid: true,
+        agent_instance_valid: true,
+        role_shape: "InvalidRoleShape".to_owned(),
+        state_shape: "ValidState".to_owned(),
+        role_value: "InvalidRoleValue".to_owned(),
+        session_state_value: "ActiveState".to_owned(),
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        scheduled_work: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = SessionProofRowShapeItfTrace {
+        states: vec![SessionProofRowShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_session_proof_row_shape_trace(&trace),
+        vec![
+            "state[0]: session proof row reject reason disagrees with row facts",
+            "state[0]: session proof row outcome disagrees with row facts",
+            "state[0]: accepted session proof row has invalid role or state",
+            "state[0]: accepted session proof row has unknown role or state value",
+            "state[0]: session proof row parsing scheduled work",
+            "state[0]: session proof row parsing granted mutation authority",
         ]
     );
 }
