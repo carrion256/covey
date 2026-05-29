@@ -4,18 +4,18 @@ use covey::{
     Conflict, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     ExitSessionReq, FenceSeq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq,
     LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask,
-    MetaTaskId, MetaTaskState, ModelId, OverlapQueryReq, ProviderId, PublishArtifactReq,
-    ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationOverlapConflictPayload, ReservationState,
-    ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget, ReviewVerdict,
-    RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
-    SessionStatus, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
-    SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq, TimestampMs,
-    VerifyLandingAuthorizationReq, WorkSubtask,
+    MetaTaskId, MetaTaskState, MetaTaskStatus, ModelId, OverlapQueryReq, ProviderId,
+    PublishArtifactReq, ReadyQueueItem, ReadyQueueState, RecordApplyVerificationReq,
+    RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RepoopsAuthoritySnapshotReq,
+    RequestReservationReq, RequestReviewReq, Reservation, ReservationOverlapConflictPayload,
+    ReservationState, ResolveConflictReq, Review, ReviewState, ReviewSubtask, ReviewTarget,
+    ReviewVerdict, RuntimeAttestation, ScopeClass, Session, SessionHandle, SessionRole,
+    SessionState, SessionStatus, SessionToken, SettlementTarget, StartSubtaskReq,
+    SubmitMetaTaskReq, SubtaskId, SubtaskLifecycle, SubtaskPriority, SupersedeQueueItemReq,
+    TimestampMs, VerifyLandingAuthorizationReq, WorkSubtask,
     proof_apply::{
-        apply_verification_proof_row_accepts_for_model,
+        apply_verification_proof_row_accepts_for_model, artifact_proof_row_accepts_for_model,
         ready_queue_proof_row_lifecycle_accepts_for_model,
         review_proof_row_lifecycle_accepts_for_model,
     },
@@ -54,6 +54,8 @@ const COVEY_SESSION_HANDLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionHandleShape.itf.json");
 const COVEY_SESSION_STATUS_VIEW_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionStatusViewShape.itf.json");
+const COVEY_META_TASK_STATUS_VIEW_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyMetaTaskStatusViewShape.itf.json");
 const COVEY_META_TASK_REQUEST_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyMetaTaskRequestShape.itf.json");
 const COVEY_CREATE_SUBTASK_REQUEST_SHAPE_ITF: &str =
@@ -118,6 +120,8 @@ const COVEY_TRANSITION_MATRIX_ITF: &str =
     include_str!("fixtures/quint/CoveyTransitionMatrix.itf.json");
 const COVEY_SUBTASK_DOMAIN_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySubtaskDomainLifecycleShape.itf.json");
+const COVEY_ARTIFACT_PROOF_ROW_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyArtifactProofRowShape.itf.json");
 const COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyProofRowLifecycle.itf.json");
 const COVEY_APPLY_VERIFICATION_PROOF_ROW_SHAPE_ITF: &str =
@@ -253,6 +257,16 @@ struct SubtaskDomainLifecycleShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct SubtaskDomainLifecycleShapeItfState {
     s: SubtaskDomainLifecycleShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactProofRowShapeItfTrace {
+    states: Vec<ArtifactProofRowShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactProofRowShapeItfState {
+    s: ArtifactProofRowShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,6 +407,16 @@ struct SessionStatusViewShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct SessionStatusViewShapeItfState {
     s: SessionStatusViewShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetaTaskStatusViewShapeItfTrace {
+    states: Vec<MetaTaskStatusViewShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetaTaskStatusViewShapeItfState {
+    s: MetaTaskStatusViewShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1022,6 +1046,37 @@ struct SubtaskDomainLifecycleShapeState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ArtifactProofRowShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "artifactDigestValid")]
+    artifact_digest_valid: bool,
+    #[serde(rename = "producedBySubtaskValid")]
+    produced_by_subtask_valid: bool,
+    #[serde(rename = "producedBySessionValid")]
+    produced_by_session_valid: bool,
+    #[serde(
+        rename = "manifestPathShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    manifest_path_shape: String,
+    #[serde(rename = "changedPathsDigestValid")]
+    changed_paths_digest_valid: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    #[serde(rename = "scheduledWork")]
+    scheduled_work: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct ApplyProofRowLifecycleState {
     #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
     case_index: i64,
@@ -1409,6 +1464,33 @@ struct SessionStatusViewShapeState {
     accepted_session_preserved: bool,
     #[serde(rename = "acceptedActiveSubtaskPreserved")]
     accepted_active_subtask_preserved: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetaTaskStatusViewShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(rename = "subtaskSet", deserialize_with = "deserialize_itf_variant")]
+    subtask_set: String,
+    #[serde(rename = "subtaskCount", deserialize_with = "deserialize_itf_bigint")]
+    subtask_count: i64,
+    #[serde(rename = "allSubtasksBelong")]
+    all_subtasks_belong: bool,
+    #[serde(rename = "acceptedMetaTaskPreserved")]
+    accepted_meta_task_preserved: bool,
+    #[serde(rename = "acceptedSubtasksPreserved")]
+    accepted_subtasks_preserved: bool,
+    #[serde(rename = "scheduledWork")]
+    scheduled_work: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -3666,6 +3748,132 @@ fn replay_session_status_view_shape_trace(trace: &SessionStatusViewShapeItfTrace
         {
             violations.push(format!(
                 "state[{index}]: accepted idle/terminal session status carried active subtask state"
+            ));
+        }
+    }
+    violations
+}
+
+fn meta_task_status_expected_reject(state: &MetaTaskStatusViewShapeState) -> &'static str {
+    if state.all_subtasks_belong {
+        "NoReject"
+    } else {
+        "ForeignSubtaskReject"
+    }
+}
+
+fn meta_task_status_expected_outcome(expected_reject: &str) -> &'static str {
+    if expected_reject == "NoReject" {
+        "Accepted"
+    } else {
+        "Rejected"
+    }
+}
+
+fn meta_task_status_subtask_meta_ids(state: &MetaTaskStatusViewShapeState) -> Vec<&'static str> {
+    match state.subtask_set.as_str() {
+        "Empty" => Vec::new(),
+        "OneMatching" => vec!["meta-1"],
+        "TwoMatching" => vec!["meta-1", "meta-1"],
+        "OneForeign" => vec!["meta-2"],
+        "MatchingThenForeign" => vec!["meta-1", "meta-2"],
+        "ForeignThenMatching" => vec!["meta-2", "meta-1"],
+        other => panic!("unexpected meta-task status subtask set {other}"),
+    }
+}
+
+fn meta_task_status_subtask_json(index: usize, meta_task_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "subtask_id": format!("subtask-{}", index + 1),
+        "meta_task_id": meta_task_id,
+        "title": format!("meta status subtask {}", index + 1),
+        "kind": "work",
+        "review_target": null,
+        "state": "available",
+        "active_claim_id": null,
+        "artifact_digest": null,
+        "priority": 10,
+        "created_at": 100,
+        "updated_at": 101,
+    })
+}
+
+fn meta_task_status_json(state: &MetaTaskStatusViewShapeState) -> serde_json::Value {
+    let subtasks: Vec<_> = meta_task_status_subtask_meta_ids(state)
+        .into_iter()
+        .enumerate()
+        .map(|(index, meta_task_id)| meta_task_status_subtask_json(index, meta_task_id))
+        .collect();
+    serde_json::json!({
+        "meta_task": {
+            "meta_task_id": "meta-1",
+            "prompt_text": "coordinate the work",
+            "state": "active",
+            "created_by": "session-1",
+            "created_at": 100,
+            "updated_at": 101,
+        },
+        "subtasks": subtasks,
+    })
+}
+
+fn meta_task_status_actual_accepts(state: &MetaTaskStatusViewShapeState) -> bool {
+    serde_json::from_value::<MetaTaskStatus>(meta_task_status_json(state)).is_ok()
+}
+
+fn replay_meta_task_status_view_shape_trace(
+    trace: &MetaTaskStatusViewShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: meta-task status scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if state.scheduled_work || state.mutation_authority_granted {
+            violations.push(format!(
+                "state[{index}]: meta-task status parsing scheduled work or granted mutation authority"
+            ));
+        }
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = meta_task_status_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        let expected_outcome = meta_task_status_expected_outcome(expected_reject);
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: meta-task status reject reason does not match subtask ownership"
+            ));
+        }
+        if state.outcome != expected_outcome {
+            violations.push(format!(
+                "state[{index}]: meta-task status outcome disagrees with subtask ownership"
+            ));
+        }
+        if meta_task_status_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: meta-task status parser disagrees with model"
+            ));
+        }
+        if state.subtask_count != meta_task_status_subtask_meta_ids(state).len() as i64 {
+            violations.push(format!(
+                "state[{index}]: meta-task status subtask count disagrees with subtask set"
+            ));
+        }
+        if state.outcome == "Accepted"
+            && (!state.all_subtasks_belong
+                || !state.accepted_meta_task_preserved
+                || !state.accepted_subtasks_preserved)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted meta-task status did not preserve owned subtasks"
             ));
         }
     }
@@ -7781,6 +7989,97 @@ fn replay_subtask_domain_lifecycle_shape_trace(
     violations
 }
 
+fn artifact_proof_row_expected_reject(state: &ArtifactProofRowShapeState) -> &'static str {
+    if !state.artifact_digest_valid {
+        "ArtifactDigestInvalid"
+    } else if !state.produced_by_subtask_valid {
+        "ProducedBySubtaskInvalid"
+    } else if !state.produced_by_session_valid {
+        "ProducedBySessionInvalid"
+    } else if state.manifest_path_shape != "ValidManifestPath" {
+        "ManifestPathInvalid"
+    } else if !state.changed_paths_digest_valid {
+        "ChangedPathsDigestInvalid"
+    } else {
+        "NoReject"
+    }
+}
+
+fn artifact_proof_row_actual_accepts(state: &ArtifactProofRowShapeState) -> bool {
+    artifact_proof_row_accepts_for_model(
+        state.artifact_digest_valid,
+        state.produced_by_subtask_valid,
+        state.produced_by_session_valid,
+        &state.manifest_path_shape,
+        state.changed_paths_digest_valid,
+    )
+}
+
+fn replay_artifact_proof_row_shape_trace(trace: &ArtifactProofRowShapeItfTrace) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: artifact proof row scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = artifact_proof_row_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: artifact proof row reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: artifact proof row outcome disagrees with row facts"
+            ));
+        }
+        if artifact_proof_row_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: artifact proof row constructor disagrees with model"
+            ));
+        }
+        if state.accepted
+            && (!state.artifact_digest_valid
+                || !state.produced_by_subtask_valid
+                || !state.produced_by_session_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted artifact proof row has invalid artifact or producer"
+            ));
+        }
+        if state.accepted
+            && (state.manifest_path_shape != "ValidManifestPath"
+                || !state.changed_paths_digest_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted artifact proof row has invalid manifest or changed paths"
+            ));
+        }
+        if state.scheduled_work {
+            violations.push(format!(
+                "state[{index}]: artifact proof row parsing scheduled work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "state[{index}]: artifact proof row parsing granted mutation authority"
+            ));
+        }
+    }
+    violations
+}
+
 fn apply_proof_review_state(state: &ApplyProofRowLifecycleState) -> ReviewState {
     match state.review_state.as_str() {
         "Requested" => ReviewState::Requested,
@@ -10341,6 +10640,12 @@ fn subtask_domain_lifecycle_shape_trace() -> SubtaskDomainLifecycleShapeItfTrace
 }
 
 #[fixture]
+fn artifact_proof_row_shape_trace() -> ArtifactProofRowShapeItfTrace {
+    serde_json::from_str(COVEY_ARTIFACT_PROOF_ROW_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn apply_proof_row_lifecycle_trace() -> ApplyProofRowLifecycleItfTrace {
     serde_json::from_str(COVEY_APPLY_PROOF_ROW_LIFECYCLE_ITF)
         .expect("fixture must be valid ITF JSON")
@@ -10408,6 +10713,12 @@ fn session_handle_shape_trace() -> SessionHandleShapeItfTrace {
 #[fixture]
 fn session_status_view_shape_trace() -> SessionStatusViewShapeItfTrace {
     serde_json::from_str(COVEY_SESSION_STATUS_VIEW_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn meta_task_status_view_shape_trace() -> MetaTaskStatusViewShapeItfTrace {
+    serde_json::from_str(COVEY_META_TASK_STATUS_VIEW_SHAPE_ITF)
         .expect("fixture must be valid ITF JSON")
 }
 
@@ -11020,6 +11331,43 @@ fn covey_replays_quint_subtask_domain_lifecycle_shape_itf_trace(
 }
 
 #[rstest]
+fn covey_replays_quint_artifact_proof_row_shape_itf_trace(
+    artifact_proof_row_shape_trace: ArtifactProofRowShapeItfTrace,
+) {
+    assert!(
+        !artifact_proof_row_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert!(
+        artifact_proof_row_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidArtifactRow" && state.s.accepted),
+        "fixture should cover accepted artifact proof row"
+    );
+    for expected in [
+        "InvalidArtifactDigest",
+        "InvalidProducedBySubtask",
+        "InvalidProducedBySession",
+        "EmptyManifestPath",
+        "ControlManifestPath",
+        "InvalidChangedPathsDigest",
+    ] {
+        assert!(
+            artifact_proof_row_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_artifact_proof_row_shape_trace(&artifact_proof_row_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
 fn covey_replays_quint_apply_proof_row_lifecycle_itf_trace(
     apply_proof_row_lifecycle_trace: ApplyProofRowLifecycleItfTrace,
 ) {
@@ -11420,6 +11768,50 @@ fn covey_replays_quint_session_status_view_shape_itf_trace(
     }
     assert_eq!(
         replay_session_status_view_shape_trace(&session_status_view_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_meta_task_status_view_shape_itf_trace(
+    meta_task_status_view_shape_trace: MetaTaskStatusViewShapeItfTrace,
+) {
+    assert!(
+        !meta_task_status_view_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "NoSubtasksValid",
+        "OneMatchingSubtask",
+        "TwoMatchingSubtasks",
+        "OneForeignSubtask",
+        "FirstMatchingSecondForeign",
+        "FirstForeignSecondMatching",
+    ] {
+        assert!(
+            meta_task_status_view_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected),
+            "fixture should cover {expected}"
+        );
+    }
+    assert!(
+        meta_task_status_view_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.outcome == "Accepted" && state.s.subtask_count == 2),
+        "fixture should cover accepted multiple owned subtasks"
+    );
+    assert!(
+        meta_task_status_view_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.reject_reason == "ForeignSubtaskReject"),
+        "fixture should cover foreign subtask rejection"
+    );
+    assert_eq!(
+        replay_meta_task_status_view_shape_trace(&meta_task_status_view_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -13411,6 +13803,39 @@ fn covey_subtask_domain_lifecycle_shape_replay_reports_counterexample_shape() {
 }
 
 #[rstest]
+fn covey_artifact_proof_row_shape_replay_reports_counterexample_shape() {
+    let state = ArtifactProofRowShapeState {
+        case_index: 2,
+        case: "InvalidArtifactDigest".to_owned(),
+        artifact_digest_valid: false,
+        produced_by_subtask_valid: true,
+        produced_by_session_valid: true,
+        manifest_path_shape: "ValidManifestPath".to_owned(),
+        changed_paths_digest_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        scheduled_work: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = ArtifactProofRowShapeItfTrace {
+        states: vec![ArtifactProofRowShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_artifact_proof_row_shape_trace(&trace),
+        vec![
+            "state[0]: artifact proof row reject reason disagrees with row facts",
+            "state[0]: artifact proof row outcome disagrees with row facts",
+            "state[0]: accepted artifact proof row has invalid artifact or producer",
+            "state[0]: artifact proof row parsing scheduled work",
+            "state[0]: artifact proof row parsing granted mutation authority",
+        ]
+    );
+}
+
+#[rstest]
 fn covey_apply_proof_row_lifecycle_replay_reports_counterexample_shape() {
     let state = ApplyProofRowLifecycleState {
         case_index: 16,
@@ -13769,6 +14194,37 @@ fn covey_session_status_view_shape_replay_reports_counterexample_shape() {
         vec![
             "state[0]: session status reject reason does not match view shape",
             "state[0]: session status outcome disagrees with view shape",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_meta_task_status_view_shape_replay_reports_counterexample_shape() {
+    let state = MetaTaskStatusViewShapeState {
+        case_index: 3,
+        case: "OneForeignSubtask".to_owned(),
+        subtask_set: "OneForeign".to_owned(),
+        subtask_count: 1,
+        all_subtasks_belong: false,
+        accepted_meta_task_preserved: true,
+        accepted_subtasks_preserved: true,
+        scheduled_work: true,
+        mutation_authority_granted: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        evaluated: true,
+    };
+    let trace = MetaTaskStatusViewShapeItfTrace {
+        states: vec![MetaTaskStatusViewShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_meta_task_status_view_shape_trace(&trace),
+        vec![
+            "state[0]: meta-task status parsing scheduled work or granted mutation authority",
+            "state[0]: meta-task status reject reason does not match subtask ownership",
+            "state[0]: meta-task status outcome disagrees with subtask ownership",
+            "state[0]: accepted meta-task status did not preserve owned subtasks",
         ]
     );
 }

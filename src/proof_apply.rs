@@ -415,6 +415,56 @@ impl ArtifactRow {
     }
 }
 
+/// Replays artifact proof row parsing for external formal-model tests.
+///
+/// This is not a scheduling or settlement API. It exists so integration tests
+/// can bind Quint traces to the same private row constructor used by apply
+/// proof verification.
+#[doc(hidden)]
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn artifact_proof_row_accepts_for_model(
+    artifact_digest_valid: bool,
+    produced_by_subtask_valid: bool,
+    produced_by_session_valid: bool,
+    manifest_path_shape: &str,
+    changed_paths_digest_valid: bool,
+) -> bool {
+    let manifest_path = match manifest_path_shape {
+        "EmptyPath" => "",
+        "ControlPath" => "manifest\n.json",
+        _ => "artifact bundle/manifest.json",
+    };
+    ArtifactRow::from_db_parts(
+        if artifact_digest_valid {
+            "blake3:artifact"
+        } else {
+            "artifact"
+        }
+        .into(),
+        if produced_by_subtask_valid {
+            "subtask-1"
+        } else {
+            "subtask 1"
+        }
+        .into(),
+        if produced_by_session_valid {
+            "session-1"
+        } else {
+            "session 1"
+        }
+        .into(),
+        manifest_path.into(),
+        if changed_paths_digest_valid {
+            "blake3:paths"
+        } else {
+            "paths"
+        }
+        .into(),
+    )
+    .is_ok()
+}
+
 #[derive(Debug, Clone)]
 struct ReviewRow {
     review_id: ReviewId,
