@@ -1320,6 +1320,103 @@ impl RuntimeAttestationRow {
     }
 }
 
+/// Replays runtime-attestation proof row parsing for external formal-model tests.
+///
+/// This is not a scheduling or settlement API. It exists so integration tests
+/// can bind Quint traces to the same private row constructor used by apply
+/// proof verification.
+#[doc(hidden)]
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn runtime_attestation_proof_row_accepts_for_model(
+    runtime_identity_shape: &str,
+    provider_run_shape: &str,
+    timestamp_shape: &str,
+    session_token_valid: bool,
+    agent_principal_valid: bool,
+    agent_instance_valid: bool,
+    role_valid: bool,
+    provider_valid: bool,
+    model_valid: bool,
+    transcript_valid: bool,
+) -> bool {
+    let (process_id, container_id) = match runtime_identity_shape {
+        "ContainerOnly" => (None, Some("container-1".to_owned())),
+        "ProcessAndContainer" => (Some("1234".to_owned()), Some("container-1".to_owned())),
+        "MissingRuntimeIdentityShape" => (None, None),
+        "InvalidProcessIdShape" => (Some(" 1234".to_owned()), None),
+        "InvalidContainerIdShape" => (None, Some(" container-1".to_owned())),
+        _ => (Some("1234".to_owned()), None),
+    };
+    let (provider_run_id, provider_run_id_issuer) = match provider_run_shape {
+        "LegacyMissingProviderRun" => (None, None),
+        "PartialProviderRunIdShape" => (Some("provider-run-1".to_owned()), None),
+        "PartialProviderRunIssuerShape" => (None, Some("provider-issuer-1".to_owned())),
+        "InvalidProviderRunIdShape" => (
+            Some(" provider-run-1".to_owned()),
+            Some("provider-issuer-1".to_owned()),
+        ),
+        "InvalidProviderRunIssuerShape" => (
+            Some("provider-run-1".to_owned()),
+            Some(" provider-issuer-1".to_owned()),
+        ),
+        _ => (
+            Some("provider-run-1".to_owned()),
+            Some("provider-issuer-1".to_owned()),
+        ),
+    };
+    let (started_at, ended_at, recorded_at) = match timestamp_shape {
+        "NegativeStartedAtShape" => (-1, 11, 12),
+        "NegativeEndedAtShape" => (10, -1, 12),
+        "NegativeRecordedAtShape" => (10, 11, -1),
+        "EndedBeforeStartedShape" => (12, 11, 13),
+        "RecordedBeforeEndedShape" => (10, 12, 11),
+        _ => (10, 11, 12),
+    };
+    RuntimeAttestationRow::from_db_parts(
+        if session_token_valid {
+            "session-1"
+        } else {
+            "session 1"
+        }
+        .into(),
+        if agent_principal_valid {
+            "agent-1"
+        } else {
+            "agent 1"
+        }
+        .into(),
+        if agent_instance_valid {
+            "instance-1"
+        } else {
+            "instance 1"
+        }
+        .into(),
+        if role_valid { "executor" } else { "worker" }.into(),
+        if provider_valid {
+            "provider-1"
+        } else {
+            "provider 1"
+        }
+        .into(),
+        if model_valid { "model-1" } else { "model 1" }.into(),
+        process_id,
+        container_id,
+        if transcript_valid {
+            "blake3:transcript"
+        } else {
+            "transcript"
+        }
+        .into(),
+        started_at,
+        ended_at,
+        recorded_at,
+        provider_run_id,
+        provider_run_id_issuer,
+    )
+    .is_ok()
+}
+
 impl RuntimeProofIdentity {
     fn from_parts(
         process_id: Option<String>,

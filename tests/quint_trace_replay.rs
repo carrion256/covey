@@ -17,7 +17,8 @@ use covey::{
     proof_apply::{
         apply_verification_proof_row_accepts_for_model, artifact_proof_row_accepts_for_model,
         ready_queue_proof_row_lifecycle_accepts_for_model,
-        review_proof_row_lifecycle_accepts_for_model, session_proof_row_accepts_for_model,
+        review_proof_row_lifecycle_accepts_for_model,
+        runtime_attestation_proof_row_accepts_for_model, session_proof_row_accepts_for_model,
     },
 };
 use rstest::{fixture, rstest};
@@ -29,6 +30,8 @@ const COVEY_REVIEW_CLAIM_RECLAIM_ITF: &str =
     include_str!("fixtures/quint/CoveyReviewClaimReclaim.itf.json");
 const COVEY_REVIEW_CLAIM_RECLAIM_CHANGES_REQUESTED_ITF: &str =
     include_str!("fixtures/quint/CoveyReviewClaimReclaimChangesRequested.itf.json");
+const COVEY_REVIEW_FOLLOWUP_REPAIR_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyReviewFollowupRepairShape.itf.json");
 const COVEY_CORE_LIFECYCLE_ITF: &str = include_str!("fixtures/quint/CoveyCoreLifecycle.itf.json");
 const COVEY_STALE_CLAIM_RECOVERY_REAP_ITF: &str =
     include_str!("fixtures/quint/CoveyStaleClaimRecoveryReap.itf.json");
@@ -128,6 +131,8 @@ const COVEY_APPLY_VERIFICATION_PROOF_ROW_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyApplyVerificationProofRowShape.itf.json");
 const COVEY_SESSION_PROOF_ROW_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveySessionProofRowShape.itf.json");
+const COVEY_RUNTIME_ATTESTATION_PROOF_ROW_SHAPE_ITF: &str =
+    include_str!("fixtures/quint/CoveyRuntimeAttestationProofRowShape.itf.json");
 const COVEY_RECORD_LIFECYCLE_SHAPE_ITF: &str =
     include_str!("fixtures/quint/CoveyRecordLifecycleShape.itf.json");
 const COVEY_RUNTIME_ATTESTATION_RECORD_SHAPE_ITF: &str =
@@ -159,6 +164,16 @@ struct ReviewClaimReclaimItfTrace {
 #[derive(Debug, Deserialize)]
 struct ReviewClaimReclaimItfState {
     s: ReviewClaimReclaimState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewFollowupRepairShapeItfTrace {
+    states: Vec<ReviewFollowupRepairShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewFollowupRepairShapeItfState {
+    s: ReviewFollowupRepairShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,6 +314,16 @@ struct SessionProofRowShapeItfTrace {
 #[derive(Debug, Deserialize)]
 struct SessionProofRowShapeItfState {
     s: SessionProofRowShapeState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationProofRowShapeItfTrace {
+    states: Vec<RuntimeAttestationProofRowShapeItfState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationProofRowShapeItfState {
+    s: RuntimeAttestationProofRowShapeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1182,6 +1207,53 @@ struct SessionProofRowShapeState {
         deserialize_with = "deserialize_itf_variant"
     )]
     session_state_value: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    outcome: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    accepted: bool,
+    #[serde(rename = "scheduledWork")]
+    scheduled_work: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeAttestationProofRowShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "runtimeIdentityShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    runtime_identity_shape: String,
+    #[serde(
+        rename = "providerRunShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    provider_run_shape: String,
+    #[serde(
+        rename = "timestampShape",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    timestamp_shape: String,
+    #[serde(rename = "sessionTokenValid")]
+    session_token_valid: bool,
+    #[serde(rename = "agentPrincipalValid")]
+    agent_principal_valid: bool,
+    #[serde(rename = "agentInstanceValid")]
+    agent_instance_valid: bool,
+    #[serde(rename = "roleValid")]
+    role_valid: bool,
+    #[serde(rename = "providerValid")]
+    provider_valid: bool,
+    #[serde(rename = "modelValid")]
+    model_valid: bool,
+    #[serde(rename = "transcriptValid")]
+    transcript_valid: bool,
     #[serde(deserialize_with = "deserialize_itf_variant")]
     outcome: String,
     #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
@@ -2714,6 +2786,54 @@ struct ReviewClaimReclaimState {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReviewFollowupRepairShapeState {
+    #[serde(rename = "caseIndex", deserialize_with = "deserialize_itf_bigint")]
+    case_index: i64,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    case: String,
+    #[serde(
+        rename = "reviewLifecycle",
+        deserialize_with = "deserialize_itf_variant"
+    )]
+    review_lifecycle: String,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    verdict: String,
+    #[serde(rename = "sourceKind", deserialize_with = "deserialize_itf_variant")]
+    source_kind: String,
+    #[serde(rename = "sourceState", deserialize_with = "deserialize_itf_variant")]
+    source_state: String,
+    #[serde(rename = "existingFollowup")]
+    existing_followup: bool,
+    #[serde(rename = "findingsPresent")]
+    findings_present: bool,
+    #[serde(rename = "selectedForRepair")]
+    selected_for_repair: bool,
+    #[serde(deserialize_with = "deserialize_itf_variant")]
+    result: String,
+    #[serde(rename = "rejectReason", deserialize_with = "deserialize_itf_variant")]
+    reject_reason: String,
+    #[serde(rename = "createdCount", deserialize_with = "deserialize_itf_bigint")]
+    created_count: i64,
+    #[serde(rename = "followupAvailable")]
+    followup_available: bool,
+    #[serde(rename = "followupReviewBound")]
+    followup_review_bound: bool,
+    #[serde(rename = "followupSourceSubtaskBound")]
+    followup_source_subtask_bound: bool,
+    #[serde(rename = "followupSourceArtifactBound")]
+    followup_source_artifact_bound: bool,
+    #[serde(rename = "followupFindingsBound")]
+    followup_findings_bound: bool,
+    #[serde(rename = "followupCreatedByReviewer")]
+    followup_created_by_reviewer: bool,
+    #[serde(rename = "claimCreated")]
+    claim_created: bool,
+    #[serde(rename = "mutationAuthorityGranted")]
+    mutation_authority_granted: bool,
+    evaluated: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct ItfVariant {
     tag: String,
 }
@@ -3342,6 +3462,97 @@ fn replay_review_claim_reclaim_trace(trace: &ReviewClaimReclaimItfTrace) -> Vec<
         if state.claim == "Held" && state.current_fence <= state.expired_fence {
             violations.push(format!(
                 "state[{index}]: reclaimed held review claim did not advance fence"
+            ));
+        }
+    }
+    violations
+}
+
+fn review_followup_repair_selected(state: &ReviewFollowupRepairShapeState) -> bool {
+    state.review_lifecycle == "Decided"
+        && state.verdict == "ChangesRequested"
+        && state.source_kind == "Work"
+        && state.source_state == "ChangesRequestedState"
+        && !state.existing_followup
+}
+
+fn replay_review_followup_repair_shape_trace(
+    trace: &ReviewFollowupRepairShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = -1;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if state.case_index < previous_case_index {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair case index moved backward"
+            ));
+        }
+        previous_case_index = state.case_index;
+        if !state.evaluated {
+            continue;
+        }
+
+        let selected = review_followup_repair_selected(state);
+        if state.selected_for_repair != selected {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair selector disagrees with row facts"
+            ));
+        }
+        if state.created_count > 1 {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair created duplicate follow-ups"
+            ));
+        }
+        if state.created_count > 0 && !selected {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair created work for an unselected row"
+            ));
+        }
+        if state.existing_followup && state.created_count > 0 {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair duplicated an existing follow-up"
+            ));
+        }
+        if matches!(state.verdict.as_str(), "Approve" | "Blocked") && state.created_count > 0 {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair created work for non-changes-requested verdict"
+            ));
+        }
+        if selected
+            && !state.findings_present
+            && (state.result != "RepairRejected"
+                || state.reject_reason != "MissingFindings"
+                || state.created_count != 0)
+        {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair did not reject missing findings"
+            ));
+        }
+        if state.created_count > 0 && !state.followup_available {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair created unavailable follow-up work"
+            ));
+        }
+        if state.created_count > 0
+            && !(state.followup_review_bound
+                && state.followup_source_subtask_bound
+                && state.followup_source_artifact_bound
+                && state.followup_findings_bound
+                && state.followup_created_by_reviewer)
+        {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair created unbound follow-up work"
+            ));
+        }
+        if state.claim_created {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair claimed executor work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "state[{index}]: review follow-up repair granted mutation authority"
             ));
         }
     }
@@ -8550,6 +8761,143 @@ fn replay_session_proof_row_shape_trace(trace: &SessionProofRowShapeItfTrace) ->
     violations
 }
 
+fn runtime_attestation_proof_row_expected_reject(
+    state: &RuntimeAttestationProofRowShapeState,
+) -> &'static str {
+    match state.runtime_identity_shape.as_str() {
+        "InvalidProcessIdShape" => "InvalidProcessIdReject",
+        "InvalidContainerIdShape" => "InvalidContainerIdReject",
+        "MissingRuntimeIdentityShape" => "MissingRuntimeIdentityReject",
+        _ => match state.provider_run_shape.as_str() {
+            "InvalidProviderRunIdShape" => "InvalidProviderRunIdReject",
+            "InvalidProviderRunIssuerShape" => "InvalidProviderRunIssuerReject",
+            "PartialProviderRunIdShape" | "PartialProviderRunIssuerShape" => {
+                "PartialProviderRunIdentityReject"
+            }
+            _ => match state.timestamp_shape.as_str() {
+                "NegativeStartedAtShape" => "InvalidStartedAtReject",
+                "NegativeEndedAtShape" => "InvalidEndedAtReject",
+                "NegativeRecordedAtShape" => "InvalidRecordedAtReject",
+                "EndedBeforeStartedShape" => "EndedBeforeStartedReject",
+                "RecordedBeforeEndedShape" => "RecordedBeforeEndedReject",
+                _ if !state.session_token_valid => "SessionTokenInvalid",
+                _ if !state.agent_principal_valid => "AgentPrincipalInvalid",
+                _ if !state.agent_instance_valid => "AgentInstanceInvalid",
+                _ if !state.role_valid => "InvalidRoleReject",
+                _ if !state.provider_valid => "ProviderInvalid",
+                _ if !state.model_valid => "ModelInvalid",
+                _ if !state.transcript_valid => "TranscriptInvalid",
+                _ => "NoReject",
+            },
+        },
+    }
+}
+
+fn runtime_attestation_proof_row_actual_accepts(
+    state: &RuntimeAttestationProofRowShapeState,
+) -> bool {
+    runtime_attestation_proof_row_accepts_for_model(
+        &state.runtime_identity_shape,
+        &state.provider_run_shape,
+        &state.timestamp_shape,
+        state.session_token_valid,
+        state.agent_principal_valid,
+        state.agent_instance_valid,
+        state.role_valid,
+        state.provider_valid,
+        state.model_valid,
+        state.transcript_valid,
+    )
+}
+
+fn replay_runtime_attestation_proof_row_shape_trace(
+    trace: &RuntimeAttestationProofRowShapeItfTrace,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut previous_case_index = None;
+    for (index, wrapped_state) in trace.states.iter().enumerate() {
+        let state = &wrapped_state.s;
+        if let Some(previous_case_index) = previous_case_index {
+            if state.case_index < previous_case_index {
+                violations.push(format!(
+                    "state[{index}]: runtime-attestation proof row scenario index moved backward"
+                ));
+            }
+        }
+        previous_case_index = Some(state.case_index);
+        if !state.evaluated {
+            continue;
+        }
+        let expected_reject = runtime_attestation_proof_row_expected_reject(state);
+        let expected_accepted = expected_reject == "NoReject";
+        if state.reject_reason != expected_reject {
+            violations.push(format!(
+                "state[{index}]: runtime-attestation proof row reject reason disagrees with row facts"
+            ));
+        }
+        if state.accepted != expected_accepted || (state.outcome == "Accepted") != expected_accepted
+        {
+            violations.push(format!(
+                "state[{index}]: runtime-attestation proof row outcome disagrees with row facts"
+            ));
+        }
+        if runtime_attestation_proof_row_actual_accepts(state) != expected_accepted {
+            violations.push(format!(
+                "state[{index}]: runtime-attestation proof row constructor disagrees with model"
+            ));
+        }
+        if state.accepted
+            && !matches!(
+                state.runtime_identity_shape.as_str(),
+                "ProcessOnly" | "ContainerOnly" | "ProcessAndContainer"
+            )
+        {
+            violations.push(format!(
+                "state[{index}]: accepted runtime-attestation proof row lacks runtime identity"
+            ));
+        }
+        if state.accepted
+            && !matches!(
+                state.provider_run_shape.as_str(),
+                "ObservedProviderRun" | "LegacyMissingProviderRun"
+            )
+        {
+            violations.push(format!(
+                "state[{index}]: accepted runtime-attestation proof row has invalid provider run identity"
+            ));
+        }
+        if state.accepted && state.timestamp_shape != "MonotonicRuntimeSpan" {
+            violations.push(format!(
+                "state[{index}]: accepted runtime-attestation proof row has invalid timestamps"
+            ));
+        }
+        if state.accepted
+            && (!state.session_token_valid
+                || !state.agent_principal_valid
+                || !state.agent_instance_valid
+                || !state.role_valid
+                || !state.provider_valid
+                || !state.model_valid
+                || !state.transcript_valid)
+        {
+            violations.push(format!(
+                "state[{index}]: accepted runtime-attestation proof row has invalid typed fields"
+            ));
+        }
+        if state.scheduled_work {
+            violations.push(format!(
+                "state[{index}]: runtime-attestation proof row parsing scheduled work"
+            ));
+        }
+        if state.mutation_authority_granted {
+            violations.push(format!(
+                "state[{index}]: runtime-attestation proof row parsing granted mutation authority"
+            ));
+        }
+    }
+    violations
+}
+
 fn record_lifecycle_session_state(state: &RecordLifecycleShapeState) -> SessionState {
     match state.session_lifecycle.as_str() {
         "Active" => SessionState::Active,
@@ -10740,6 +11088,12 @@ fn review_claim_reclaim_changes_requested_trace() -> ReviewClaimReclaimItfTrace 
 }
 
 #[fixture]
+fn review_followup_repair_shape_trace() -> ReviewFollowupRepairShapeItfTrace {
+    serde_json::from_str(COVEY_REVIEW_FOLLOWUP_REPAIR_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
 fn core_lifecycle_trace() -> CoreItfTrace {
     serde_json::from_str(COVEY_CORE_LIFECYCLE_ITF).expect("fixture must be valid ITF JSON")
 }
@@ -10826,6 +11180,12 @@ fn apply_verification_proof_row_shape_trace() -> ApplyVerificationProofRowShapeI
 #[fixture]
 fn session_proof_row_shape_trace() -> SessionProofRowShapeItfTrace {
     serde_json::from_str(COVEY_SESSION_PROOF_ROW_SHAPE_ITF).expect("fixture must be valid ITF JSON")
+}
+
+#[fixture]
+fn runtime_attestation_proof_row_shape_trace() -> RuntimeAttestationProofRowShapeItfTrace {
+    serde_json::from_str(COVEY_RUNTIME_ATTESTATION_PROOF_ROW_SHAPE_ITF)
+        .expect("fixture must be valid ITF JSON")
 }
 
 #[fixture]
@@ -11141,6 +11501,45 @@ fn covey_replays_quint_review_claim_reclaim_changes_requested_itf_trace(
     );
     assert_eq!(
         replay_review_claim_reclaim_trace(&review_claim_reclaim_changes_requested_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_review_followup_repair_shape_itf_trace(
+    review_followup_repair_shape_trace: ReviewFollowupRepairShapeItfTrace,
+) {
+    assert!(
+        !review_followup_repair_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    assert!(
+        review_followup_repair_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ValidMissingChangesRequested"
+                && state.s.created_count == 1
+                && state.s.followup_available),
+        "fixture should cover repair creating available changes-requested follow-up work"
+    );
+    assert!(
+        review_followup_repair_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ExistingChangesRequestedFollowup"
+                && state.s.created_count == 0),
+        "fixture should cover duplicate repair avoidance"
+    );
+    assert!(
+        review_followup_repair_shape_trace
+            .states
+            .iter()
+            .any(|state| state.s.case == "ChangesRequestedMissingFindings"
+                && state.s.result == "RepairRejected"),
+        "fixture should cover missing findings fail-closed repair"
+    );
+    assert_eq!(
+        replay_review_followup_repair_shape_trace(&review_followup_repair_shape_trace),
         Vec::<String>::new()
     );
 }
@@ -11669,6 +12068,64 @@ fn covey_replays_quint_session_proof_row_shape_itf_trace(
     }
     assert_eq!(
         replay_session_proof_row_shape_trace(&session_proof_row_shape_trace),
+        Vec::<String>::new()
+    );
+}
+
+#[rstest]
+fn covey_replays_quint_runtime_attestation_proof_row_shape_itf_trace(
+    runtime_attestation_proof_row_shape_trace: RuntimeAttestationProofRowShapeItfTrace,
+) {
+    assert!(
+        !runtime_attestation_proof_row_shape_trace.states.is_empty(),
+        "fixture should contain at least one state"
+    );
+    for expected in [
+        "ValidProcessObservedProviderRun",
+        "ValidContainerLegacyMissingProviderRun",
+        "ValidProcessAndContainerObservedProviderRun",
+    ] {
+        assert!(
+            runtime_attestation_proof_row_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && state.s.accepted),
+            "fixture should cover accepted {expected}"
+        );
+    }
+    for expected in [
+        "MissingRuntimeIdentity",
+        "InvalidProcessId",
+        "InvalidContainerId",
+        "PartialProviderRunId",
+        "PartialProviderRunIssuer",
+        "InvalidProviderRunId",
+        "InvalidProviderRunIssuer",
+        "NegativeStartedAt",
+        "NegativeEndedAt",
+        "NegativeRecordedAt",
+        "EndedBeforeStarted",
+        "RecordedBeforeEnded",
+        "InvalidSessionToken",
+        "InvalidAgentPrincipal",
+        "InvalidAgentInstance",
+        "InvalidRole",
+        "InvalidProvider",
+        "InvalidModel",
+        "InvalidTranscript",
+    ] {
+        assert!(
+            runtime_attestation_proof_row_shape_trace
+                .states
+                .iter()
+                .any(|state| state.s.case == expected && !state.s.accepted),
+            "fixture should cover rejected {expected}"
+        );
+    }
+    assert_eq!(
+        replay_runtime_attestation_proof_row_shape_trace(
+            &runtime_attestation_proof_row_shape_trace
+        ),
         Vec::<String>::new()
     );
 }
@@ -13682,6 +14139,51 @@ fn covey_review_claim_reclaim_replay_reports_followup_binding_counterexample() {
 }
 
 #[rstest]
+fn covey_review_followup_repair_shape_replay_reports_counterexample_shape() {
+    let state = ReviewFollowupRepairShapeState {
+        case_index: 1,
+        case: "ApprovedReview".to_owned(),
+        review_lifecycle: "Decided".to_owned(),
+        verdict: "Approve".to_owned(),
+        source_kind: "Work".to_owned(),
+        source_state: "Approved".to_owned(),
+        existing_followup: true,
+        findings_present: false,
+        selected_for_repair: true,
+        result: "CreatedFollowup".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        created_count: 2,
+        followup_available: false,
+        followup_review_bound: true,
+        followup_source_subtask_bound: false,
+        followup_source_artifact_bound: true,
+        followup_findings_bound: false,
+        followup_created_by_reviewer: false,
+        claim_created: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = ReviewFollowupRepairShapeItfTrace {
+        states: vec![ReviewFollowupRepairShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_review_followup_repair_shape_trace(&trace),
+        vec![
+            "state[0]: review follow-up repair selector disagrees with row facts",
+            "state[0]: review follow-up repair created duplicate follow-ups",
+            "state[0]: review follow-up repair created work for an unselected row",
+            "state[0]: review follow-up repair duplicated an existing follow-up",
+            "state[0]: review follow-up repair created work for non-changes-requested verdict",
+            "state[0]: review follow-up repair created unavailable follow-up work",
+            "state[0]: review follow-up repair created unbound follow-up work",
+            "state[0]: review follow-up repair claimed executor work",
+            "state[0]: review follow-up repair granted mutation authority",
+        ]
+    );
+}
+
+#[rstest]
 fn covey_ready_queue_claim_selection_replay_reports_counterexample_shape() {
     let state = ReadyQueueClaimSelectionState {
         case_index: 1,
@@ -14150,6 +14652,44 @@ fn covey_session_proof_row_shape_replay_reports_counterexample_shape() {
             "state[0]: accepted session proof row has unknown role or state value",
             "state[0]: session proof row parsing scheduled work",
             "state[0]: session proof row parsing granted mutation authority",
+        ]
+    );
+}
+
+#[rstest]
+fn covey_runtime_attestation_proof_row_shape_replay_reports_counterexample_shape() {
+    let state = RuntimeAttestationProofRowShapeState {
+        case_index: 4,
+        case: "MissingRuntimeIdentity".to_owned(),
+        runtime_identity_shape: "MissingRuntimeIdentityShape".to_owned(),
+        provider_run_shape: "ObservedProviderRun".to_owned(),
+        timestamp_shape: "MonotonicRuntimeSpan".to_owned(),
+        session_token_valid: true,
+        agent_principal_valid: true,
+        agent_instance_valid: true,
+        role_valid: true,
+        provider_valid: true,
+        model_valid: true,
+        transcript_valid: true,
+        outcome: "Accepted".to_owned(),
+        reject_reason: "NoReject".to_owned(),
+        accepted: true,
+        scheduled_work: true,
+        mutation_authority_granted: true,
+        evaluated: true,
+    };
+    let trace = RuntimeAttestationProofRowShapeItfTrace {
+        states: vec![RuntimeAttestationProofRowShapeItfState { s: state }],
+    };
+
+    assert_eq!(
+        replay_runtime_attestation_proof_row_shape_trace(&trace),
+        vec![
+            "state[0]: runtime-attestation proof row reject reason disagrees with row facts",
+            "state[0]: runtime-attestation proof row outcome disagrees with row facts",
+            "state[0]: accepted runtime-attestation proof row lacks runtime identity",
+            "state[0]: runtime-attestation proof row parsing scheduled work",
+            "state[0]: runtime-attestation proof row parsing granted mutation authority",
         ]
     );
 }
