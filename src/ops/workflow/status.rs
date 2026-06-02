@@ -232,11 +232,21 @@ fn claimable_subtask_count_tx(
                           WHERE d.subtask_id = s.subtask_id
                             AND dep.state NOT IN (?6, ?7, ?8, ?9)
                             AND NOT EXISTS (
+                                WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    WHERE f.source_subtask_id = dep.subtask_id
+                                    UNION
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    JOIN followup_chain chain
+                                      ON f.source_subtask_id = chain.followup_subtask_id
+                                )
                                 SELECT 1
-                                FROM review_followup_subtasks f
-                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
-                                WHERE f.source_subtask_id = dep.subtask_id
-                                  AND followup.state IN (?6, ?7, ?8, ?9)
+                                FROM followup_chain chain
+                                JOIN subtasks followup
+                                  ON followup.subtask_id = chain.followup_subtask_id
+                                WHERE followup.state IN (?6, ?7, ?8, ?9)
                             )
                       )
                     "#,
@@ -269,11 +279,21 @@ fn claimable_subtask_count_tx(
                           WHERE d.subtask_id = s.subtask_id
                             AND dep.state NOT IN (?5, ?6, ?7, ?8)
                             AND NOT EXISTS (
+                                WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    WHERE f.source_subtask_id = dep.subtask_id
+                                    UNION
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    JOIN followup_chain chain
+                                      ON f.source_subtask_id = chain.followup_subtask_id
+                                )
                                 SELECT 1
-                                FROM review_followup_subtasks f
-                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
-                                WHERE f.source_subtask_id = dep.subtask_id
-                                  AND followup.state IN (?5, ?6, ?7, ?8)
+                                FROM followup_chain chain
+                                JOIN subtasks followup
+                                  ON followup.subtask_id = chain.followup_subtask_id
+                                WHERE followup.state IN (?5, ?6, ?7, ?8)
                             )
                       )
                     "#,

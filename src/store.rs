@@ -290,11 +290,21 @@ pub(crate) fn ordered_claim_candidate(
                           WHERE d.subtask_id = s.subtask_id
                             AND dep.state NOT IN (?5, ?6, ?7, ?8)
                             AND NOT EXISTS (
+                                WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    WHERE f.source_subtask_id = dep.subtask_id
+                                    UNION
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    JOIN followup_chain chain
+                                      ON f.source_subtask_id = chain.followup_subtask_id
+                                )
                                 SELECT 1
-                                FROM review_followup_subtasks f
-                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
-                                WHERE f.source_subtask_id = dep.subtask_id
-                                  AND followup.state IN (?5, ?6, ?7, ?8)
+                                FROM followup_chain chain
+                                JOIN subtasks followup
+                                  ON followup.subtask_id = chain.followup_subtask_id
+                                WHERE followup.state IN (?5, ?6, ?7, ?8)
                             )
                       )
                     ORDER BY
@@ -338,11 +348,21 @@ pub(crate) fn ordered_claim_candidate(
                           WHERE d.subtask_id = s.subtask_id
                             AND dep.state NOT IN (?6, ?7, ?8, ?9)
                             AND NOT EXISTS (
+                                WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    WHERE f.source_subtask_id = dep.subtask_id
+                                    UNION
+                                    SELECT f.followup_subtask_id
+                                    FROM review_followup_subtasks f
+                                    JOIN followup_chain chain
+                                      ON f.source_subtask_id = chain.followup_subtask_id
+                                )
                                 SELECT 1
-                                FROM review_followup_subtasks f
-                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
-                                WHERE f.source_subtask_id = dep.subtask_id
-                                  AND followup.state IN (?6, ?7, ?8, ?9)
+                                FROM followup_chain chain
+                                JOIN subtasks followup
+                                  ON followup.subtask_id = chain.followup_subtask_id
+                                WHERE followup.state IN (?6, ?7, ?8, ?9)
                             )
                       )
                     ORDER BY
@@ -455,11 +475,21 @@ pub(crate) fn subtask_dependencies_satisfied(
             WHERE d.subtask_id = ?1
               AND dep.state NOT IN (?2, ?3, ?4, ?5)
               AND NOT EXISTS (
+                  WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+                      SELECT f.followup_subtask_id
+                      FROM review_followup_subtasks f
+                      WHERE f.source_subtask_id = dep.subtask_id
+                      UNION
+                      SELECT f.followup_subtask_id
+                      FROM review_followup_subtasks f
+                      JOIN followup_chain chain
+                        ON f.source_subtask_id = chain.followup_subtask_id
+                  )
                   SELECT 1
-                  FROM review_followup_subtasks f
-                  JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
-                  WHERE f.source_subtask_id = dep.subtask_id
-                    AND followup.state IN (?2, ?3, ?4, ?5)
+                  FROM followup_chain chain
+                  JOIN subtasks followup
+                    ON followup.subtask_id = chain.followup_subtask_id
+                  WHERE followup.state IN (?2, ?3, ?4, ?5)
               )
             LIMIT 1
         )

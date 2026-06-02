@@ -9,12 +9,13 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
-        LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, ObjectType, QueueId,
-        ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
+        LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
+        QueueId, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
         RecordApplyVerificationReq, RecordLandingReceiptReq, ReviewId, ReviewState, ReviewVerdict,
-        RuntimeAttestation, Session, SessionRole, SessionToken, SettlementTarget, SubtaskState,
-        SupersedeQueueItemReq, VerifyLandingAuthorizationReq, ready_queue_state_name,
-        review_state_name, review_verdict_name, subtask_state_name,
+        RuntimeAttestation, Session, SessionRole, SessionToken, SettlementTarget, SubtaskKind,
+        SubtaskState, SupersedeQueueItemReq, VerifyLandingAuthorizationReq, meta_task_state_name,
+        ready_queue_state_name, review_state_name, review_verdict_name, subtask_kind_name,
+        subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -219,6 +220,7 @@ impl Covey {
                         req.lease_duration_ms.get(),
                     )?;
                     requeue_stale_ready_queue_claims(tx, lease_now, now)?;
+                    enqueue_orphaned_ready_for_apply_items_tx(tx, &req.session_token, now)?;
                     while let Some(queue_id) = ordered_ready_queue_candidate(tx)? {
                         if let Some(claim) = claim_ready_queue_item(
                             tx,
@@ -850,6 +852,96 @@ where
         queue_id: queue_id.clone(),
         reason: format!("invalid landing authorization value: {err}"),
     })
+}
+
+fn enqueue_orphaned_ready_for_apply_items_tx(
+    tx: &Transaction<'_>,
+    session_token: &SessionToken,
+    now: i64,
+) -> Result<usize> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT s.subtask_id, s.artifact_digest
+        FROM subtasks s
+        JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+        WHERE s.kind = ?1
+          AND s.state = ?2
+          AND s.artifact_digest IS NOT NULL
+          AND m.state NOT IN (?3, ?4)
+          AND EXISTS (
+              SELECT 1
+              FROM reviews r
+              WHERE r.subtask_id = s.subtask_id
+                AND r.artifact_digest = s.artifact_digest
+                AND r.state = ?5
+                AND r.verdict = ?6
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ready_queue q
+              WHERE q.subtask_id = s.subtask_id
+                AND q.artifact_digest = s.artifact_digest
+                AND q.state IN (?7, ?8, ?9)
+          )
+        ORDER BY s.updated_at ASC, s.created_at ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            subtask_kind_name(SubtaskKind::Work),
+            subtask_state_name(SubtaskState::ReadyForApply),
+            meta_task_state_name(MetaTaskState::Completed),
+            meta_task_state_name(MetaTaskState::Cancelled),
+            review_state_name(ReviewState::Decided),
+            review_verdict_name(ReviewVerdict::Approve),
+            ready_queue_state_name(ReadyQueueState::Queued),
+            ready_queue_state_name(ReadyQueueState::InFlight),
+            ready_queue_state_name(ReadyQueueState::Applied),
+        ],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let orphaned = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut enqueued = 0;
+    for (subtask_id, artifact_digest) in orphaned {
+        let queue_id = crate::model::make_id("queue");
+        tx.execute(
+            r#"
+            INSERT INTO ready_queue (
+                queue_id, artifact_digest, subtask_id, settlement_target, state,
+                claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
+                enqueued_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?6)
+            "#,
+            params![
+                &queue_id,
+                &artifact_digest,
+                &subtask_id,
+                settlement_target_name(SettlementTarget::Canonical),
+                ready_queue_state_name(ReadyQueueState::Queued),
+                now,
+            ],
+        )?;
+        let enqueue_event = EnqueueForApplyReq::try_from_raw_parts(
+            session_token.as_str(),
+            artifact_digest.clone(),
+            subtask_id.clone(),
+            SettlementTarget::Canonical,
+            format!("auto-requeue-ready-for-apply:{subtask_id}:{artifact_digest}"),
+        )?;
+        append_session_event(
+            tx,
+            EventType::ReadyQueueEnqueued,
+            ObjectType::ReadyQueue,
+            &queue_id,
+            session_token.as_str(),
+            &enqueue_event,
+            now,
+        )?;
+        enqueued += 1;
+    }
+    Ok(enqueued)
 }
 
 struct LiveApplyGateEvidence {

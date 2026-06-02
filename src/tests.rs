@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use crate::{
-    Clock, Covey, ManualClock, RegisterSessionReq, Result, SessionRole, SubmitMetaTaskReq,
+    ClaimNextReq, ClaimReadyQueueReq, Clock, Covey, ManualClock, RegisterSessionReq, Result,
+    SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -165,6 +166,217 @@ fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_bl
         .claimable_subtask_availability(Some("meta-availability"))
         .expect("read scoped availability");
     assert_eq!(scoped, availability);
+}
+
+#[test]
+fn recursive_review_followup_chain_satisfies_work_dependencies() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let source_digest = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let first_repair_digest =
+        "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let second_repair_digest =
+        "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-exec', 'exec', 'exec-1', 'executor', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert executor session");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch', 'orch-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-chain', 'chain', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        for (subtask_id, state, priority, updated_at) in [
+            ("source-work", "available", 1, 1),
+            ("first-repair", "available", 1, 2),
+            ("second-repair", "available", 1, 3),
+            ("dependent-work", "available", 2, 4),
+        ] {
+            conn.execute(
+                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+                 VALUES (?1, 'meta-chain', ?1, 'work', NULL, NULL, ?2, NULL, NULL, ?3, ?4, ?4)",
+                params![subtask_id, state, priority, updated_at],
+            )
+            .expect("insert work subtask");
+            conn.execute(
+                "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES (?1, 1)",
+                params![subtask_id],
+            )
+            .expect("insert fence counter");
+        }
+        for (subtask_id, artifact_digest) in [
+            ("source-work", source_digest),
+            ("first-repair", first_repair_digest),
+            ("second-repair", second_repair_digest),
+        ] {
+            conn.execute(
+                "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+                 VALUES (?1, 'patch_bundle', 'base', ?2, 'session-orch', ?2 || '.json', ?1, 1)",
+                params![artifact_digest, subtask_id],
+            )
+            .expect("insert artifact");
+            conn.execute(
+                "UPDATE subtasks SET state = CASE WHEN subtask_id = 'second-repair' THEN 'applied' ELSE 'changes_requested' END, artifact_digest = ?1 WHERE subtask_id = ?2",
+                params![artifact_digest, subtask_id],
+            )
+            .expect("publish work artifact state");
+        }
+        for (review_id, review_subtask_id, source_subtask_id, artifact_digest) in [
+            (
+                "review-source",
+                "review-source-subtask",
+                "source-work",
+                source_digest,
+            ),
+            (
+                "review-first-repair",
+                "review-first-repair-subtask",
+                "first-repair",
+                first_repair_digest,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+                 VALUES (?1, 'meta-chain', ?1, 'review', ?2, ?3, 'decided', NULL, NULL, 1, 1, 1)",
+                params![review_subtask_id, source_subtask_id, artifact_digest],
+            )
+            .expect("insert review subtask");
+            conn.execute(
+                "INSERT INTO reviews (review_id, subtask_id, artifact_digest, review_subtask_id, reviewer_session, state, verdict, findings_digest, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 'session-orch', 'decided', 'changes_requested', ?3, 1, 1)",
+                params![review_id, source_subtask_id, artifact_digest, review_subtask_id],
+            )
+            .expect("insert decided review");
+        }
+        conn.execute(
+            "INSERT INTO subtask_dependencies (subtask_id, depends_on_subtask_id, source_ref, created_at)
+             VALUES ('dependent-work', 'source-work', 'test', 4)",
+            [],
+        )
+        .expect("insert dependency edge");
+        conn.execute(
+            "INSERT INTO review_followup_subtasks (review_id, source_subtask_id, source_artifact_digest, findings_digest, followup_subtask_id, created_by_session, created_at)
+             VALUES ('review-source', 'source-work', ?1, ?1, 'first-repair', 'session-orch', 2)",
+            params![source_digest],
+        )
+        .expect("insert first follow-up edge");
+        conn.execute(
+            "INSERT INTO review_followup_subtasks (review_id, source_subtask_id, source_artifact_digest, findings_digest, followup_subtask_id, created_by_session, created_at)
+             VALUES ('review-first-repair', 'first-repair', ?1, ?1, 'second-repair', 'session-orch', 3)",
+            params![first_repair_digest],
+        )
+        .expect("insert second follow-up edge");
+    }
+
+    let availability = covey
+        .claimable_subtask_availability(Some("meta-chain"))
+        .expect("read scoped availability");
+    assert_eq!(availability.executor_claimable_count(), 1);
+
+    let claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts_scoped(
+                "session-exec",
+                30_000,
+                Some("meta-chain".to_owned()),
+                "claim-dependent-work",
+            )
+            .expect("valid claim-next request"),
+        )
+        .expect("claim-next succeeds")
+        .expect("dependent work should be claimable");
+    assert_eq!(claim.subtask_id.as_str(), "dependent-work");
+}
+
+#[test]
+fn apply_gate_requeues_orphaned_ready_for_apply_item_before_claiming() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let digest = "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-apply', 'apply', 'apply-1', 'apply_gate', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert apply-gate session");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch', 'orch-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-apply', 'apply', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('ready-work', 'meta-apply', 'ready work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 1, 1)",
+            [],
+        )
+        .expect("insert ready work");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES (?1, 'patch_bundle', 'base', 'ready-work', 'session-orch', 'artifact.json', ?1, 1)",
+            params![digest],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-subtask', 'meta-apply', 'review ready work', 'review', 'ready-work', ?1, 'decided', NULL, NULL, 1, 1, 1)",
+            params![digest],
+        )
+        .expect("insert review subtask");
+        conn.execute(
+            "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = ?1 WHERE subtask_id = 'ready-work'",
+            params![digest],
+        )
+        .expect("mark ready work ready for apply");
+        conn.execute(
+            "INSERT INTO reviews (review_id, subtask_id, artifact_digest, review_subtask_id, reviewer_session, state, verdict, findings_digest, created_at, updated_at)
+             VALUES ('review-ready', 'ready-work', ?1, 'review-subtask', 'session-orch', 'decided', 'approve', ?1, 1, 1)",
+            params![digest],
+        )
+        .expect("insert approved review");
+        conn.execute(
+            "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
+             VALUES ('queue-old', ?1, 'ready-work', 'canonical', 'superseded', NULL, NULL, NULL, 1, 2)",
+            params![digest],
+        )
+        .expect("insert superseded queue row");
+    }
+
+    let before = covey.ready_queue_metrics().expect("read queue metrics");
+    assert_eq!(before.queued_count(), 0);
+
+    let claim = covey
+        .claim_next_ready_queue_item(
+            ClaimReadyQueueReq::try_from_raw_parts(
+                "session-apply",
+                30_000,
+                "claim-orphaned-ready-for-apply",
+            )
+            .expect("valid ready queue claim request"),
+        )
+        .expect("claim ready queue succeeds")
+        .expect("orphaned ready-for-apply item should be requeued and claimed");
+    assert_eq!(claim.subtask_id.as_str(), "ready-work");
+    assert_ne!(claim.queue_id.as_str(), "queue-old");
 }
 
 #[test]
