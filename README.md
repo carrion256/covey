@@ -233,8 +233,10 @@ compiled mission packet set under `openspec/changes/<change-id>/mission/`.
 The importer reads `proposal.md`, `design.md`, `tasks.md`, `specs/*/spec.md`, and the Better
 Droid mission artifacts: `mission.json`, `traceability.json`, `validation.json`,
 `path-policy.json`, `review-rubric.json`, `assumptions.json`, and `compile-report.json`.
-`compile-report.json` must be `ready`, `import_ready: true`, and bind source, artifact, and
-compiled task digests.
+`compile-report.json` must be `status: covey_import_ready`, `import_ready: true`, and
+`readiness.covey_import_ready: true`, and it must bind source, artifact, and compiled task
+digests. Planning-only packets with `status: planning_ready` are valid planning input but are
+not importable live Covey work.
 
 ## Project Standard
 

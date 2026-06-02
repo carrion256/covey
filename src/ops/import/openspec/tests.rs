@@ -208,7 +208,7 @@ fn openspec_mission_packet_loader_rejects_missing_blocked_and_stale_artifacts() 
         blocked,
         Err(CoveyError::InvalidSourceSchema { detail, .. })
             if detail == "compile-report import_ready must be true"
-                || detail == "status must be ready"
+                || detail == "status must be covey_import_ready"
     ));
 
     compile_better_droid_change(tmp.path(), "blocked-import");
@@ -362,6 +362,25 @@ fn openspec_mission_packet_loader_rejects_corrupt_compiled_artifact_shapes() {
         tmp.path(),
         "blocker-packet",
         "compile-report contains blockers",
+    );
+
+    let roadmap_dir = compiled_mission_dir(tmp.path(), "roadmap-packet");
+    mutate_compile_report(&roadmap_dir, |report| {
+        report["planning_class"] = Value::String("roadmap".to_owned());
+        report["status"] = Value::String("blocked".to_owned());
+        report["import_ready"] = Value::Bool(false);
+        report["blockers"] = serde_json::json!([{
+            "id": "roadmap_not_importable",
+            "source_path": "openspec/changes/roadmap-packet/.openspec.yaml",
+            "task_id": null,
+            "scenario_id": null,
+            "detail": "planning_class=roadmap is planning-only and cannot be imported into Covey"
+        }]);
+    });
+    assert_invalid_source_detail(
+        tmp.path(),
+        "roadmap-packet",
+        "planning_class must be work_packet",
     );
 
     let missing_created_dir = compiled_mission_dir(tmp.path(), "missing-created-packet");
@@ -577,13 +596,14 @@ fn seed_better_droid_change(root: &Path, change_id: &str) {
   - **Type:** implementation
   - **Purpose:** Exercise compiled packet import for SCN-TEST-001 and REQ-TEST.
   - **Dependencies:** none.
-  - **Allowed Read Paths:** `openspec/changes/**`.
-  - **Allowed Write Paths:** `covey/src/ops/import/openspec/source.rs`.
-  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`.
+  - **Allowed Read Paths:** `openspec/changes/**`
+  - **Allowed Write Paths:** `covey/src/ops/import/openspec/source.rs`
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Acceptance Criteria:** Compiled packet imports.
   - **Validation / Evidence:**
     - **Command / Action:** `cargo test openspec_mission_packet --lib`
     - **Expected Exit Code / Observation:** exits 0.
+    - **Required Evidence:** stdout, exit code, and changed-file list outside openspec/**.
   - **Traceability Refs:** REQ-TEST, SCN-TEST-001, VAL-TEST-001.
   - **Stale If:** source changes.
 "#,

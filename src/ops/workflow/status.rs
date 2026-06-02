@@ -34,12 +34,14 @@ impl Covey {
                 .transpose()?;
             let reviews = load_reviews_for_subtask_tx(tx, subtask_id)?;
             let ready_queue = load_queue_items_for_subtask_tx(tx, subtask_id)?;
-            SubtaskStatus::new(
+            let landing_receipt_recorded = landing_receipt_exists_for_subtask_tx(tx, subtask_id)?;
+            SubtaskStatus::new_with_landing_receipt(
                 SubtaskView::try_from(subtask)?,
                 claim,
                 artifact,
                 reviews,
                 ready_queue,
+                landing_receipt_recorded,
             )
             .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
         });
@@ -185,6 +187,25 @@ impl Covey {
         );
         result
     }
+}
+
+fn landing_receipt_exists_for_subtask_tx(
+    tx: &rusqlite::Transaction<'_>,
+    subtask_id: &str,
+) -> Result<bool> {
+    tx.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM landing_receipts receipt
+            JOIN ready_queue queue ON queue.queue_id = receipt.queue_id
+            WHERE queue.subtask_id = ?1
+        )
+        "#,
+        params![subtask_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(Into::into)
 }
 
 fn claimable_subtask_count_tx(

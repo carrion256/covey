@@ -27,10 +27,10 @@ use crate::{
         ReviewVerdictArg, SessionCommand, SubtaskCommand,
     },
     render_support::{
-        ArtifactPublishAck, ClaimFenceAck, ConflictResolutionAck, ImportBdV1Ack, ImportOpenSpecAck,
-        MetaTaskAck, MetaTaskRef, QueueClaimAck, QueueOpAck, QueueRef, Rendered, ReservationAck,
-        ReservationRef, ReviewDecisionAck, ReviewDecisionAckVerdict, ReviewRef, SessionTokenAck,
-        SubtaskRef,
+        ArtifactPublishAck, ClaimFenceAck, ConflictResolutionAck, CoveyImportProductImpactAck,
+        CoveyImportReadinessAck, ImportBdV1Ack, ImportOpenSpecAck, MetaTaskAck, MetaTaskRef,
+        QueueClaimAck, QueueOpAck, QueueRef, Rendered, ReservationAck, ReservationRef,
+        ReviewDecisionAck, ReviewDecisionAckVerdict, ReviewRef, SessionTokenAck, SubtaskRef,
     },
 };
 

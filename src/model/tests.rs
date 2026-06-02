@@ -1,5 +1,5 @@
 use super::{
-    AbandonSubtaskReq, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
+    AbandonSubtaskReq, Artifact, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
     ClaimNextReq, ClaimReadyQueueReq, ClaimResult, ClaimState, ClaimSubtaskReq, Conflict,
     ConflictKind, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
     EnqueueForApplyReq, Event, EventPayload, EventType, ExitSessionReq, ExpiredCountPayload,
@@ -1242,7 +1242,50 @@ fn subtask_status_preserves_flat_claim_and_artifact_fields() {
         Some("blake3:artifact")
     );
     let serialized = serde_json::to_value(&status).expect("status must serialize");
-    assert_eq!(serialized, raw);
+    let mut expected = raw;
+    expected["readiness"] = json!({
+        "planning_ready": false,
+        "covey_imported": true,
+        "execution_ready": false,
+        "review_approved": false,
+        "apply_queued": false,
+        "apply_authorized": false,
+        "landed": false,
+        "shipped_verified": false
+    });
+    assert_eq!(serialized, expected);
+}
+
+#[test]
+fn subtask_status_landed_requires_explicit_landing_receipt_projection() {
+    let raw = claimed_artifact_subtask_status_json("subtask-1", "subtask-1");
+    let subtask: SubtaskView =
+        serde_json::from_value(raw["subtask"].clone()).expect("valid subtask view");
+    let claim: Claim = serde_json::from_value(raw["claim"].clone()).expect("valid claim");
+    let artifact: Artifact =
+        serde_json::from_value(raw["artifact"].clone()).expect("valid artifact");
+
+    let without_receipt = SubtaskStatus::new_with_landing_receipt(
+        subtask.clone(),
+        Some(claim.clone()),
+        Some(artifact.clone()),
+        Vec::new(),
+        Vec::new(),
+        false,
+    )
+    .expect("valid status without receipt");
+    assert!(!without_receipt.readiness().landed);
+
+    let with_receipt = SubtaskStatus::new_with_landing_receipt(
+        subtask,
+        Some(claim),
+        Some(artifact),
+        Vec::new(),
+        Vec::new(),
+        true,
+    )
+    .expect("valid status with receipt");
+    assert!(with_receipt.readiness().landed);
 }
 
 #[test]

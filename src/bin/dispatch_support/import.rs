@@ -49,6 +49,13 @@ pub(super) fn dispatch_import(store: &Covey, command: ImportCommand) -> covey::R
                     operation: "import_openspec",
                     change_id,
                     meta_task_id,
+                    status: if dry_run {
+                        "covey_import_ready"
+                    } else {
+                        "covey_imported"
+                    },
+                    readiness: CoveyImportReadinessAck::for_openspec_import(dry_run),
+                    product_impact: CoveyImportProductImpactAck::for_openspec_import(dry_run),
                     dry_run,
                     created,
                     updated,

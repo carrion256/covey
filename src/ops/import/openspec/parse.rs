@@ -54,6 +54,7 @@ pub(super) fn parse_openspec_tasks(
             task_digest(task_id, title),
             None,
             Vec::new(),
+            Vec::new(),
         )?);
     }
 

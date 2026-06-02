@@ -1669,16 +1669,17 @@ fn seed_openspec_change(root: &Path, change_id: &str, task_lines: &[&str]) {
                 r#"- [ ] {task_id} {title}
   - **Type:** implementation
   - **Purpose:** Exercise compiled import behavior for REQ-TEST and {scenario_id}.
-  - **Dependencies:** none.
-  - **Allowed Read Paths:** `openspec/changes/**`.
-  - **Allowed Write Paths:** `covey/src/ops/import/openspec/source.rs`.
-  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`.
+  - **Dependencies:** none
+  - **Allowed Read Paths:** `openspec/changes/**`
+  - **Allowed Write Paths:** `covey/src/ops/import/openspec/source.rs`
+  - **Forbidden Paths:** `authority/**`, `contracts/imported/**`, `.git/**`
   - **Acceptance Criteria:** {title} imports as a compiled task packet.
   - **Validation / Evidence:**
     - **Command / Action:** `cargo test import_openspec --test cli_integration`
-    - **Expected Exit Code / Observation:** exits 0.
-  - **Traceability Refs:** REQ-TEST, {scenario_id}, VAL-TEST-001.
-  - **Stale If:** source changes.
+    - **Expected Exit Code / Observation:** exits 0
+    - **Required Evidence:** stdout, exit code, and changed-file list outside openspec/**
+  - **Traceability Refs:** REQ-TEST, {scenario_id}, VAL-TEST-001
+  - **Stale If:** source changes
 "#
             )
         })
@@ -1710,12 +1711,17 @@ fn seed_openspec_change(root: &Path, change_id: &str, task_lines: &[&str]) {
         ),
     )
     .expect("spec");
-    compile_change(&CompileOptions {
+    let report = compile_change(&CompileOptions {
         project_root: root.to_path_buf(),
         change_id: change_id.to_owned(),
         output_dir: None,
     })
     .expect("compile OpenSpec fixture");
+    assert!(
+        report.import_ready,
+        "seeded OpenSpec fixture must compile as Covey-import-ready: {:?}",
+        report.blockers
+    );
 }
 
 fn parse_seed_task_line(line: &str) -> (&str, &str) {
@@ -1770,6 +1776,23 @@ fn import_openspec_dry_run_reports_plan_without_events() {
     assert_eq!(result["operation"], "import_openspec");
     assert_eq!(result["change_id"], "openspec-covey-importer");
     assert_eq!(result["meta_task_id"], "openspec:openspec-covey-importer");
+    assert_eq!(result["status"], "covey_import_ready");
+    assert_eq!(result["readiness"]["planning_ready"], true);
+    assert_eq!(result["readiness"]["covey_import_ready"], true);
+    assert_eq!(result["readiness"]["covey_imported"], false);
+    assert_eq!(result["readiness"]["implementation_ready"], false);
+    assert_eq!(result["readiness"]["execution_ready"], false);
+    assert_eq!(result["readiness"]["review_approved"], false);
+    assert_eq!(result["readiness"]["apply_queued"], false);
+    assert_eq!(result["readiness"]["apply_authorized"], false);
+    assert_eq!(result["readiness"]["landed"], false);
+    assert_eq!(result["readiness"]["shipped_verified"], false);
+    assert_eq!(result["readiness"]["not_imported"], true);
+    assert_eq!(result["product_impact"]["product_files_changed"], false);
+    assert_eq!(result["product_impact"]["product_tests_run"], false);
+    assert_eq!(result["product_impact"]["covey_imported"], false);
+    assert_eq!(result["product_impact"]["apply_receipt"], false);
+    assert_eq!(result["product_impact"]["shipped_evidence"], false);
     assert_eq!(result["dry_run"], true);
     assert_eq!(result["created"], 3);
     assert_eq!(result["updated"], 0);
@@ -1869,6 +1892,20 @@ fn import_openspec_write_mode_is_idempotent_and_preserves_boundaries() {
             "--json",
         ],
     ));
+    assert_eq!(first["status"], "covey_imported");
+    assert_eq!(first["readiness"]["covey_imported"], true);
+    assert_eq!(first["readiness"]["implementation_ready"], false);
+    assert_eq!(first["readiness"]["execution_ready"], true);
+    assert_eq!(first["readiness"]["review_approved"], false);
+    assert_eq!(first["readiness"]["apply_queued"], false);
+    assert_eq!(first["readiness"]["apply_authorized"], false);
+    assert_eq!(first["readiness"]["landed"], false);
+    assert_eq!(first["readiness"]["shipped_verified"], false);
+    assert_eq!(first["product_impact"]["product_files_changed"], false);
+    assert_eq!(first["product_impact"]["product_tests_run"], false);
+    assert_eq!(first["product_impact"]["covey_imported"], true);
+    assert_eq!(first["product_impact"]["apply_receipt"], false);
+    assert_eq!(first["product_impact"]["shipped_evidence"], false);
     assert_eq!(first["created"], 3);
     assert_eq!(first["updated"], 0);
     assert_eq!(first["unchanged"], 0);

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{
     Covey,
@@ -506,9 +506,10 @@ fn create_review_followup_subtask_tx(
 ) -> Result<SubtaskId> {
     let followup_subtask_id = SubtaskId::parse(crate::model::make_id("subtask"))
         .expect("generated subtask ids are valid");
-    let title = SubtaskTitle::parse(format!(
-        "address review findings for {}",
-        source_subtask.subtask_id
+    let repair_scope = load_openspec_repair_scope_tx(tx, source_subtask.subtask_id.as_str())?;
+    let title = SubtaskTitle::parse(repair_followup_title(
+        source_subtask.subtask_id.as_str(),
+        repair_scope.as_ref(),
     ))?;
     tx.execute(
         r#"
@@ -536,8 +537,9 @@ fn create_review_followup_subtask_tx(
         r#"
         INSERT INTO review_followup_subtasks (
             review_id, source_subtask_id, source_artifact_digest, findings_digest,
-            followup_subtask_id, created_by_session, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            followup_subtask_id, created_by_session, created_at,
+            repair_source_path, repair_task_ref, repair_scenario_refs_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         "#,
         params![
             review_id,
@@ -546,10 +548,76 @@ fn create_review_followup_subtask_tx(
             findings_digest,
             followup_subtask_id.as_str(),
             created_by_session,
-            now
+            now,
+            repair_scope
+                .as_ref()
+                .map(|scope| scope.source_path.as_str()),
+            repair_scope.as_ref().map(|scope| scope.task_ref.as_str()),
+            repair_scope
+                .as_ref()
+                .map(|scope| scope.scenario_refs_json.as_str())
+                .unwrap_or("[]"),
         ],
     )?;
     Ok(followup_subtask_id)
+}
+
+struct OpenSpecRepairScope {
+    source_path: String,
+    task_ref: String,
+    scenario_refs: Vec<String>,
+    scenario_refs_json: String,
+}
+
+fn load_openspec_repair_scope_tx(
+    tx: &Transaction<'_>,
+    source_subtask_id: &str,
+) -> Result<Option<OpenSpecRepairScope>> {
+    tx.query_row(
+        r#"
+        SELECT openspec_change_id, openspec_task_id, source_path, scenario_refs_json
+        FROM openspec_subtask_scope
+        WHERE subtask_id = ?1
+        "#,
+        params![source_subtask_id],
+        |row| {
+            let change_id: String = row.get(0)?;
+            let task_id: String = row.get(1)?;
+            let source_path: String = row.get(2)?;
+            let scenario_refs_json: String = row.get(3)?;
+            let scenario_refs = serde_json::from_str::<Vec<String>>(&scenario_refs_json)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+            Ok(OpenSpecRepairScope {
+                source_path,
+                task_ref: format!("{change_id}:{task_id}"),
+                scenario_refs,
+                scenario_refs_json,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn repair_followup_title(source_subtask_id: &str, scope: Option<&OpenSpecRepairScope>) -> String {
+    let Some(scope) = scope else {
+        return format!("address review findings for {source_subtask_id}");
+    };
+    let scenario_suffix = if scope.scenario_refs.is_empty() {
+        "no scenario refs".to_owned()
+    } else {
+        scope
+            .scenario_refs
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "repair review findings for {} scenarios {}",
+        scope.task_ref, scenario_suffix
+    )
 }
 
 pub(crate) fn ensure_changes_requested_followup_blocks_tx(

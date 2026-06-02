@@ -122,6 +122,54 @@ pub(super) fn apply_openspec_import_diff_tx(
         }
     }
     upsert_subtask_dependencies_tx(tx, records, now)?;
+    upsert_openspec_subtask_scope_tx(tx, records, now)?;
+    Ok(())
+}
+
+fn upsert_openspec_subtask_scope_tx(
+    tx: &Transaction<'_>,
+    records: &[OpenSpecImportRecord],
+    now: i64,
+) -> Result<()> {
+    for record in records
+        .iter()
+        .filter(|record| record.object_type() == ObjectType::Subtask)
+        .filter(|record| record.action != ImportOpenSpecAction::Conflict)
+    {
+        let Some(openspec_task_id) = record.openspec_task_id() else {
+            continue;
+        };
+        let Some(source_path) = record.source_path() else {
+            continue;
+        };
+        let scenario_refs = record
+            .scenario_refs()
+            .iter()
+            .map(|scenario| scenario.as_str())
+            .collect::<Vec<_>>();
+        tx.execute(
+            r#"
+            INSERT INTO openspec_subtask_scope (
+                subtask_id, openspec_change_id, openspec_task_id, source_path,
+                scenario_refs_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(subtask_id) DO UPDATE SET
+                openspec_change_id = excluded.openspec_change_id,
+                openspec_task_id = excluded.openspec_task_id,
+                source_path = excluded.source_path,
+                scenario_refs_json = excluded.scenario_refs_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                record.object_id(),
+                record.provenance.openspec_change_id(),
+                openspec_task_id.as_str(),
+                source_path.to_string(),
+                serde_json::to_string(&scenario_refs)?,
+                now,
+            ],
+        )?;
+    }
     Ok(())
 }
 

@@ -143,6 +143,8 @@ pub(super) fn build_openspec_import_diff_tx(
             subtask_id.clone(),
             task.task_id.clone(),
             task.title.clone(),
+            task.source_path.clone(),
+            task.scenario_refs.clone(),
             task.dependencies.clone(),
             action,
             provenance,

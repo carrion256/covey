@@ -433,10 +433,69 @@ pub(crate) struct ImportOpenSpecAck {
     pub(crate) operation: &'static str,
     pub(crate) change_id: String,
     pub(crate) meta_task_id: String,
+    pub(crate) status: &'static str,
+    pub(crate) readiness: CoveyImportReadinessAck,
+    pub(crate) product_impact: CoveyImportProductImpactAck,
     pub(crate) dry_run: bool,
     pub(crate) created: usize,
     pub(crate) updated: usize,
     pub(crate) unchanged: usize,
     pub(crate) conflicts: Vec<covey::ImportOpenSpecConflict>,
     pub(crate) items: Vec<covey::ImportOpenSpecItemResult>,
+}
+
+/// Product-impact projection for an OpenSpec import operation.
+#[derive(Serialize)]
+pub(crate) struct CoveyImportProductImpactAck {
+    pub(crate) product_files_changed: bool,
+    pub(crate) product_tests_run: bool,
+    pub(crate) covey_imported: bool,
+    pub(crate) apply_receipt: bool,
+    pub(crate) shipped_evidence: bool,
+}
+
+impl CoveyImportProductImpactAck {
+    pub(crate) const fn for_openspec_import(dry_run: bool) -> Self {
+        Self {
+            product_files_changed: false,
+            product_tests_run: false,
+            covey_imported: !dry_run,
+            apply_receipt: false,
+            shipped_evidence: false,
+        }
+    }
+}
+
+/// Domain-specific readiness projection for an OpenSpec import operation.
+#[derive(Serialize)]
+pub(crate) struct CoveyImportReadinessAck {
+    pub(crate) planning_ready: bool,
+    pub(crate) covey_import_ready: bool,
+    pub(crate) covey_imported: bool,
+    pub(crate) implementation_ready: bool,
+    pub(crate) execution_ready: bool,
+    pub(crate) review_approved: bool,
+    pub(crate) apply_queued: bool,
+    pub(crate) apply_authorized: bool,
+    pub(crate) landed: bool,
+    pub(crate) shipped_verified: bool,
+    pub(crate) not_imported: bool,
+}
+
+impl CoveyImportReadinessAck {
+    pub(crate) const fn for_openspec_import(dry_run: bool) -> Self {
+        Self {
+            planning_ready: true,
+            covey_import_ready: true,
+            covey_imported: !dry_run,
+            implementation_ready: false,
+            execution_ready: !dry_run,
+            review_approved: false,
+            apply_queued: false,
+            apply_authorized: false,
+            landed: false,
+            shipped_verified: false,
+            not_imported: dry_run,
+        }
+    }
 }

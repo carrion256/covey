@@ -46,6 +46,7 @@ struct OpenSpecSourceTask {
     source_path: OpenSpecPath,
     task_digest: OpenSpecDigest,
     task_type: Option<OpenSpecTaskType>,
+    scenario_refs: Vec<OpenSpecScenarioRef>,
     dependencies: Vec<OpenSpecDependencyRef>,
 }
 
@@ -72,6 +73,8 @@ enum OpenSpecImportRecordObject {
         object_id: SubtaskId,
         openspec_task_id: OpenSpecTaskId,
         title: SubtaskTitle,
+        source_path: OpenSpecPath,
+        scenario_refs: Vec<OpenSpecScenarioRef>,
         dependencies: Vec<OpenSpecDependencyRef>,
     },
 }
@@ -81,6 +84,9 @@ struct OpenSpecTaskType(String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenSpecDependencyRef(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenSpecScenarioRef(String);
 
 impl OpenSpecSourceSnapshot {
     #[allow(clippy::too_many_arguments)]
@@ -143,6 +149,7 @@ impl OpenSpecSourceTask {
         source_path: String,
         task_digest: String,
         task_type: Option<String>,
+        scenario_refs: Vec<String>,
         dependencies: Vec<String>,
     ) -> Result<Self> {
         Ok(Self {
@@ -169,6 +176,10 @@ impl OpenSpecSourceTask {
                 }
             })?,
             task_type: task_type.map(OpenSpecTaskType::parse).transpose()?,
+            scenario_refs: scenario_refs
+                .into_iter()
+                .map(OpenSpecScenarioRef::parse)
+                .collect::<Result<Vec<_>>>()?,
             dependencies: dependencies
                 .into_iter()
                 .map(OpenSpecDependencyRef::parse)
@@ -191,10 +202,13 @@ impl OpenSpecImportRecord {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn subtask(
         object_id: SubtaskId,
         openspec_task_id: OpenSpecTaskId,
         title: SubtaskTitle,
+        source_path: OpenSpecPath,
+        scenario_refs: Vec<OpenSpecScenarioRef>,
         dependencies: Vec<OpenSpecDependencyRef>,
         action: ImportOpenSpecAction,
         provenance: OpenSpecImportProvenance,
@@ -204,6 +218,8 @@ impl OpenSpecImportRecord {
                 object_id,
                 openspec_task_id,
                 title,
+                source_path,
+                scenario_refs,
                 dependencies,
             },
             action,
@@ -229,6 +245,14 @@ impl OpenSpecImportRecord {
 
     fn dependencies(&self) -> &[OpenSpecDependencyRef] {
         self.object.dependencies()
+    }
+
+    fn source_path(&self) -> Option<&OpenSpecPath> {
+        self.object.source_path()
+    }
+
+    fn scenario_refs(&self) -> &[OpenSpecScenarioRef] {
+        self.object.scenario_refs()
     }
 }
 
@@ -269,6 +293,20 @@ impl OpenSpecImportRecordObject {
             Self::Subtask { dependencies, .. } => dependencies,
         }
     }
+
+    fn source_path(&self) -> Option<&OpenSpecPath> {
+        match self {
+            Self::MetaTask { .. } => None,
+            Self::Subtask { source_path, .. } => Some(source_path),
+        }
+    }
+
+    fn scenario_refs(&self) -> &[OpenSpecScenarioRef] {
+        match self {
+            Self::MetaTask { .. } => &[],
+            Self::Subtask { scenario_refs, .. } => scenario_refs,
+        }
+    }
 }
 
 impl OpenSpecTaskType {
@@ -284,6 +322,16 @@ impl OpenSpecTaskType {
 impl OpenSpecDependencyRef {
     fn parse(value: String) -> Result<Self> {
         validate_normalized_import_text("dependency", value).map(Self)
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl OpenSpecScenarioRef {
+    fn parse(value: String) -> Result<Self> {
+        validate_normalized_import_text("scenario_ref", value).map(Self)
     }
 
     fn as_str(&self) -> &str {

@@ -9,9 +9,10 @@ use strum::Display;
 use super::{
     AgentPrincipalId, Artifact, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask,
-    MetaTaskId, QueueId, ReadyQueueItem, RepoopsClaimRef, Review, ReviewId, ReviewTarget,
-    ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
-    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
+    MetaTaskId, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, Review, ReviewId,
+    ReviewTarget, ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind,
+    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs,
+    VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -461,6 +462,7 @@ pub struct SubtaskStatus {
     attachments: SubtaskStatusAttachments,
     reviews: Vec<Review>,
     ready_queue: Vec<ReadyQueueItem>,
+    readiness: SubtaskReadinessStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,6 +480,8 @@ struct RawSubtaskStatus {
     artifact: Option<Artifact>,
     reviews: Vec<Review>,
     ready_queue: Vec<ReadyQueueItem>,
+    #[serde(default)]
+    readiness: SubtaskReadinessStatus,
 }
 
 impl SubtaskStatus {
@@ -494,6 +498,23 @@ impl SubtaskStatus {
         reviews: Vec<Review>,
         ready_queue: Vec<ReadyQueueItem>,
     ) -> Result<Self, String> {
+        Self::new_with_landing_receipt(subtask, claim, artifact, reviews, ready_queue, false)
+    }
+
+    /// Builds a subtask status view with explicit landing receipt evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when attachments do not belong to the subtask or
+    /// contradict its lifecycle fields.
+    pub fn new_with_landing_receipt(
+        subtask: SubtaskView,
+        claim: Option<Claim>,
+        artifact: Option<Artifact>,
+        reviews: Vec<Review>,
+        ready_queue: Vec<ReadyQueueItem>,
+        landing_receipt_recorded: bool,
+    ) -> Result<Self, String> {
         let attachments = SubtaskStatusAttachments::from_parts(&subtask, claim, artifact)?;
         for review in &reviews {
             if review.subtask_id() != subtask.subtask_id.as_str() {
@@ -508,6 +529,12 @@ impl SubtaskStatus {
             }
         }
         Ok(Self {
+            readiness: SubtaskReadinessStatus::from_parts(
+                &subtask,
+                &reviews,
+                &ready_queue,
+                landing_receipt_recorded,
+            ),
             subtask,
             attachments,
             reviews,
@@ -543,6 +570,53 @@ impl SubtaskStatus {
     #[must_use]
     pub fn ready_queue(&self) -> &[ReadyQueueItem] {
         &self.ready_queue
+    }
+
+    /// Returns the domain-specific readiness projection for this subtask.
+    pub const fn readiness(&self) -> &SubtaskReadinessStatus {
+        &self.readiness
+    }
+}
+
+/// Explicit readiness projection for subtask status output.
+#[must_use]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtaskReadinessStatus {
+    pub planning_ready: bool,
+    pub covey_imported: bool,
+    pub execution_ready: bool,
+    pub review_approved: bool,
+    pub apply_queued: bool,
+    pub apply_authorized: bool,
+    pub landed: bool,
+    pub shipped_verified: bool,
+}
+
+impl SubtaskReadinessStatus {
+    fn from_parts(
+        subtask: &SubtaskView,
+        reviews: &[Review],
+        ready_queue: &[ReadyQueueItem],
+        landing_receipt_recorded: bool,
+    ) -> Self {
+        Self {
+            planning_ready: false,
+            covey_imported: true,
+            execution_ready: subtask.kind() == SubtaskKind::Work
+                && matches!(subtask.state(), SubtaskState::Available),
+            review_approved: reviews
+                .iter()
+                .any(|review| review.verdict() == Some(ReviewVerdict::Approve)),
+            apply_queued: ready_queue.iter().any(|item| {
+                matches!(
+                    item.state(),
+                    ReadyQueueState::Queued | ReadyQueueState::InFlight
+                )
+            }),
+            apply_authorized: false,
+            landed: landing_receipt_recorded,
+            shipped_verified: false,
+        }
     }
 }
 
@@ -646,6 +720,7 @@ impl From<&SubtaskStatus> for RawSubtaskStatus {
             artifact: status.artifact().cloned(),
             reviews: status.reviews.clone(),
             ready_queue: status.ready_queue.clone(),
+            readiness: status.readiness.clone(),
         }
     }
 }

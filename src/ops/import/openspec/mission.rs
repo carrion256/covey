@@ -23,8 +23,7 @@ pub(super) fn load_mission_packet(
 ) -> Result<MissionPacket> {
     let compiled = load_compiled_mission(root, change_id, change_path)
         .map_err(compiled_mission_error_to_covey)?;
-    let mission_source_path =
-        normalize_relative_path(&change_path.join("mission").join("mission.json"));
+    let task_source_path = normalize_relative_path(&change_path.join("tasks.md"));
 
     Ok(MissionPacket {
         tasks: compiled
@@ -34,9 +33,10 @@ pub(super) fn load_mission_packet(
                 OpenSpecSourceTask::try_from_raw_parts(
                     task.task_id,
                     task.title,
-                    mission_source_path.clone(),
+                    task_source_path.clone(),
                     task.task_digest,
                     Some(task.task_type),
+                    task.scenario_ids,
                     task.dependencies,
                 )
             })
