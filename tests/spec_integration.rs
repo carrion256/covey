@@ -4513,7 +4513,7 @@ fn reservation_overlap_conflicts_resolve_when_reservations_release_or_expire() {
 }
 
 #[test]
-fn malformed_event_payloads_fail_with_serialization_error() {
+fn malformed_historical_event_payloads_load_but_fail_typed_decode() {
     let rig = Rig::new();
     let covey = rig.covey();
     let _sess = register(&covey, "sess", "principal", SessionRole::Executor);
@@ -4525,13 +4525,18 @@ fn malformed_event_payloads_fail_with_serialization_error() {
     )
     .expect("corrupt payload");
 
-    let err = covey
+    let events = covey
         .fetch_events(0, 10)
-        .expect_err("malformed raw event payloads must fail at load time");
-    assert!(matches!(err, CoveyError::DatabaseError(_)));
+        .expect("malformed historical event payloads should remain observable");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload_json(), "{");
+
+    let err = events[0]
+        .typed()
+        .expect_err("malformed historical payloads must fail typed decode");
+    assert!(matches!(err, CoveyError::SerializationError(_)));
     assert!(
-        err.to_string()
-            .contains("event payload does not match session_registered"),
+        err.to_string().contains("EOF while parsing an object"),
         "unexpected error: {err}"
     );
 }

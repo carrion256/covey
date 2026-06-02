@@ -3618,6 +3618,28 @@ impl Event {
         })
     }
 
+    pub(crate) fn from_stored_row(
+        seq: i64,
+        event_type: EventType,
+        object_type: ObjectType,
+        object_id: String,
+        actor_kind: ActorKind,
+        session_token: Option<SessionToken>,
+        payload_json: String,
+        created_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let actor = EventActor::try_from_parts(actor_kind, session_token)?;
+        Ok(Self {
+            seq: EventSeq::parse(seq).map_err(|err| err.to_string())?,
+            event_type,
+            object_type,
+            object_id: EventObjectId::parse(object_id).map_err(|err| err.to_string())?,
+            actor,
+            payload_json: EventPayloadJson::from_stored(payload_json),
+            created_at,
+        })
+    }
+
     /// Returns the positive event-log sequence number.
     #[must_use]
     pub const fn seq(&self) -> i64 {
@@ -3630,7 +3652,7 @@ impl Event {
         self.event_type
     }
 
-    /// Returns the object kind validated against this raw event payload.
+    /// Returns the object kind declared by this raw event.
     #[must_use]
     pub const fn object_type(&self) -> ObjectType {
         self.object_type
@@ -3642,7 +3664,11 @@ impl Event {
         self.object_id.as_str()
     }
 
-    /// Returns the raw JSON payload validated against `event_type`.
+    /// Returns the raw JSON payload stored for this event.
+    ///
+    /// Events built through mutation APIs validate this against `event_type`,
+    /// while persisted event-log reads preserve historical rows so operators can
+    /// inspect legacy payloads that no longer pass current typed validation.
     #[must_use]
     pub fn payload_json(&self) -> &str {
         self.payload_json.as_str()
@@ -3680,6 +3706,10 @@ impl EventPayloadJson {
 
     fn as_str(&self) -> &str {
         &self.0
+    }
+
+    const fn from_stored(payload_json: String) -> Self {
+        Self(payload_json)
     }
 }
 

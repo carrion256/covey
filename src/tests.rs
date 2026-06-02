@@ -59,6 +59,48 @@ fn in_memory_covey_exercises_shared_connection_read_paths() {
 }
 
 #[test]
+fn fetch_events_preserves_historical_payloads_that_fail_current_typed_validation() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let legacy_payload = serde_json::json!({
+        "session_token": "session-1",
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "artifact_digest": "blake3:artifact",
+        "artifact_kind": "patch_bundle",
+        "base_rev": "base",
+        "manifest_path": "openspec/changes/phase-3/mission/mission-packet.json",
+        "changed_paths_digest": "blake3:paths",
+        "idempotency_key": "idem-artifact"
+    })
+    .to_string();
+
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO event_log (event_type, object_type, object_id, actor_kind, session_token, payload_json, created_at)
+             VALUES ('artifact_published', 'artifact', 'blake3:artifact', 'session', 'session-1', ?1, 1)",
+            params![legacy_payload],
+        )
+        .expect("insert historical event");
+    }
+
+    let events = covey.fetch_events(0, 10).expect("fetch historical events");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload_json(), legacy_payload);
+    let typed_err = events[0]
+        .typed()
+        .expect_err("current typed validation should still reject historical payload");
+    assert!(
+        typed_err
+            .to_string()
+            .contains("mission-packet compiler output"),
+        "unexpected typed decode error: {typed_err}"
+    );
+}
+
+#[test]
 fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_blocked() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");

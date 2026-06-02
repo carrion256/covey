@@ -645,33 +645,17 @@ pub(crate) fn map_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     let object_id = row.get(3)?;
     let payload_json = row.get(6)?;
     let created_at = row.get::<_, TimestampMs>(7)?;
-    match (actor_kind, session_token) {
-        (ActorKind::Session, Some(session_token)) => Ok(Event::session(
-            seq,
-            event_type,
-            object_type,
-            object_id,
-            session_token,
-            payload_json,
-            created_at,
-        )
-        .map_err(to_sql_err)?),
-        (ActorKind::Session, None) => Err(to_sql_err(
-            "session actor events require session_token".to_owned(),
-        )),
-        (ActorKind::System, None) => Ok(Event::system(
-            seq,
-            event_type,
-            object_type,
-            object_id,
-            payload_json,
-            created_at,
-        )
-        .map_err(to_sql_err)?),
-        (ActorKind::System, Some(_)) => Err(to_sql_err(
-            "system actor events must not include session_token".to_owned(),
-        )),
-    }
+    Event::from_stored_row(
+        seq,
+        event_type,
+        object_type,
+        object_id,
+        actor_kind,
+        session_token,
+        payload_json,
+        created_at,
+    )
+    .map_err(to_sql_err)
 }
 
 pub(crate) fn collect_rows<T>(

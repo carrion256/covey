@@ -175,6 +175,85 @@ fn piped_success_defaults_to_json() {
 }
 
 #[test]
+fn events_list_typed_reports_historical_decode_errors_without_aborting() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let session = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "legacy-events-agent",
+            "--agent-instance-id",
+            "legacy-events-run",
+            "--role",
+            "executor",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("session token")
+        .to_owned();
+    let legacy_payload = serde_json::json!({
+        "session_token": session,
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "artifact_digest": "blake3:legacy-artifact",
+        "artifact_kind": "patch_bundle",
+        "base_rev": "base",
+        "manifest_path": "openspec/changes/phase-3/mission/mission-packet.json",
+        "changed_paths_digest": "blake3:paths",
+        "idempotency_key": "idem-artifact"
+    })
+    .to_string();
+
+    let conn = Connection::open(&db).expect("open covey db");
+    conn.execute(
+        "INSERT INTO event_log (event_type, object_type, object_id, actor_kind, session_token, payload_json, created_at)
+         VALUES ('artifact_published', 'artifact', 'blake3:legacy-artifact', 'session', ?1, ?2, 1700000000001)",
+        params![session, legacy_payload],
+    )
+    .expect("insert historical event");
+
+    let data = success_data(&run_db(
+        &db,
+        &[
+            "events",
+            "list",
+            "--after-seq",
+            "0",
+            "--limit",
+            "20",
+            "--typed",
+        ],
+    ));
+
+    assert_eq!(data["decode_error_count"], 1);
+    assert!(
+        data["typed_event_count"].as_u64().expect("typed count") >= 1,
+        "the valid registration event should still decode"
+    );
+    let decode_error = data["items"]
+        .as_array()
+        .expect("typed event list items")
+        .iter()
+        .find(|item| item["status"] == "decode_error")
+        .expect("decode-error item");
+    assert!(
+        decode_error["error"]
+            .as_str()
+            .expect("decode error")
+            .contains("mission-packet compiler output")
+    );
+    assert_eq!(
+        decode_error["event"]["payload_json"]
+            .as_str()
+            .expect("raw payload"),
+        legacy_payload
+    );
+}
+
+#[test]
 fn session_register_accepts_apply_gate_role_alias() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");

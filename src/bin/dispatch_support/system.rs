@@ -1,20 +1,70 @@
 use super::*;
+use serde::Serialize;
 
 pub(super) fn dispatch_events(store: &Covey, command: EventsCommand) -> covey::Result<Rendered> {
     match command {
         EventsCommand::List(args) => {
             let events = store.fetch_events(args.after_seq, args.limit)?;
             if args.typed {
-                let typed = events
-                    .iter()
-                    .map(covey::Event::typed)
-                    .collect::<covey::Result<Vec<_>>>()?;
-                Ok(Rendered::pretty(&typed))
+                Ok(render_typed_events(&events))
             } else {
                 Ok(Rendered::pretty(&events))
             }
         }
     }
+}
+
+fn render_typed_events(events: &[covey::Event]) -> Rendered {
+    let mut typed = Vec::with_capacity(events.len());
+    let mut fallback_items = Vec::new();
+    let mut decode_error_count = 0usize;
+
+    for event in events {
+        match event.typed() {
+            Ok(typed_event) if decode_error_count == 0 => typed.push(typed_event),
+            Ok(typed_event) => {
+                fallback_items.push(TypedEventListItem::Typed { event: typed_event })
+            }
+            Err(error) => {
+                if decode_error_count == 0 {
+                    fallback_items.extend(
+                        typed
+                            .drain(..)
+                            .map(|event| TypedEventListItem::Typed { event }),
+                    );
+                }
+                decode_error_count += 1;
+                fallback_items.push(TypedEventListItem::DecodeError {
+                    event: event.clone(),
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    if decode_error_count == 0 {
+        Rendered::pretty(&typed)
+    } else {
+        Rendered::pretty(TypedEventList {
+            typed_event_count: fallback_items.len() - decode_error_count,
+            decode_error_count,
+            items: fallback_items,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct TypedEventList {
+    typed_event_count: usize,
+    decode_error_count: usize,
+    items: Vec<TypedEventListItem>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum TypedEventListItem {
+    Typed { event: covey::TypedEvent },
+    DecodeError { event: covey::Event, error: String },
 }
 
 pub(super) fn dispatch_conflict(
