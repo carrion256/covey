@@ -122,6 +122,17 @@ fn validate_manifest_path(
             "must not contain control characters",
         ));
     }
+    if value
+        .replace('\\', "/")
+        .split('/')
+        .next_back()
+        .is_some_and(|segment| segment == "mission-packet.json")
+    {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not be Better Droid mission-packet compiler output",
+        ));
+    }
     Ok(())
 }
 

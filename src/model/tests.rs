@@ -3029,6 +3029,20 @@ fn publish_artifact_payload_rejects_invalid_typed_fields() {
     serde_json::from_value::<PublishArtifactReq>(invalid_manifest_path)
         .expect_err("publish request should reject invalid manifest paths");
 
+    let mission_packet_manifest_path = serde_json::json!({
+        "session_token": "session-1",
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "artifact_digest": "blake3:artifact",
+        "artifact_kind": "patch_bundle",
+        "base_rev": "base",
+        "manifest_path": "openspec/changes/phase-3/mission/mission-packet.json",
+        "changed_paths_digest": "blake3:paths",
+        "idempotency_key": "idem-artifact"
+    });
+    serde_json::from_value::<PublishArtifactReq>(mission_packet_manifest_path)
+        .expect_err("publish request should reject Better Droid mission packet manifest paths");
+
     let invalid_changed_paths_digest = serde_json::json!({
         "session_token": "session-1",
         "claim_id": "claim-1",
