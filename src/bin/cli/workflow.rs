@@ -10,6 +10,7 @@ pub(crate) enum SubtaskCommand {
     Start(StartSubtaskArgs),
     Abandon(AbandonSubtaskArgs),
     Status(SubtaskStatusArgs),
+    Availability(SubtaskAvailabilityArgs),
     Stuck(StuckSubtasksArgs),
 }
 
@@ -104,6 +105,12 @@ pub(crate) struct AbandonSubtaskArgs {
 pub(crate) struct SubtaskStatusArgs {
     #[arg(long)]
     pub(crate) subtask_id: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct SubtaskAvailabilityArgs {
+    #[arg(long)]
+    pub(crate) meta_task_id: Option<String>,
 }
 
 #[derive(Args, Debug)]

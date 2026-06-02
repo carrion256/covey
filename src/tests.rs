@@ -59,6 +59,73 @@ fn in_memory_covey_exercises_shared_connection_read_paths() {
 }
 
 #[test]
+fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_blocked() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch', 'orch-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-availability', 'availability', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('dep-work', 'meta-availability', 'dependency', 'work', NULL, NULL, 'available', NULL, NULL, 1, 1, 1)",
+            [],
+        )
+        .expect("insert dependency work");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES ('blake3:dep', 'patch_bundle', 'base', 'dep-work', 'session-orch', 'artifact.json', 'blake3:paths', 1)",
+            [],
+        )
+        .expect("insert dependency artifact");
+        conn.execute(
+            "UPDATE subtasks SET state = 'changes_requested', artifact_digest = 'blake3:dep', updated_at = 2 WHERE subtask_id = 'dep-work'",
+            [],
+        )
+        .expect("mark dependency changes_requested");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('blocked-work', 'meta-availability', 'blocked work', 'work', NULL, NULL, 'available', NULL, NULL, 2, 2, 2)",
+            [],
+        )
+        .expect("insert blocked available work");
+        conn.execute(
+            "INSERT INTO subtask_dependencies (subtask_id, depends_on_subtask_id, source_ref, created_at)
+             VALUES ('blocked-work', 'dep-work', 'test', 2)",
+            [],
+        )
+        .expect("insert dependency edge");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-work', 'meta-availability', 'review blake3:dep', 'review', 'dep-work', 'blake3:dep', 'available', NULL, NULL, 1, 3, 3)",
+            [],
+        )
+        .expect("insert available review");
+    }
+
+    let availability = covey
+        .claimable_subtask_availability(None)
+        .expect("read availability");
+    assert_eq!(availability.executor_claimable_count(), 0);
+    assert_eq!(availability.reviewer_claimable_count(), 1);
+
+    let scoped = covey
+        .claimable_subtask_availability(Some("meta-availability"))
+        .expect("read scoped availability");
+    assert_eq!(scoped, availability);
+}
+
+#[test]
 fn claim_candidate_lookup_queries_use_candidate_indexes() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");

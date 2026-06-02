@@ -98,6 +98,11 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             let status = store.subtask_status(&args.subtask_id)?;
             Ok(Rendered::pretty(&status))
         }
+        SubtaskCommand::Availability(args) => {
+            let availability =
+                store.claimable_subtask_availability(args.meta_task_id.as_deref())?;
+            Ok(Rendered::pretty(&availability))
+        }
         SubtaskCommand::Stuck(args) => {
             let subtasks = store.list_stuck_subtasks(args.older_than_ms, args.limit)?;
             Ok(Rendered::pretty(&subtasks))
@@ -251,7 +256,7 @@ mod tests {
         AbandonSubtaskArgs, ArtifactKindArg, ClaimNextArgs, ClaimSubtaskArgs, CreateSubtaskArgs,
         DecideReviewArgs, ExpiringClaimsArgs, PublishArtifactArgs, ReleaseClaimArgs,
         RenewClaimArgs, RequestReviewArgs, ReviewVerdictArg, StartSubtaskArgs, StuckSubtasksArgs,
-        SubtaskKindArg, SubtaskStatusArgs,
+        SubtaskAvailabilityArgs, SubtaskKindArg, SubtaskStatusArgs,
     };
     use covey::SessionRole;
 
@@ -306,6 +311,13 @@ mod tests {
         )
         .expect("status should render");
         assert_eq!(status.data["subtask"]["subtask_id"], "work-a");
+        let availability = dispatch_subtask(
+            &store,
+            SubtaskCommand::Availability(SubtaskAvailabilityArgs { meta_task_id: None }),
+        )
+        .expect("availability should render");
+        assert_eq!(availability.data["executor_claimable_count"], 3);
+        assert_eq!(availability.data["reviewer_claimable_count"], 0);
         let stuck = dispatch_subtask(
             &store,
             SubtaskCommand::Stuck(StuckSubtasksArgs {

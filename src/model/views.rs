@@ -746,6 +746,36 @@ impl TryFrom<RawMetaTaskStatus> for MetaTaskStatus {
     }
 }
 
+/// Read-only summary of currently claimable subtask lanes.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimableSubtaskAvailability {
+    executor_claimable_count: usize,
+    reviewer_claimable_count: usize,
+}
+
+impl ClaimableSubtaskAvailability {
+    /// Builds a claimable-subtask availability summary.
+    pub const fn new(executor_claimable_count: usize, reviewer_claimable_count: usize) -> Self {
+        Self {
+            executor_claimable_count,
+            reviewer_claimable_count,
+        }
+    }
+
+    /// Returns how many work subtasks are claimable by executor sessions.
+    #[must_use]
+    pub const fn executor_claimable_count(&self) -> usize {
+        self.executor_claimable_count
+    }
+
+    /// Returns how many review subtasks are claimable by reviewer sessions.
+    #[must_use]
+    pub const fn reviewer_claimable_count(&self) -> usize {
+        self.reviewer_claimable_count
+    }
+}
+
 /// Observability row for a subtask that has not moved recently enough to merit attention.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6,8 +6,9 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        Claim, ClaimState, ExpiringClaim, Session, SessionRole, SessionState, StuckSubtask,
-        SubtaskKind, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskView, claim_state_name,
+        Claim, ClaimState, ClaimableSubtaskAvailability, ExpiringClaim, Session, SessionRole,
+        SessionState, StuckSubtask, SubtaskKind, SubtaskRow, SubtaskState, SubtaskStatus,
+        SubtaskView, claim_state_name, meta_task_state_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, load_artifact_tx, load_claim_tx, load_queue_items_for_subtask_tx,
@@ -45,6 +46,32 @@ impl Covey {
         self.log_operation("subtask_status", "system", started_at, &result, |status| {
             vec![format!("subtask:{}", status.subtask().subtask_id)]
         });
+        result
+    }
+
+    /// Returns read-only counts for currently claimable executor and reviewer subtasks.
+    pub fn claimable_subtask_availability(
+        &self,
+        meta_task_id: Option<&str>,
+    ) -> Result<ClaimableSubtaskAvailability> {
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| {
+            let executor_claimable_count =
+                claimable_subtask_count_tx(tx, SubtaskKind::Work, meta_task_id)?;
+            let reviewer_claimable_count =
+                claimable_subtask_count_tx(tx, SubtaskKind::Review, meta_task_id)?;
+            Ok(ClaimableSubtaskAvailability::new(
+                executor_claimable_count,
+                reviewer_claimable_count,
+            ))
+        });
+        self.log_operation(
+            "claimable_subtask_availability",
+            "system",
+            started_at,
+            &result,
+            |_| Vec::new(),
+        );
         result
     }
 
@@ -158,6 +185,136 @@ impl Covey {
         );
         result
     }
+}
+
+fn claimable_subtask_count_tx(
+    tx: &rusqlite::Transaction<'_>,
+    kind: SubtaskKind,
+    meta_task_id: Option<&str>,
+) -> Result<usize> {
+    let count = match kind {
+        SubtaskKind::Work => {
+            if let Some(meta_task_id) = meta_task_id {
+                tx.query_row(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM subtasks s
+                    JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND s.meta_task_id = ?3
+                      AND m.state NOT IN (?4, ?5)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM subtask_dependencies d
+                          JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+                          WHERE d.subtask_id = s.subtask_id
+                            AND dep.state NOT IN (?6, ?7, ?8, ?9)
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM review_followup_subtasks f
+                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
+                                WHERE f.source_subtask_id = dep.subtask_id
+                                  AND followup.state IN (?6, ?7, ?8, ?9)
+                            )
+                      )
+                    "#,
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(SubtaskState::Available),
+                        meta_task_id,
+                        meta_task_state_name(crate::model::MetaTaskState::Completed),
+                        meta_task_state_name(crate::model::MetaTaskState::Cancelled),
+                        subtask_state_name(SubtaskState::Approved),
+                        subtask_state_name(SubtaskState::ReadyForApply),
+                        subtask_state_name(SubtaskState::Applied),
+                        subtask_state_name(SubtaskState::Decided),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?
+            } else {
+                tx.query_row(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM subtasks s
+                    JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND m.state NOT IN (?3, ?4)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM subtask_dependencies d
+                          JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+                          WHERE d.subtask_id = s.subtask_id
+                            AND dep.state NOT IN (?5, ?6, ?7, ?8)
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM review_followup_subtasks f
+                                JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
+                                WHERE f.source_subtask_id = dep.subtask_id
+                                  AND followup.state IN (?5, ?6, ?7, ?8)
+                            )
+                      )
+                    "#,
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(SubtaskState::Available),
+                        meta_task_state_name(crate::model::MetaTaskState::Completed),
+                        meta_task_state_name(crate::model::MetaTaskState::Cancelled),
+                        subtask_state_name(SubtaskState::Approved),
+                        subtask_state_name(SubtaskState::ReadyForApply),
+                        subtask_state_name(SubtaskState::Applied),
+                        subtask_state_name(SubtaskState::Decided),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?
+            }
+        }
+        SubtaskKind::Review => {
+            if let Some(meta_task_id) = meta_task_id {
+                tx.query_row(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM subtasks s
+                    JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND s.meta_task_id = ?3
+                      AND m.state NOT IN (?4, ?5)
+                    "#,
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(SubtaskState::Available),
+                        meta_task_id,
+                        meta_task_state_name(crate::model::MetaTaskState::Completed),
+                        meta_task_state_name(crate::model::MetaTaskState::Cancelled),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?
+            } else {
+                tx.query_row(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM subtasks s
+                    JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+                    WHERE s.kind = ?1
+                      AND s.state = ?2
+                      AND m.state NOT IN (?3, ?4)
+                    "#,
+                    params![
+                        subtask_kind_name(kind),
+                        subtask_state_name(SubtaskState::Available),
+                        meta_task_state_name(crate::model::MetaTaskState::Completed),
+                        meta_task_state_name(crate::model::MetaTaskState::Cancelled),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?
+            }
+        }
+    };
+    usize::try_from(count).map_err(|_| CoveyError::InvalidObservabilityRow {
+        reason: "claimable subtask count must not be negative".to_owned(),
+    })
 }
 
 fn stuck_subtask_from_joined_row(row: &Row<'_>, now: i64) -> Result<StuckSubtask> {
