@@ -217,11 +217,23 @@ covey subtask claim-next --session-token <worker-session> --lease-duration-ms 30
 covey artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest blake3:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest blake3:paths
 ```
 
+Scheduler read paths are explicit and read-only:
+
+```bash
+covey subtask candidates --role executor --limit 50
+covey subtask candidates --role reviewer --limit 50
+covey queue candidates --limit 50
+```
+
+These commands expose exact claimable IDs and ordering facts for
+`mutai-scheduler`. They do not create claims, advance fences, lease queue items,
+append events, or perform lifecycle transitions.
+
 ### OpenSpec Import
 
 `covey import openspec` maps one OpenSpec change into deterministic Covey task state. For
 Better Droid changes, run `better-droid compile <change-id>` first so the change contains the
-compiled mission packet set under `openspec/changes/<change-id>/mission/`.
+compiled mission packet set under `.codex/state/better-droid/<change-id>/mission/`.
 
 - `openspec:<change-id>` becomes the meta task ID.
 - `openspec:<change-id>:<task-id>` becomes each work subtask ID.

@@ -98,6 +98,14 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             let status = store.subtask_status(&args.subtask_id)?;
             Ok(Rendered::pretty(&status))
         }
+        SubtaskCommand::Candidates(args) => {
+            let candidates = store.subtask_candidates(
+                args.role.into(),
+                args.limit,
+                args.meta_task_id.as_deref(),
+            )?;
+            Ok(Rendered::pretty(&candidates))
+        }
         SubtaskCommand::Availability(args) => {
             let availability =
                 store.claimable_subtask_availability(args.meta_task_id.as_deref())?;

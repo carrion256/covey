@@ -10,6 +10,7 @@ pub(crate) enum SubtaskCommand {
     Start(StartSubtaskArgs),
     Abandon(AbandonSubtaskArgs),
     Status(SubtaskStatusArgs),
+    Candidates(SubtaskCandidatesArgs),
     Availability(SubtaskAvailabilityArgs),
     Stuck(StuckSubtasksArgs),
 }
@@ -105,6 +106,16 @@ pub(crate) struct AbandonSubtaskArgs {
 pub(crate) struct SubtaskStatusArgs {
     #[arg(long)]
     pub(crate) subtask_id: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct SubtaskCandidatesArgs {
+    #[arg(long)]
+    pub(crate) role: CandidateRoleArg,
+    #[arg(long, default_value_t = 100)]
+    pub(crate) limit: usize,
+    #[arg(long)]
+    pub(crate) meta_task_id: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -216,6 +227,22 @@ pub(crate) struct DecideReviewArgs {
 pub(crate) enum SubtaskKindArg {
     Work,
     Review,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum CandidateRoleArg {
+    Executor,
+    Reviewer,
+}
+
+impl From<CandidateRoleArg> for covey::SessionRole {
+    fn from(value: CandidateRoleArg) -> Self {
+        match value {
+            CandidateRoleArg::Executor => covey::SessionRole::Executor,
+            CandidateRoleArg::Reviewer => covey::SessionRole::Reviewer,
+        }
+    }
 }
 
 impl From<SubtaskKindArg> for SubtaskKind {

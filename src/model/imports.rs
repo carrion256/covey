@@ -1758,6 +1758,7 @@ pub struct OpenSpecImportProvenanceCommon {
     tasks_digest: OpenSpecDigest,
     source_digests: Vec<OpenSpecSourceDigest>,
     mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+    mission_artifact_metadata: Vec<OpenSpecMissionArtifactMetadata>,
     mission_artifacts: Vec<OpenSpecPath>,
     updated_at: TimestampMs,
 }
@@ -1792,8 +1793,22 @@ struct RawOpenSpecImportProvenance {
     source_digests: Vec<OpenSpecSourceDigest>,
     mission_artifact_digests: Vec<OpenSpecSourceDigest>,
     mission_artifacts: Vec<String>,
+    #[serde(default)]
+    mission_artifact_metadata: Vec<OpenSpecMissionArtifactMetadata>,
     task_digest: Option<String>,
     updated_at: TimestampMs,
+}
+
+/// Metadata for generated Better Droid mission artifacts associated with an OpenSpec import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecMissionArtifactMetadata {
+    pub artifact_name: String,
+    pub artifact_kind: String,
+    pub schema: String,
+    pub digest: String,
+    pub storage_class: String,
+    pub locator: String,
+    pub generator: String,
 }
 
 impl OpenSpecImportProvenanceCommon {
@@ -1813,6 +1828,8 @@ impl OpenSpecImportProvenanceCommon {
             .into_iter()
             .map(OpenSpecPath::parse)
             .collect::<Result<Vec<_>, _>>()?;
+        let mission_artifact_metadata =
+            derived_mission_artifact_metadata(&mission_artifacts, &mission_artifact_digests);
         Ok(Self {
             openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())
                 .map_err(|err| err.to_string())?,
@@ -1821,6 +1838,42 @@ impl OpenSpecImportProvenanceCommon {
                 .map_err(|err| err.to_string())?,
             source_digests,
             mission_artifact_digests,
+            mission_artifact_metadata,
+            mission_artifacts,
+            updated_at,
+        })
+    }
+
+    /// Builds common OpenSpec provenance fields with persisted mission artifact metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_mission_artifact_metadata(
+        openspec_change_id: impl Into<String>,
+        openspec_change_path: impl Into<String>,
+        tasks_digest: impl Into<String>,
+        source_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_metadata: Vec<OpenSpecMissionArtifactMetadata>,
+        mission_artifacts: Vec<String>,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let mission_artifacts = mission_artifacts
+            .into_iter()
+            .map(OpenSpecPath::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mission_artifact_metadata = if mission_artifact_metadata.is_empty() {
+            derived_mission_artifact_metadata(&mission_artifacts, &mission_artifact_digests)
+        } else {
+            mission_artifact_metadata
+        };
+        Ok(Self {
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())
+                .map_err(|err| err.to_string())?,
+            openspec_change_path: OpenSpecPath::parse(openspec_change_path.into())?,
+            tasks_digest: OpenSpecDigest::parse(tasks_digest.into())
+                .map_err(|err| err.to_string())?,
+            source_digests,
+            mission_artifact_digests,
+            mission_artifact_metadata,
             mission_artifacts,
             updated_at,
         })
@@ -1833,18 +1886,20 @@ impl OpenSpecImportProvenanceCommon {
         tasks_digest: String,
         source_digests: Vec<OpenSpecSourceDigest>,
         mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_metadata: Vec<OpenSpecMissionArtifactMetadata>,
         mission_artifacts: Vec<String>,
         updated_at: TimestampMs,
     ) -> Result<Self, String> {
         if planning_format != Self::PLANNING_FORMAT {
             return Err("OpenSpec provenance planning_format must be openspec".to_owned());
         }
-        Self::new(
+        Self::with_mission_artifact_metadata(
             openspec_change_id,
             openspec_change_path,
             tasks_digest,
             source_digests,
             mission_artifact_digests,
+            mission_artifact_metadata,
             mission_artifacts,
             updated_at,
         )
@@ -1883,6 +1938,11 @@ impl OpenSpecImportProvenanceCommon {
     #[must_use]
     pub fn mission_artifacts(&self) -> &[OpenSpecPath] {
         &self.mission_artifacts
+    }
+
+    #[must_use]
+    pub fn mission_artifact_metadata(&self) -> &[OpenSpecMissionArtifactMetadata] {
+        &self.mission_artifact_metadata
     }
 
     #[must_use]
@@ -1951,6 +2011,7 @@ impl OpenSpecImportProvenance {
         spec_digests: Vec<OpenSpecSourceDigest>,
         source_digests: Vec<OpenSpecSourceDigest>,
         mission_artifact_digests: Vec<OpenSpecSourceDigest>,
+        mission_artifact_metadata: Vec<OpenSpecMissionArtifactMetadata>,
         mission_artifacts: Vec<String>,
         task_digest: Option<String>,
         updated_at: TimestampMs,
@@ -1968,6 +2029,7 @@ impl OpenSpecImportProvenance {
             spec_digests,
             source_digests,
             mission_artifact_digests,
+            mission_artifact_metadata,
             mission_artifacts,
             task_digest,
             updated_at,
@@ -1993,6 +2055,7 @@ impl OpenSpecImportProvenance {
                 raw.tasks_digest,
                 raw.source_digests,
                 raw.mission_artifact_digests,
+                raw.mission_artifact_metadata,
                 raw.mission_artifacts,
                 raw.updated_at,
             )?,
@@ -2016,6 +2079,7 @@ impl OpenSpecImportProvenance {
             spec_digests: self.spec_digests().to_vec(),
             source_digests: self.source_digests().to_vec(),
             mission_artifact_digests: self.mission_artifact_digests().to_vec(),
+            mission_artifact_metadata: self.mission_artifact_metadata().to_vec(),
             mission_artifacts: self
                 .mission_artifacts()
                 .iter()
@@ -2111,6 +2175,11 @@ impl OpenSpecImportProvenance {
     }
 
     #[must_use]
+    pub fn mission_artifact_metadata(&self) -> &[OpenSpecMissionArtifactMetadata] {
+        self.common.mission_artifact_metadata()
+    }
+
+    #[must_use]
     pub fn task_digest(&self) -> Option<&str> {
         match &self.object {
             OpenSpecImportProvenanceObject::MetaTask { .. } => None,
@@ -2128,6 +2197,65 @@ impl OpenSpecImportProvenance {
     pub fn set_updated_at(&mut self, updated_at: TimestampMs) {
         self.common.set_updated_at(updated_at);
     }
+}
+
+fn artifact_name(locator: &str) -> &str {
+    locator
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(locator)
+}
+
+fn mission_artifact_schema(locator: &str) -> &'static str {
+    match artifact_name(locator) {
+        "mission.json" => "better-droid.mission.v1",
+        "mission-packet.json" => "mission_packet.v1",
+        "traceability.json" => "better-droid.traceability.v1",
+        "validation.json" => "better-droid.validation.v1",
+        "path-policy.json" => "better-droid.path-policy.v1",
+        "review-rubric.json" => "better-droid.review-rubric.v1",
+        "assumptions.json" => "better-droid.assumptions.v1",
+        "compile-report.json" => "better-droid.compile-report.v1",
+        _ => "better-droid.generated-artifact.v1",
+    }
+}
+
+fn mission_artifact_storage_class(locator: &str) -> &'static str {
+    if locator
+        .replace('\\', "/")
+        .starts_with(".codex/state/better-droid/")
+    {
+        "runtime_generated"
+    } else {
+        "legacy_source_tree"
+    }
+}
+
+fn derived_mission_artifact_metadata(
+    mission_artifacts: &[OpenSpecPath],
+    mission_artifact_digests: &[OpenSpecSourceDigest],
+) -> Vec<OpenSpecMissionArtifactMetadata> {
+    let digest_by_path = mission_artifact_digests
+        .iter()
+        .map(|digest| (digest.path(), digest.digest()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    mission_artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let locator = artifact.to_string();
+            let digest = digest_by_path.get(locator.as_str())?;
+            Some(OpenSpecMissionArtifactMetadata {
+                artifact_name: artifact_name(&locator).to_owned(),
+                artifact_kind: "better-droid-mission-artifact".to_owned(),
+                schema: mission_artifact_schema(&locator).to_owned(),
+                digest: (*digest).to_owned(),
+                storage_class: mission_artifact_storage_class(&locator).to_owned(),
+                locator,
+                generator: "better-droid compile".to_owned(),
+            })
+        })
+        .collect()
 }
 
 impl OpenSpecImportProvenanceObject {

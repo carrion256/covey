@@ -6,6 +6,10 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             let items = store.fetch_ready_queue(args.limit)?;
             Ok(Rendered::pretty(&items))
         }
+        QueueCommand::Candidates(args) => {
+            let items = store.ready_queue_candidates(args.limit)?;
+            Ok(Rendered::pretty(&items))
+        }
         QueueCommand::Enqueue(args) => {
             let req = EnqueueForApplyReq::try_from_raw_parts(
                 args.session_token,

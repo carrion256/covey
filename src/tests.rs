@@ -169,6 +169,77 @@ fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_bl
 }
 
 #[test]
+fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch-candidates', 'orch-candidates-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-candidates', 'candidates', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('work-candidate', 'meta-candidates', 'work candidate', 'work', NULL, NULL, 'available', NULL, NULL, 5, 2, 2)",
+            [],
+        )
+        .expect("insert work candidate");
+        conn.execute(
+            "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES ('work-candidate', 1)",
+            [],
+        )
+        .expect("insert work fence counter");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES ('blake3:reviewartifact', 'patch_bundle', 'base', 'work-candidate', 'session-orch', 'artifact.json', 'blake3:paths', 3)",
+            [],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-candidate', 'meta-candidates', 'review candidate', 'review', 'work-candidate', 'blake3:reviewartifact', 'available', NULL, NULL, 1, 3, 3)",
+            [],
+        )
+        .expect("insert review candidate");
+        conn.execute(
+            "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
+             VALUES ('queue-candidate', 'blake3:reviewartifact', 'work-candidate', 'canonical', 'queued', NULL, NULL, NULL, 4, 4)",
+            [],
+        )
+        .expect("insert ready queue candidate");
+    }
+
+    let before_events = covey.fetch_events(0, 100).expect("events before").len();
+    let executor_candidates = covey
+        .subtask_candidates(SessionRole::Executor, 10, None)
+        .expect("executor candidates");
+    let reviewer_candidates = covey
+        .subtask_candidates(SessionRole::Reviewer, 10, None)
+        .expect("reviewer candidates");
+    let queue_candidates = covey.ready_queue_candidates(10).expect("queue candidates");
+    let after_events = covey.fetch_events(0, 100).expect("events after").len();
+
+    assert_eq!(before_events, after_events);
+    assert_eq!(executor_candidates.len(), 1);
+    assert_eq!(executor_candidates[0].subtask_id.as_str(), "work-candidate");
+    assert_eq!(reviewer_candidates.len(), 1);
+    assert_eq!(
+        reviewer_candidates[0].subtask_id.as_str(),
+        "review-candidate"
+    );
+    assert_eq!(queue_candidates.len(), 1);
+    assert_eq!(queue_candidates[0].queue_id.as_str(), "queue-candidate");
+}
+
+#[test]
 fn recursive_review_followup_chain_satisfies_work_dependencies() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");

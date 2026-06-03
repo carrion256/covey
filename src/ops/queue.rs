@@ -10,12 +10,12 @@ use crate::{
     model::{
         ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
         LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
-        QueueId, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        RecordApplyVerificationReq, RecordLandingReceiptReq, ReviewId, ReviewState, ReviewVerdict,
-        RuntimeAttestation, Session, SessionRole, SessionToken, SettlementTarget, SubtaskKind,
-        SubtaskState, SupersedeQueueItemReq, VerifyLandingAuthorizationReq, meta_task_state_name,
-        ready_queue_state_name, review_state_name, review_verdict_name, subtask_kind_name,
-        subtask_state_name,
+        QueueId, ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics,
+        ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq, ReviewId,
+        ReviewState, ReviewVerdict, RuntimeAttestation, Session, SessionRole, SessionToken,
+        SettlementTarget, SubtaskKind, SubtaskState, SupersedeQueueItemReq,
+        VerifyLandingAuthorizationReq, meta_task_state_name, ready_queue_state_name,
+        review_state_name, review_verdict_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -192,6 +192,31 @@ impl Covey {
                 items
                     .iter()
                     .map(|item| format!("queue:{}", item.queue_id()))
+                    .collect()
+            },
+        );
+        result
+    }
+
+    /// Returns read-only, ordered apply-queue candidates for deterministic scheduling.
+    pub fn ready_queue_candidates(&self, limit: usize) -> Result<Vec<ReadyQueueCandidate>> {
+        let started_at = Instant::now();
+        let result = self.fetch_ready_queue(limit).and_then(|items| {
+            items
+                .iter()
+                .map(ReadyQueueCandidate::from_item)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
+        });
+        self.log_operation(
+            "ready_queue_candidates",
+            "system",
+            started_at,
+            &result,
+            |items| {
+                items
+                    .iter()
+                    .map(|item| format!("queue:{}", item.queue_id))
                     .collect()
             },
         );
@@ -1079,16 +1104,21 @@ fn require_runtime_actor_separation(
     right_role: &str,
     right: &RuntimeAttestation,
 ) -> Result<()> {
+    let left_provider_run = provider_run_ref(left);
+    let right_provider_run = provider_run_ref(right);
+    if left_provider_run
+        .zip(right_provider_run)
+        .is_some_and(|(left, right)| left == right)
+    {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: queue_id.clone(),
+            reason: format!("{left_role} and {right_role} provider run ids are not separated"),
+        });
+    }
     if runtime_ref(left) == runtime_ref(right) {
         return Err(CoveyError::ApplyGateEvidenceMissing {
             queue_id: queue_id.clone(),
             reason: format!("{left_role} and {right_role} runtime refs are not separated"),
-        });
-    }
-    if provider_run_ref(left) == provider_run_ref(right) {
-        return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id: queue_id.clone(),
-            reason: format!("{left_role} and {right_role} provider run ids are not separated"),
         });
     }
     if left.command_transcript_digest == right.command_transcript_digest {
@@ -1106,6 +1136,70 @@ fn runtime_ref(attestation: &RuntimeAttestation) -> (Option<&str>, Option<&str>)
 
 fn provider_run_ref(attestation: &RuntimeAttestation) -> Option<(&str, &str)> {
     attestation.provider_run_ref()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        CommandTranscriptDigest, ModelId, ProviderId, ProviderRunId, ProviderRunIdIssuer,
+        RuntimeProcessId, TimestampMs,
+    };
+
+    fn attestation(provider_run_id: &str) -> RuntimeAttestation {
+        RuntimeAttestation::try_from_parts(
+            SessionToken::parse(format!("session-{provider_run_id}")).expect("valid session token"),
+            format!("principal-{provider_run_id}"),
+            format!("instance-{provider_run_id}"),
+            SessionRole::Executor,
+            ProviderId::parse("codex").expect("valid provider"),
+            ModelId::parse("gpt-5").expect("valid model"),
+            ProviderRunId::parse(provider_run_id)
+                .expect("valid provider run id")
+                .to_string(),
+            ProviderRunIdIssuer::parse("codex-cli")
+                .expect("valid provider run issuer")
+                .to_string(),
+            Some(
+                RuntimeProcessId::parse(format!("codex-shell-{provider_run_id}"))
+                    .expect("valid process id")
+                    .to_string(),
+            ),
+            None,
+            CommandTranscriptDigest::parse(format!("blake3:{provider_run_id}-transcript"))
+                .expect("valid transcript digest"),
+            TimestampMs::parse(1).expect("valid started_at"),
+            TimestampMs::parse(2).expect("valid ended_at"),
+            TimestampMs::parse(3).expect("valid recorded_at"),
+        )
+        .expect("valid runtime attestation")
+    }
+
+    #[test]
+    fn runtime_actor_separation_accepts_distinct_provider_runs_with_shared_local_placeholders() {
+        let queue_id = QueueId::parse("queue-test").expect("valid queue id");
+        let left = attestation("provider-run-left");
+        let right = attestation("provider-run-right");
+
+        require_runtime_actor_separation(&queue_id, "producer", &left, "reviewer", &right)
+            .expect("distinct provider runs prove runtime actor separation");
+    }
+
+    #[test]
+    fn runtime_actor_separation_rejects_matching_provider_runs() {
+        let queue_id = QueueId::parse("queue-test").expect("valid queue id");
+        let left = attestation("provider-run-shared");
+        let right = attestation("provider-run-shared");
+
+        let error =
+            require_runtime_actor_separation(&queue_id, "producer", &left, "reviewer", &right)
+                .expect_err("matching provider runs must fail separation");
+        assert!(
+            error
+                .to_string()
+                .contains("provider run ids are not separated")
+        );
+    }
 }
 
 fn require_recorded_apply_verification(

@@ -8,20 +8,21 @@ use super::{
     ImportOpenSpecConflictReason, ImportOpenSpecEvent, ImportOpenSpecItemResult, ImportOpenSpecReq,
     ImportOpenSpecResult, LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq,
     MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, MetaTaskStatus, ObjectType,
-    OpenSpecImportProvenance, OpenSpecImportProvenanceCommon, OpenSpecSourceDigest, OpenSpecTaskId,
-    OverlapQueryReq, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem,
-    ReadyQueueMetrics, ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact,
-    RepoopsAuthorityLockFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq,
-    RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
-    ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
-    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
-    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
-    StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
-    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
-    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq,
-    WorkSubtask, bd_import_v1_subtask_id, make_id, parse_generated_members,
+    OpenSpecImportProvenance, OpenSpecImportProvenanceCommon, OpenSpecMissionArtifactMetadata,
+    OpenSpecSourceDigest, OpenSpecTaskId, OverlapQueryReq, PublishArtifactReq, QueueId,
+    ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
+    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
+    RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, RequestReservationReq,
+    RequestReviewReq, Reservation, ReservationId, ReservationOverlapConflictPayload,
+    ReservationScope, ReservationState, ResolveConflictReq, Review, ReviewSubtask, ReviewTarget,
+    ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole, SessionState, SessionStatus,
+    SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq, StuckSubtask,
+    SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority,
+    SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
+    TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id,
+    make_id, parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
@@ -4984,6 +4985,38 @@ fn openspec_import_provenance_rejects_object_kind_mismatches() {
     let subtask_json = serde_json::to_value(&subtask).expect("subtask provenance serializes");
     assert_eq!(subtask_json["object_id"], "subtask-1");
 
+    let generated_artifact_subtask = r#"{"object_type":"subtask","object_id":"subtask-1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":"1.1","proposal_digest":null,"design_digest":null,"tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[],"mission_artifact_digests":[{"path":".codex/state/better-droid/change-1/mission/mission-packet.json","digest":"blake3:packet"}],"mission_artifacts":[".codex/state/better-droid/change-1/mission/mission-packet.json"],"task_digest":"blake3:task","updated_at":123}"#;
+    let generated_artifact =
+        serde_json::from_str::<OpenSpecImportProvenance>(generated_artifact_subtask)
+            .expect("generated artifact provenance should decode");
+    let generated_artifact_json = serde_json::to_value(&generated_artifact)
+        .expect("generated artifact provenance serializes");
+    assert_eq!(
+        generated_artifact_json["mission_artifact_metadata"][0]["storage_class"],
+        "runtime_generated"
+    );
+    assert_eq!(
+        generated_artifact_json["mission_artifact_metadata"][0]["schema"],
+        "mission_packet.v1"
+    );
+    assert_eq!(
+        generated_artifact_json["mission_artifact_metadata"][0]["digest"],
+        "blake3:packet"
+    );
+    let explicit_metadata = r#"{"object_type":"subtask","object_id":"subtask-1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":"1.1","proposal_digest":null,"design_digest":null,"tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[],"mission_artifact_digests":[{"path":".codex/state/better-droid/change-1/mission/mission-packet.json","digest":"blake3:packet"}],"mission_artifact_metadata":[{"artifact_name":"mission-packet.json","artifact_kind":"better-droid-mission-artifact","schema":"mission_packet.v1","digest":"blake3:packet","storage_class":"runtime_generated","locator":".codex/state/better-droid/change-1/mission/mission-packet.json","generator":"persisted metadata sentinel"}],"mission_artifacts":[".codex/state/better-droid/change-1/mission/mission-packet.json"],"task_digest":"blake3:task","updated_at":123}"#;
+    let explicit = serde_json::from_str::<OpenSpecImportProvenance>(explicit_metadata)
+        .expect("explicit mission artifact metadata should decode");
+    assert_eq!(
+        explicit.mission_artifact_metadata()[0].generator,
+        "persisted metadata sentinel"
+    );
+    let explicit_json =
+        serde_json::to_value(&explicit).expect("explicit metadata provenance serializes");
+    assert_eq!(
+        explicit_json["mission_artifact_metadata"][0]["generator"],
+        "persisted metadata sentinel"
+    );
+
     let invalid_subtask_id = r#"{"object_type":"subtask","object_id":"subtask 1","planning_format":"openspec","openspec_change_id":"change-1","openspec_change_path":"openspec/changes/change-1","openspec_task_id":"1.1","proposal_digest":null,"design_digest":null,"tasks_digest":"blake3:tasks","spec_digests":[],"source_digests":[],"mission_artifact_digests":[],"mission_artifacts":[],"task_digest":"blake3:task","updated_at":123}"#;
     let invalid_subtask_id_err =
         serde_json::from_str::<OpenSpecImportProvenance>(invalid_subtask_id)
@@ -5053,6 +5086,35 @@ fn openspec_import_provenance_rejects_object_kind_mismatches() {
         TimestampMs::parse(123).expect("valid timestamp"),
     )
     .expect_err("OpenSpec provenance constructor should reject invalid mission artifact paths");
+    let common_with_metadata = OpenSpecImportProvenanceCommon::with_mission_artifact_metadata(
+        "change-1",
+        "openspec/changes/change-1",
+        "blake3:tasks",
+        vec![],
+        vec![
+            OpenSpecSourceDigest::new(
+                ".codex/state/better-droid/change-1/mission/mission-packet.json",
+                "blake3:packet",
+            )
+            .expect("valid mission artifact digest"),
+        ],
+        vec![OpenSpecMissionArtifactMetadata {
+            artifact_name: "mission-packet.json".to_owned(),
+            artifact_kind: "better-droid-mission-artifact".to_owned(),
+            schema: "mission_packet.v1".to_owned(),
+            digest: "blake3:packet".to_owned(),
+            storage_class: "runtime_generated".to_owned(),
+            locator: ".codex/state/better-droid/change-1/mission/mission-packet.json".to_owned(),
+            generator: "persisted metadata sentinel".to_owned(),
+        }],
+        vec![".codex/state/better-droid/change-1/mission/mission-packet.json".to_owned()],
+        TimestampMs::parse(123).expect("valid timestamp"),
+    )
+    .expect("explicit mission artifact metadata should survive constructor");
+    assert_eq!(
+        common_with_metadata.mission_artifact_metadata()[0].generator,
+        "persisted metadata sentinel"
+    );
 
     let common = OpenSpecImportProvenanceCommon::new(
         "change-1",

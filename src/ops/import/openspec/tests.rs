@@ -72,6 +72,19 @@ fn openspec_import_provenance_is_queryable_for_imported_subtasks() {
             .iter()
             .any(|artifact| artifact.ends_with("mission-packet.json"))
     );
+    let packet_metadata = provenance
+        .mission_artifact_metadata()
+        .iter()
+        .find(|metadata| metadata.artifact_name == "mission-packet.json")
+        .expect("mission packet metadata should be stored");
+    assert_eq!(packet_metadata.storage_class, "runtime_generated");
+    assert_eq!(packet_metadata.schema, "mission_packet.v1");
+    assert_eq!(packet_metadata.generator, "better-droid compile");
+    assert!(
+        packet_metadata
+            .locator
+            .starts_with(".codex/state/better-droid/provenance-query/mission/")
+    );
 }
 
 #[test]
@@ -181,12 +194,7 @@ fn openspec_mission_packet_loader_rejects_missing_blocked_and_stale_artifacts() 
     let tmp = TempDir::new().expect("tempdir");
     seed_better_droid_change(tmp.path(), "blocked-import");
     compile_better_droid_change(tmp.path(), "blocked-import");
-    let mission_dir = tmp
-        .path()
-        .join("openspec")
-        .join("changes")
-        .join("blocked-import")
-        .join("mission");
+    let mission_dir = generated_mission_dir(tmp.path(), "blocked-import");
 
     fs::remove_file(mission_dir.join("path-policy.json")).expect("remove path policy");
     let missing =
@@ -231,12 +239,7 @@ fn openspec_mission_packet_loader_rejects_duplicate_ids_and_missing_task_digest(
     let tmp = TempDir::new().expect("tempdir");
     seed_better_droid_change(tmp.path(), "invalid-task-packet");
     compile_better_droid_change(tmp.path(), "invalid-task-packet");
-    let mission_dir = tmp
-        .path()
-        .join("openspec")
-        .join("changes")
-        .join("invalid-task-packet")
-        .join("mission");
+    let mission_dir = generated_mission_dir(tmp.path(), "invalid-task-packet");
 
     mutate_mission(&mission_dir, |mission| {
         let tasks = mission["tasks"].as_array_mut().expect("tasks array");
@@ -398,7 +401,7 @@ fn openspec_mission_packet_loader_rejects_corrupt_compiled_artifact_shapes() {
         report["artifact_digests"]
             .as_object_mut()
             .expect("artifact digests object")
-            .remove("openspec/changes/missing-digest-packet/mission/mission.json");
+            .remove(".codex/state/better-droid/missing-digest-packet/mission/mission.json");
     });
     assert_invalid_source_detail(
         tmp.path(),
@@ -623,8 +626,13 @@ fn compile_better_droid_change(root: &Path, change_id: &str) {
 fn compiled_mission_dir(root: &Path, change_id: &str) -> std::path::PathBuf {
     seed_better_droid_change(root, change_id);
     compile_better_droid_change(root, change_id);
-    root.join("openspec")
-        .join("changes")
+    generated_mission_dir(root, change_id)
+}
+
+fn generated_mission_dir(root: &Path, change_id: &str) -> std::path::PathBuf {
+    root.join(".codex")
+        .join("state")
+        .join("better-droid")
         .join(change_id)
         .join("mission")
 }
@@ -685,11 +693,11 @@ fn refresh_artifact_digests(mission_dir: &Path) {
         "assumptions.json",
     ] {
         let path = mission_dir.join(artifact);
-        let relative = normalize_relative_path(&relative_from_openspec_root(&path));
+        let relative = normalize_relative_path(&relative_from_artifact_root(&path));
         digests.insert(relative, canonical_json_digest(&read_json(&path)));
     }
     report["artifact_digests"] = serde_json::to_value(&digests).expect("artifact digests json");
-    let relative_report = normalize_relative_path(&relative_from_openspec_root(&report_path));
+    let relative_report = normalize_relative_path(&relative_from_artifact_root(&report_path));
     let self_digest = canonical_json_digest(&report);
     let object = report["artifact_digests"]
         .as_object_mut()
@@ -698,10 +706,10 @@ fn refresh_artifact_digests(mission_dir: &Path) {
     write_json(&report_path, &report);
 }
 
-fn relative_from_openspec_root(path: &Path) -> std::path::PathBuf {
+fn relative_from_artifact_root(path: &Path) -> std::path::PathBuf {
     let components = path.components().collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
-        if component.as_os_str() == "openspec" {
+        if component.as_os_str() == ".codex" || component.as_os_str() == "openspec" {
             return components[index..].iter().collect();
         }
     }

@@ -10,9 +10,9 @@ use super::{
     AgentPrincipalId, Artifact, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask,
     MetaTaskId, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, Review, ReviewId,
-    ReviewTarget, ReviewVerdict, Session, SessionToken, Subtask, SubtaskId, SubtaskKind,
-    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs,
-    VerifierId,
+    ReviewTarget, ReviewVerdict, Session, SessionToken, SettlementTarget, Subtask, SubtaskId,
+    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle,
+    TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -848,6 +848,118 @@ impl ClaimableSubtaskAvailability {
     #[must_use]
     pub const fn reviewer_claimable_count(&self) -> usize {
         self.reviewer_claimable_count
+    }
+}
+
+/// Read-only scheduler candidate for an executor or reviewer lane.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtaskCandidate {
+    pub subtask_id: SubtaskId,
+    pub meta_task_id: MetaTaskId,
+    pub title: SubtaskTitle,
+    pub kind: SubtaskKind,
+    pub review_target: Option<ReviewTarget>,
+    pub state: SubtaskState,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub priority: SubtaskPriority,
+    pub effective_priority: i64,
+    pub is_repair_followup: bool,
+    pub blocked_dependents_count: usize,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+impl SubtaskCandidate {
+    /// Builds one read-only subtask candidate from persisted facts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subtask_id: SubtaskId,
+        meta_task_id: MetaTaskId,
+        title: SubtaskTitle,
+        kind: SubtaskKind,
+        review_target_subtask_id: Option<SubtaskId>,
+        review_target_artifact_digest: Option<ArtifactDigest>,
+        state: SubtaskState,
+        artifact_digest: Option<ArtifactDigest>,
+        priority: SubtaskPriority,
+        effective_priority: i64,
+        is_repair_followup: bool,
+        blocked_dependents_count: usize,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let review_target = match (
+            kind,
+            review_target_subtask_id,
+            review_target_artifact_digest,
+        ) {
+            (SubtaskKind::Work, None, None) => None,
+            (SubtaskKind::Review, Some(subtask_id), Some(artifact_digest)) => {
+                Some(ReviewTarget::new(subtask_id, artifact_digest))
+            }
+            (SubtaskKind::Work, _, _) => {
+                return Err("work candidate cannot carry review target".to_owned());
+            }
+            (SubtaskKind::Review, _, _) => {
+                return Err("review candidate requires complete review target".to_owned());
+            }
+        };
+        if updated_at < created_at {
+            return Err(
+                "candidate updated_at must be greater than or equal to created_at".to_owned(),
+            );
+        }
+        Ok(Self {
+            subtask_id,
+            meta_task_id,
+            title,
+            kind,
+            review_target,
+            state,
+            artifact_digest,
+            priority,
+            effective_priority,
+            is_repair_followup,
+            blocked_dependents_count,
+            created_at,
+            updated_at,
+        })
+    }
+}
+
+/// Read-only scheduler candidate for the apply queue lane.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadyQueueCandidate {
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub subtask_id: SubtaskId,
+    pub settlement_target: SettlementTarget,
+    pub state: ReadyQueueState,
+    pub last_claim_fence_seq: Option<i64>,
+    pub enqueued_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+impl ReadyQueueCandidate {
+    /// Builds an apply-lane candidate from a queued ready-queue item.
+    pub fn from_item(item: &ReadyQueueItem) -> Result<Self, String> {
+        if item.state() != ReadyQueueState::Queued {
+            return Err("ready-queue candidate must be queued".to_owned());
+        }
+        Ok(Self {
+            queue_id: QueueId::parse(item.queue_id().to_owned()).map_err(|err| err.to_string())?,
+            artifact_digest: ArtifactDigest::parse(item.artifact_digest().to_owned())
+                .map_err(|err| err.to_string())?,
+            subtask_id: SubtaskId::parse(item.subtask_id().to_owned())
+                .map_err(|err| err.to_string())?,
+            settlement_target: item.settlement_target(),
+            state: item.state(),
+            last_claim_fence_seq: item.claim_fence_seq(),
+            enqueued_at: TimestampMs::parse(item.enqueued_at()).map_err(|err| err.to_string())?,
+            updated_at: TimestampMs::parse(item.updated_at()).map_err(|err| err.to_string())?,
+        })
     }
 }
 

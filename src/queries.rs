@@ -8,10 +8,11 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         ActorKind, Artifact, Claim, ClaimState, Event, MetaTask, MutationIdempotencyRecord,
-        ObjectType, OpenSpecImportProvenance, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
-        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
-        SubtaskRow, TimestampMs, claim_state_name, object_type_name, parse_generated_members,
-        reservation_state_name, session_state_name,
+        ObjectType, OpenSpecImportProvenance, OpenSpecMissionArtifactMetadata,
+        OpenSpecSourceDigest, ReadyQueueItem, Reservation, ReservationState, Review,
+        RuntimeAttestation, Session, SessionState, SessionToken, SubtaskRow, TimestampMs,
+        claim_state_name, object_type_name, parse_generated_members, reservation_state_name,
+        session_state_name,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -520,7 +521,8 @@ pub(crate) fn load_import_provenance_tx(
         SELECT object_type, object_id, planning_format, openspec_change_id,
                openspec_change_path, openspec_task_id, proposal_digest, design_digest,
                tasks_digest, spec_digests_json, source_digests_json,
-               mission_artifact_digests_json, mission_artifacts_json, task_digest, updated_at
+               mission_artifact_digests_json, mission_artifact_metadata_json,
+               mission_artifacts_json, task_digest, updated_at
         FROM import_provenance
         WHERE object_type = ?1 AND object_id = ?2
         "#,
@@ -606,7 +608,12 @@ fn map_import_provenance(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenSpecIm
     let mission_artifact_digests =
         serde_json::from_str::<Vec<OpenSpecSourceDigest>>(&mission_artifact_digests_json)
             .map_err(to_sql_err)?;
-    let mission_artifacts_json: String = row.get(12)?;
+    let mission_artifact_metadata_json: String = row.get(12)?;
+    let mission_artifact_metadata = serde_json::from_str::<Vec<OpenSpecMissionArtifactMetadata>>(
+        &mission_artifact_metadata_json,
+    )
+    .map_err(to_sql_err)?;
+    let mission_artifacts_json: String = row.get(13)?;
     let mission_artifacts =
         serde_json::from_str::<Vec<String>>(&mission_artifacts_json).map_err(to_sql_err)?;
 
@@ -623,9 +630,10 @@ fn map_import_provenance(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenSpecIm
         spec_digests,
         source_digests,
         mission_artifact_digests,
+        mission_artifact_metadata,
         mission_artifacts,
-        row.get(13)?,
         row.get(14)?,
+        row.get(15)?,
     )
     .map_err(to_sql_err)
 }

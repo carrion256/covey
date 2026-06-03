@@ -86,7 +86,9 @@ fn compiled_mission_error_to_covey(error: BetterDroidError) -> CoveyError {
         },
         BetterDroidError::OutputPathEscape { path } => CoveyError::InvalidSourceSchema {
             path,
-            detail: "output path escapes mission directory".to_owned(),
+            detail:
+                "output path must stay inside the project and outside openspec mission artifacts"
+                    .to_owned(),
         },
         BetterDroidError::Json(source) => CoveyError::InvalidSourceSchema {
             path: "compiled Better Droid mission".to_owned(),

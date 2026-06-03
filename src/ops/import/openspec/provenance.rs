@@ -78,6 +78,7 @@ pub(super) fn provenance_equivalent(
         && existing.spec_digests() == expected.spec_digests()
         && existing.source_digests() == expected.source_digests()
         && existing.mission_artifact_digests() == expected.mission_artifact_digests()
+        && existing.mission_artifact_metadata() == expected.mission_artifact_metadata()
         && existing.mission_artifacts() == expected.mission_artifacts()
         && existing.task_digest() == expected.task_digest()
 }
@@ -100,8 +101,9 @@ pub(super) fn upsert_openspec_provenance_tx(
             object_type, object_id, planning_format, openspec_change_id,
             openspec_change_path, openspec_task_id, proposal_digest, design_digest,
             tasks_digest, spec_digests_json, source_digests_json,
-            mission_artifact_digests_json, mission_artifacts_json, task_digest, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            mission_artifact_digests_json, mission_artifact_metadata_json,
+            mission_artifacts_json, task_digest, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
         ON CONFLICT(object_type, object_id) DO UPDATE SET
             planning_format = excluded.planning_format,
             openspec_change_id = excluded.openspec_change_id,
@@ -113,6 +115,7 @@ pub(super) fn upsert_openspec_provenance_tx(
             spec_digests_json = excluded.spec_digests_json,
             source_digests_json = excluded.source_digests_json,
             mission_artifact_digests_json = excluded.mission_artifact_digests_json,
+            mission_artifact_metadata_json = excluded.mission_artifact_metadata_json,
             mission_artifacts_json = excluded.mission_artifacts_json,
             task_digest = excluded.task_digest,
             updated_at = excluded.updated_at
@@ -130,6 +133,7 @@ pub(super) fn upsert_openspec_provenance_tx(
             serde_json::to_string(provenance.spec_digests())?,
             serde_json::to_string(provenance.source_digests())?,
             serde_json::to_string(provenance.mission_artifact_digests())?,
+            serde_json::to_string(provenance.mission_artifact_metadata())?,
             serde_json::to_string(provenance.mission_artifacts())?,
             provenance.task_digest(),
             now

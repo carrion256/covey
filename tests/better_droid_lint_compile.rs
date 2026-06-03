@@ -31,7 +31,7 @@ fn better_droid_compiled_change_imports_through_covey() {
     assert_eq!(compile.status, ReportStatus::CoveyImportReady);
     assert!(
         tmp.path()
-            .join("openspec/changes/covey-bd-lint-compile/mission/mission-packet.json")
+            .join(".codex/state/better-droid/covey-bd-lint-compile/mission/mission-packet.json")
             .is_file()
     );
 

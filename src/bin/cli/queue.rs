@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 #[derive(Subcommand, Debug)]
 pub(crate) enum QueueCommand {
     List(ListQueueArgs),
+    Candidates(QueueCandidatesArgs),
     Enqueue(EnqueueQueueArgs),
     #[command(name = "claim-next")]
     ClaimNext(ClaimNextQueueArgs),
@@ -19,6 +20,13 @@ pub(crate) enum QueueCommand {
     Supersede(SupersedeQueueArgs),
     Metrics,
 }
+
+#[derive(Args, Debug)]
+pub(crate) struct QueueCandidatesArgs {
+    #[arg(long, default_value_t = 100)]
+    pub(crate) limit: usize,
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct ListQueueArgs {
     #[arg(long, default_value_t = 100)]
