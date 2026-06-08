@@ -925,6 +925,30 @@ impl ReconcileApplyQueueReq {
     }
 }
 
+/// Request to reconcile changes-requested reviews into repair follow-up subtasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileChangesRequestedFollowupsReq {
+    pub session_token: SessionToken,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ReconcileChangesRequestedFollowupsReq {
+    /// Builds a repair-follow-up reconciliation request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or idempotency key is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
 /// Request to atomically claim the next ready-queue item for apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimReadyQueueReq {

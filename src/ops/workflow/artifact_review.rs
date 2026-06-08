@@ -8,10 +8,11 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ArtifactKind, ClaimState, DecideReviewReq, EventType, FailedReviewVerdict, ObjectType,
-        PublishArtifactReq, ReviewDecisionResult, ReviewState, ReviewVerdict, SessionRole,
-        SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle, review_state_name, review_verdict_name,
-        subtask_kind_name, subtask_state_name,
+        ArtifactKind, ChangesRequestedFollowupReconcileResult, ClaimState, DecideReviewReq,
+        EventType, FailedReviewVerdict, ObjectType, PublishArtifactReq,
+        ReconcileChangesRequestedFollowupsReq, ReviewDecisionResult, ReviewState, ReviewVerdict,
+        SessionRole, SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle, review_state_name,
+        review_verdict_name, subtask_kind_name, subtask_state_name,
     },
     ops::queue::enqueue_approved_subtask_for_apply_tx,
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
@@ -22,8 +23,8 @@ use crate::{
         clear_session_active_subtask, close_claim_and_detach, ensure_artifact_digest_unused,
         ensure_artifact_exists, ensure_length, ensure_meta_task_is_schedulable,
         ensure_no_open_review_round, ensure_subtask_transition, require_active_session,
-        require_current_claim, require_session_can_claim_kind, require_session_can_request_review,
-        subtask_exists,
+        require_current_claim, require_role, require_session_can_claim_kind,
+        require_session_can_request_review, subtask_exists,
     },
 };
 
@@ -507,6 +508,52 @@ impl Covey {
         );
         result
     }
+
+    /// Reconciles decided changes-requested reviews into executable repair follow-up subtasks.
+    pub fn reconcile_changes_requested_followups(
+        &self,
+        req: ReconcileChangesRequestedFollowupsReq,
+    ) -> Result<ChangesRequestedFollowupReconcileResult> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                req.session_token.as_str(),
+                "reconcile_changes_requested_followups",
+                req.idempotency_key.as_str(),
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(
+                        tx,
+                        req.session_token.as_str(),
+                        &[SessionRole::Orchestrator, SessionRole::Executor],
+                    )?;
+                    let followup_ids = ensure_changes_requested_followup_blocks_tx(
+                        tx,
+                        req.session_token.as_str(),
+                        now,
+                    )?;
+                    ChangesRequestedFollowupReconcileResult::new(followup_ids)
+                        .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
+                },
+            )
+        });
+        self.log_operation(
+            "reconcile_changes_requested_followups",
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |result| {
+                result
+                    .followup_subtask_ids
+                    .iter()
+                    .map(|subtask_id| format!("subtask:{subtask_id}"))
+                    .collect()
+            },
+        );
+        result
+    }
 }
 
 fn create_review_followup_subtask_tx(
@@ -638,7 +685,7 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
     tx: &Transaction<'_>,
     created_by_session: &str,
     now: i64,
-) -> Result<usize> {
+) -> Result<Vec<String>> {
     let mut stmt = tx.prepare(
         r#"
         SELECT r.review_id
@@ -668,7 +715,7 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
     let review_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    let mut created = 0;
+    let mut followup_subtask_ids = Vec::new();
     for review_id in review_ids {
         let review = load_review_tx(tx, &review_id)?;
         let source_subtask = load_subtask_tx(tx, review.subtask_id())?;
@@ -679,7 +726,7 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
                 to: SubtaskState::Available.into(),
                 object: ObjectType::Subtask,
             })?;
-        create_review_followup_subtask_tx(
+        let followup_subtask_id = create_review_followup_subtask_tx(
             tx,
             &source_subtask,
             review.artifact_digest(),
@@ -688,7 +735,7 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
             review.review_id(),
             now,
         )?;
-        created += 1;
+        followup_subtask_ids.push(followup_subtask_id.to_string());
     }
-    Ok(created)
+    Ok(followup_subtask_ids)
 }

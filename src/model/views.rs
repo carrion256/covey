@@ -1002,6 +1002,34 @@ impl ApplyQueueReconcileResult {
     }
 }
 
+/// Result of reconciling changes-requested reviews into repair follow-up subtasks.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesRequestedFollowupReconcileResult {
+    pub created_count: usize,
+    pub followup_subtask_ids: Vec<SubtaskId>,
+}
+
+impl ChangesRequestedFollowupReconcileResult {
+    /// Builds a typed reconciliation result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any generated subtask id is invalid.
+    pub fn new(followup_subtask_ids: Vec<String>) -> Result<Self, String> {
+        let created_count = followup_subtask_ids.len();
+        let followup_subtask_ids = followup_subtask_ids
+            .into_iter()
+            .map(SubtaskId::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+        Ok(Self {
+            created_count,
+            followup_subtask_ids,
+        })
+    }
+}
+
 /// Observability row for a subtask that has not moved recently enough to merit attention.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]

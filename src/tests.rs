@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use crate::{
-    ClaimNextReq, ClaimReadyQueueReq, Clock, Covey, ManualClock, RegisterSessionReq, Result,
-    SessionRole, SubmitMetaTaskReq,
+    ClaimNextReq, ClaimReadyQueueReq, Clock, Covey, ManualClock,
+    ReconcileChangesRequestedFollowupsReq, RegisterSessionReq, Result, SessionRole,
+    SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -237,6 +238,104 @@ fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
     );
     assert_eq!(queue_candidates.len(), 1);
     assert_eq!(queue_candidates[0].queue_id.as_str(), "queue-candidate");
+}
+
+#[test]
+fn changes_requested_reconciliation_creates_claimable_repair_followup() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let artifact_digest = "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let findings_digest = "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch-reconcile-followup', 'orch-reconcile-followup-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-followup', 'followup', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('source-work', 'meta-followup', 'source work', 'work', NULL, NULL, 'available', NULL, NULL, 5, 2, 2)",
+            [],
+        )
+        .expect("insert source work");
+        conn.execute(
+            "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES ('source-work', 1)",
+            [],
+        )
+        .expect("insert source fence counter");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES (?1, 'patch_bundle', 'HEAD', 'source-work', 'session-orch', 'source-work.json', ?1, 3)",
+            params![artifact_digest],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "UPDATE subtasks SET state = 'changes_requested', artifact_digest = ?1, updated_at = 3 WHERE subtask_id = 'source-work'",
+            params![artifact_digest],
+        )
+        .expect("mark source work changes requested");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-source-work', 'meta-followup', 'review source work', 'review', 'source-work', ?1, 'decided', NULL, NULL, 1, 3, 3)",
+            params![artifact_digest],
+        )
+        .expect("insert decided review subtask");
+        conn.execute(
+            "INSERT INTO reviews (review_id, subtask_id, artifact_digest, review_subtask_id, reviewer_session, state, verdict, findings_digest, created_at, updated_at)
+             VALUES ('review-source-work-id', 'source-work', ?1, 'review-source-work', 'session-orch', 'decided', 'changes_requested', ?2, 3, 3)",
+            params![artifact_digest, findings_digest],
+        )
+        .expect("insert changes-requested review");
+    }
+
+    let before = covey
+        .claimable_subtask_availability(Some("meta-followup"))
+        .expect("availability before reconciliation");
+    assert_eq!(before.executor_claimable_count(), 0);
+
+    let result = covey
+        .reconcile_changes_requested_followups(
+            ReconcileChangesRequestedFollowupsReq::try_from_raw_parts(
+                "session-orch",
+                "reconcile-followups",
+            )
+            .expect("valid reconcile followups request"),
+        )
+        .expect("reconcile followups");
+    assert_eq!(result.created_count, 1);
+
+    let after = covey
+        .claimable_subtask_availability(Some("meta-followup"))
+        .expect("availability after reconciliation");
+    assert_eq!(after.executor_claimable_count(), 1);
+    let candidates = covey
+        .subtask_candidates(SessionRole::Executor, 10, Some("meta-followup"))
+        .expect("executor candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].subtask_id, result.followup_subtask_ids[0],
+        "repair candidate should be the generated follow-up"
+    );
+    assert!(candidates[0].is_repair_followup);
+
+    let replay = covey
+        .reconcile_changes_requested_followups(
+            ReconcileChangesRequestedFollowupsReq::try_from_raw_parts(
+                "session-orch",
+                "reconcile-followups-again",
+            )
+            .expect("valid second reconcile followups request"),
+        )
+        .expect("second reconcile followups");
+    assert_eq!(replay.created_count, 0);
 }
 
 #[test]
