@@ -963,6 +963,45 @@ impl ReadyQueueCandidate {
     }
 }
 
+/// Result of reconciling approved or ready-for-apply work into the apply queue.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyQueueReconcileResult {
+    pub approved_enqueued_count: usize,
+    pub ready_for_apply_enqueued_count: usize,
+    pub queue_ids: Vec<QueueId>,
+}
+
+impl ApplyQueueReconcileResult {
+    /// Builds a typed reconciliation result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any generated queue id is invalid.
+    pub fn new(
+        approved_enqueued_count: usize,
+        ready_for_apply_enqueued_count: usize,
+        queue_ids: Vec<String>,
+    ) -> Result<Self, String> {
+        let queue_ids = queue_ids
+            .into_iter()
+            .map(QueueId::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+        Ok(Self {
+            approved_enqueued_count,
+            ready_for_apply_enqueued_count,
+            queue_ids,
+        })
+    }
+
+    /// Returns total queue rows created by reconciliation.
+    #[must_use]
+    pub const fn enqueued_count(&self) -> usize {
+        self.approved_enqueued_count + self.ready_for_apply_enqueued_count
+    }
+}
+
 /// Observability row for a subtask that has not moved recently enough to merit attention.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]

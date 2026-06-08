@@ -901,6 +901,30 @@ impl EnqueueForApplyReq {
     }
 }
 
+/// Request to reconcile approved work into the apply queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileApplyQueueReq {
+    pub session_token: SessionToken,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ReconcileApplyQueueReq {
+    /// Builds an apply-queue reconciliation request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or idempotency key is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
 /// Request to atomically claim the next ready-queue item for apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimReadyQueueReq {

@@ -5,6 +5,8 @@ pub(crate) enum QueueCommand {
     List(ListQueueArgs),
     Candidates(QueueCandidatesArgs),
     Enqueue(EnqueueQueueArgs),
+    #[command(name = "reconcile-apply")]
+    ReconcileApply(ReconcileApplyQueueArgs),
     #[command(name = "claim-next")]
     ClaimNext(ClaimNextQueueArgs),
     #[command(name = "mark-in-flight")]
@@ -41,6 +43,14 @@ pub(crate) struct EnqueueQueueArgs {
     pub(crate) artifact_digest: String,
     #[arg(long)]
     pub(crate) subtask_id: String,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ReconcileApplyQueueArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }

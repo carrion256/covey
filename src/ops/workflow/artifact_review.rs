@@ -13,6 +13,7 @@ use crate::{
         SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle, review_state_name, review_verdict_name,
         subtask_kind_name, subtask_state_name,
     },
+    ops::queue::enqueue_approved_subtask_for_apply_tx,
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
     store::append_session_event,
@@ -475,6 +476,19 @@ impl Covey {
                         &req,
                         now,
                     )?;
+
+                    if matches!(req.verdict, ReviewVerdict::Approve) {
+                        enqueue_approved_subtask_for_apply_tx(
+                            tx,
+                            &req.session_token,
+                            review.subtask_id(),
+                            review.artifact_digest(),
+                            crate::model::SettlementTarget::Canonical,
+                            now,
+                            format!("auto-enqueue-approved-review:{}", req.review_id),
+                        )?;
+                    }
+
                     Ok(decision)
                 },
             )

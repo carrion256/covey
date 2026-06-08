@@ -8,14 +8,15 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimReadyQueueReq, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
-        LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
-        QueueId, ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics,
-        ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq, ReviewId,
-        ReviewState, ReviewVerdict, RuntimeAttestation, Session, SessionRole, SessionToken,
-        SettlementTarget, SubtaskKind, SubtaskState, SupersedeQueueItemReq,
-        VerifyLandingAuthorizationReq, meta_task_state_name, ready_queue_state_name,
-        review_state_name, review_verdict_name, subtask_kind_name, subtask_state_name,
+        ApplyQueueReconcileResult, ArtifactKind, ClaimReadyQueueReq, EnqueueForApplyReq, EventType,
+        FenceSeq, FindingsDigest, LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq,
+        MetaTaskState, ObjectType, QueueId, ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem,
+        ReadyQueueMetrics, ReadyQueueState, ReconcileApplyQueueReq, RecordApplyVerificationReq,
+        RecordLandingReceiptReq, ReviewId, ReviewState, ReviewVerdict, RuntimeAttestation, Session,
+        SessionRole, SessionToken, SettlementTarget, SubtaskKind, SubtaskState,
+        SupersedeQueueItemReq, VerifyLandingAuthorizationReq, meta_task_state_name,
+        ready_queue_state_name, review_state_name, review_verdict_name, subtask_kind_name,
+        subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -59,11 +60,6 @@ impl Covey {
                     ensure_length("subtask_id", &req.subtask_id, MAX_OBJECT_ID_LEN)?;
                     let subtask = load_subtask_tx(tx, &req.subtask_id)?;
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
-                    ensure_subtask_transition(
-                        subtask.kind(),
-                        subtask.state(),
-                        SubtaskState::ReadyForApply,
-                    )?;
                     if subtask.artifact_digest().map(AsRef::as_ref)
                         != Some(req.artifact_digest.as_str())
                     {
@@ -73,69 +69,34 @@ impl Covey {
                             object: ObjectType::Subtask,
                         });
                     }
-
-                    tx.execute(
-                        r#"
-                        UPDATE ready_queue
-                        SET state = ?2,
-                            claimed_by_session_token = NULL,
-                            claim_lease_deadline = NULL,
-                            updated_at = ?3
-                        WHERE subtask_id = ?1 AND state IN (?4, ?5)
-                        "#,
-                        params![
-                            req.subtask_id,
-                            ready_queue_state_name(ReadyQueueState::Superseded),
-                            now,
-                            ready_queue_state_name(ReadyQueueState::Queued),
-                            ready_queue_state_name(ReadyQueueState::InFlight)
-                        ],
-                    )?;
-
-                    let queue_id = crate::model::make_id("queue");
-                    tx.execute(
-                        r#"
-                        INSERT INTO ready_queue (
-                            queue_id, artifact_digest, subtask_id, settlement_target, state,
-                            claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
-                            enqueued_at, updated_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?6)
-                        "#,
-                        params![
-                            queue_id,
-                            req.artifact_digest,
-                            req.subtask_id,
-                            settlement_target_name(req.settlement_target),
-                            ready_queue_state_name(ReadyQueueState::Queued),
-                            now
-                        ],
-                    )?;
-                    let updated = tx.execute(
-                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4 AND artifact_digest = ?5",
-                        params![
-                            req.subtask_id,
-                            subtask_state_name(SubtaskState::ReadyForApply),
-                            now,
-                            subtask_state_name(subtask.state()),
-                            req.artifact_digest
-                        ],
-                    )?;
-                    if updated != 1 {
-                        return Err(CoveyError::IllegalTransition {
-                            from: subtask.state().into(),
-                            to: SubtaskState::ReadyForApply.into(),
-                            object: ObjectType::Subtask,
-                        });
+                    if subtask.state() == SubtaskState::ReadyForApply {
+                        if let Some(queue_id) = active_queue_id_for_artifact_tx(
+                            tx,
+                            req.subtask_id.as_str(),
+                            req.artifact_digest.as_str(),
+                        )? {
+                            return Ok(queue_id);
+                        }
                     }
-                    append_session_event(
-                        tx,
-                        EventType::ReadyQueueEnqueued,
-                        ObjectType::ReadyQueue,
-                        &queue_id,
-                        &req.session_token,
-                        &req,
-                        now,
+                    ensure_subtask_transition(
+                        subtask.kind(),
+                        subtask.state(),
+                        SubtaskState::ReadyForApply,
                     )?;
+                    let queue_id = enqueue_approved_subtask_for_apply_tx(
+                        tx,
+                        &req.session_token,
+                        req.subtask_id.as_str(),
+                        req.artifact_digest.as_str(),
+                        req.settlement_target,
+                        now,
+                        req.idempotency_key.as_str(),
+                    )?
+                    .ok_or(CoveyError::IllegalTransition {
+                        from: subtask.state().into(),
+                        to: SubtaskState::ReadyForApply.into(),
+                        object: ObjectType::Subtask,
+                    })?;
                     Ok(queue_id)
                 },
             )
@@ -150,6 +111,61 @@ impl Covey {
                     format!("queue:{queue_id}"),
                     format!("subtask:{}", req.subtask_id),
                 ]
+            },
+        );
+        result
+    }
+
+    /// Reconciles approved or ready-for-apply artifacts into queued apply items.
+    pub fn reconcile_apply_queue(
+        &self,
+        req: ReconcileApplyQueueReq,
+    ) -> Result<ApplyQueueReconcileResult> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "reconcile_apply_queue",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(
+                        tx,
+                        &req.session_token,
+                        &[SessionRole::Orchestrator, SessionRole::ApplyGate],
+                    )?;
+                    let approved_queue_ids =
+                        enqueue_approved_apply_candidates_tx(tx, &req.session_token, now)?;
+                    let ready_queue_ids =
+                        enqueue_orphaned_ready_for_apply_items_tx(tx, &req.session_token, now)?;
+                    let approved_enqueued_count = approved_queue_ids.len();
+                    let ready_for_apply_enqueued_count = ready_queue_ids.len();
+                    let queue_ids = approved_queue_ids
+                        .into_iter()
+                        .chain(ready_queue_ids)
+                        .collect::<Vec<_>>();
+                    ApplyQueueReconcileResult::new(
+                        approved_enqueued_count,
+                        ready_for_apply_enqueued_count,
+                        queue_ids,
+                    )
+                    .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
+                },
+            )
+        });
+        self.log_operation(
+            "reconcile_apply_queue",
+            &req.session_token,
+            started_at,
+            &result,
+            |result| {
+                result
+                    .queue_ids
+                    .iter()
+                    .map(|queue_id| format!("queue:{queue_id}"))
+                    .collect()
             },
         );
         result
@@ -195,6 +211,19 @@ impl Covey {
                     .collect()
             },
         );
+        result
+    }
+
+    /// Returns one ready-queue item by id.
+    pub fn ready_queue_item(&self, queue_id: &str) -> Result<ReadyQueueItem> {
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| {
+            ensure_length("queue_id", queue_id, MAX_OBJECT_ID_LEN)?;
+            load_queue_item_tx(tx, queue_id)
+        });
+        self.log_operation("ready_queue_item", "system", started_at, &result, |item| {
+            vec![format!("queue:{}", item.queue_id())]
+        });
         result
     }
 
@@ -883,15 +912,17 @@ fn enqueue_orphaned_ready_for_apply_items_tx(
     tx: &Transaction<'_>,
     session_token: &SessionToken,
     now: i64,
-) -> Result<usize> {
+) -> Result<Vec<String>> {
     let mut stmt = tx.prepare(
         r#"
         SELECT s.subtask_id, s.artifact_digest
         FROM subtasks s
+        JOIN artifacts a ON a.artifact_digest = s.artifact_digest
         JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
         WHERE s.kind = ?1
           AND s.state = ?2
           AND s.artifact_digest IS NOT NULL
+          AND a.artifact_kind != ?10
           AND m.state NOT IN (?3, ?4)
           AND EXISTS (
               SELECT 1
@@ -922,51 +953,294 @@ fn enqueue_orphaned_ready_for_apply_items_tx(
             ready_queue_state_name(ReadyQueueState::Queued),
             ready_queue_state_name(ReadyQueueState::InFlight),
             ready_queue_state_name(ReadyQueueState::Applied),
+            artifact_kind_name(ArtifactKind::FindingsBundle),
         ],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )?;
     let orphaned = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    let mut enqueued = 0;
+    let mut queue_ids = Vec::with_capacity(orphaned.len());
     for (subtask_id, artifact_digest) in orphaned {
-        let queue_id = crate::model::make_id("queue");
-        tx.execute(
-            r#"
-            INSERT INTO ready_queue (
-                queue_id, artifact_digest, subtask_id, settlement_target, state,
-                claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
-                enqueued_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?6)
-            "#,
-            params![
-                &queue_id,
-                &artifact_digest,
-                &subtask_id,
-                settlement_target_name(SettlementTarget::Canonical),
-                ready_queue_state_name(ReadyQueueState::Queued),
-                now,
-            ],
-        )?;
-        let enqueue_event = EnqueueForApplyReq::try_from_raw_parts(
-            session_token.as_str(),
-            artifact_digest.clone(),
-            subtask_id.clone(),
-            SettlementTarget::Canonical,
-            format!("auto-requeue-ready-for-apply:{subtask_id}:{artifact_digest}"),
-        )?;
-        append_session_event(
+        if let Some(queue_id) = insert_ready_queue_item_tx(
             tx,
-            EventType::ReadyQueueEnqueued,
-            ObjectType::ReadyQueue,
-            &queue_id,
-            session_token.as_str(),
-            &enqueue_event,
+            session_token,
+            &subtask_id,
+            &artifact_digest,
+            SettlementTarget::Canonical,
             now,
-        )?;
-        enqueued += 1;
+            format!("auto-requeue-ready-for-apply:{subtask_id}:{artifact_digest}"),
+        )? {
+            queue_ids.push(queue_id);
+        }
     }
-    Ok(enqueued)
+    Ok(queue_ids)
+}
+
+fn enqueue_approved_apply_candidates_tx(
+    tx: &Transaction<'_>,
+    session_token: &SessionToken,
+    now: i64,
+) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT s.subtask_id, s.artifact_digest
+        FROM subtasks s
+        JOIN artifacts a ON a.artifact_digest = s.artifact_digest
+        JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
+        WHERE s.kind = ?1
+          AND s.state = ?2
+          AND s.artifact_digest IS NOT NULL
+          AND a.artifact_kind != ?10
+          AND m.state NOT IN (?3, ?4)
+          AND EXISTS (
+              SELECT 1
+              FROM reviews r
+              WHERE r.subtask_id = s.subtask_id
+                AND r.artifact_digest = s.artifact_digest
+                AND r.state = ?5
+                AND r.verdict = ?6
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ready_queue q
+              WHERE q.subtask_id = s.subtask_id
+                AND q.artifact_digest = s.artifact_digest
+                AND q.state IN (?7, ?8, ?9)
+          )
+        ORDER BY s.updated_at ASC, s.created_at ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            subtask_kind_name(SubtaskKind::Work),
+            subtask_state_name(SubtaskState::Approved),
+            meta_task_state_name(MetaTaskState::Completed),
+            meta_task_state_name(MetaTaskState::Cancelled),
+            review_state_name(ReviewState::Decided),
+            review_verdict_name(ReviewVerdict::Approve),
+            ready_queue_state_name(ReadyQueueState::Queued),
+            ready_queue_state_name(ReadyQueueState::InFlight),
+            ready_queue_state_name(ReadyQueueState::Applied),
+            artifact_kind_name(ArtifactKind::FindingsBundle),
+        ],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let approved = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut queue_ids = Vec::with_capacity(approved.len());
+    for (subtask_id, artifact_digest) in approved {
+        if let Some(queue_id) = enqueue_approved_subtask_for_apply_tx(
+            tx,
+            session_token,
+            &subtask_id,
+            &artifact_digest,
+            SettlementTarget::Canonical,
+            now,
+            format!("auto-enqueue-approved:{subtask_id}:{artifact_digest}"),
+        )? {
+            queue_ids.push(queue_id);
+        }
+    }
+    Ok(queue_ids)
+}
+
+pub(crate) fn enqueue_approved_subtask_for_apply_tx(
+    tx: &Transaction<'_>,
+    session_token: &SessionToken,
+    subtask_id: &str,
+    artifact_digest: &str,
+    settlement_target: SettlementTarget,
+    now: i64,
+    idempotency_key: impl Into<String>,
+) -> Result<Option<String>> {
+    ensure_applyable_artifact_tx(tx, artifact_digest)?;
+
+    tx.execute(
+        r#"
+        UPDATE ready_queue
+        SET state = ?2,
+            claimed_by_session_token = NULL,
+            claim_lease_deadline = NULL,
+            updated_at = ?3
+        WHERE subtask_id = ?1 AND state IN (?4, ?5)
+        "#,
+        params![
+            subtask_id,
+            ready_queue_state_name(ReadyQueueState::Superseded),
+            now,
+            ready_queue_state_name(ReadyQueueState::Queued),
+            ready_queue_state_name(ReadyQueueState::InFlight)
+        ],
+    )?;
+
+    let updated = tx.execute(
+        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4 AND artifact_digest = ?5",
+        params![
+            subtask_id,
+            subtask_state_name(SubtaskState::ReadyForApply),
+            now,
+            subtask_state_name(SubtaskState::Approved),
+            artifact_digest
+        ],
+    )?;
+    if updated == 0 {
+        let already_queued = tx
+            .query_row(
+                r#"
+            SELECT 1
+            FROM subtasks s
+            JOIN ready_queue q ON q.subtask_id = s.subtask_id
+            WHERE s.subtask_id = ?1
+              AND s.artifact_digest = ?2
+              AND s.state = ?3
+              AND q.artifact_digest = ?2
+              AND q.state IN (?4, ?5, ?6)
+            LIMIT 1
+            "#,
+                params![
+                    subtask_id,
+                    artifact_digest,
+                    subtask_state_name(SubtaskState::ReadyForApply),
+                    ready_queue_state_name(ReadyQueueState::Queued),
+                    ready_queue_state_name(ReadyQueueState::InFlight),
+                    ready_queue_state_name(ReadyQueueState::Applied),
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if already_queued {
+            return Ok(None);
+        }
+        return Err(CoveyError::IllegalTransition {
+            from: SubtaskState::Approved.into(),
+            to: SubtaskState::ReadyForApply.into(),
+            object: ObjectType::Subtask,
+        });
+    }
+
+    insert_ready_queue_item_tx(
+        tx,
+        session_token,
+        subtask_id,
+        artifact_digest,
+        settlement_target,
+        now,
+        idempotency_key,
+    )
+}
+
+fn insert_ready_queue_item_tx(
+    tx: &Transaction<'_>,
+    session_token: &SessionToken,
+    subtask_id: &str,
+    artifact_digest: &str,
+    settlement_target: SettlementTarget,
+    now: i64,
+    idempotency_key: impl Into<String>,
+) -> Result<Option<String>> {
+    let existing_queue_id = active_queue_id_for_artifact_tx(tx, subtask_id, artifact_digest)?;
+    if existing_queue_id.is_some() {
+        return Ok(None);
+    }
+
+    let queue_id = crate::model::make_id("queue");
+    tx.execute(
+        r#"
+        INSERT INTO ready_queue (
+            queue_id, artifact_digest, subtask_id, settlement_target, state,
+            claimed_by_session_token, claim_fence_seq, claim_lease_deadline,
+            enqueued_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?6)
+        "#,
+        params![
+            &queue_id,
+            artifact_digest,
+            subtask_id,
+            settlement_target_name(settlement_target),
+            ready_queue_state_name(ReadyQueueState::Queued),
+            now,
+        ],
+    )?;
+    let enqueue_event = EnqueueForApplyReq::try_from_raw_parts(
+        session_token.as_str(),
+        artifact_digest.to_owned(),
+        subtask_id.to_owned(),
+        settlement_target,
+        idempotency_key,
+    )?;
+    append_session_event(
+        tx,
+        EventType::ReadyQueueEnqueued,
+        ObjectType::ReadyQueue,
+        &queue_id,
+        session_token.as_str(),
+        &enqueue_event,
+        now,
+    )?;
+    Ok(Some(queue_id))
+}
+
+const fn artifact_kind_name(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::PatchBundle => "patch_bundle",
+        ArtifactKind::IsolatedCommitRef => "isolated_commit_ref",
+        ArtifactKind::TreeBundle => "tree_bundle",
+        ArtifactKind::FindingsBundle => "findings_bundle",
+        ArtifactKind::VerificationBundle => "verification_bundle",
+    }
+}
+
+const fn is_applyable_artifact_kind(kind: ArtifactKind) -> bool {
+    matches!(
+        kind,
+        ArtifactKind::PatchBundle
+            | ArtifactKind::IsolatedCommitRef
+            | ArtifactKind::TreeBundle
+            | ArtifactKind::VerificationBundle
+    )
+}
+
+fn ensure_applyable_artifact_tx(tx: &Transaction<'_>, artifact_digest: &str) -> Result<()> {
+    let artifact = load_artifact_tx(tx, artifact_digest)?;
+    if is_applyable_artifact_kind(artifact.artifact_kind) {
+        return Ok(());
+    }
+    Err(CoveyError::IllegalTransition {
+        from: SubtaskState::Approved.into(),
+        to: SubtaskState::ReadyForApply.into(),
+        object: ObjectType::Subtask,
+    })
+}
+
+fn active_queue_id_for_artifact_tx(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+    artifact_digest: &str,
+) -> Result<Option<String>> {
+    tx.query_row(
+        r#"
+        SELECT queue_id
+        FROM ready_queue
+        WHERE subtask_id = ?1
+          AND artifact_digest = ?2
+          AND state IN (?3, ?4, ?5)
+        ORDER BY enqueued_at ASC
+        LIMIT 1
+        "#,
+        params![
+            subtask_id,
+            artifact_digest,
+            ready_queue_state_name(ReadyQueueState::Queued),
+            ready_queue_state_name(ReadyQueueState::InFlight),
+            ready_queue_state_name(ReadyQueueState::Applied),
+        ],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 struct LiveApplyGateEvidence {

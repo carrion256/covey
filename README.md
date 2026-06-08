@@ -79,6 +79,13 @@ The approval workflow is:
 
 `available -> claimed -> in_progress -> artifact_published -> review_pending -> approved -> ready_for_apply -> applied`
 
+Approval is a transaction boundary: when a review verdict approves the current
+artifact, Covey advances the work to `ready_for_apply` and creates the queued
+apply item in the same lifecycle mutation. The explicit queue enqueue API
+remains idempotent for callers that retry after approval, and
+`queue reconcile-apply` materializes old approved/ready-for-apply rows that
+pre-date this invariant.
+
 Failed review verdicts move the reviewed work subtask to immutable evidence
 states: `changes_requested` or `blocked`. Covey creates a new `available` work
 subtask linked to the review findings for follow-up execution instead of
@@ -228,6 +235,16 @@ covey queue candidates --limit 50
 These commands expose exact claimable IDs and ordering facts for
 `mutai-scheduler`. They do not create claims, advance fences, lease queue items,
 append events, or perform lifecycle transitions.
+
+Apply-queue reconciliation is an explicit write path for operator and scheduler
+bootstrap:
+
+```bash
+covey queue reconcile-apply --session-token <orch-or-apply-gate-session>
+```
+
+It advances approved artifacts to `ready_for_apply` and enqueues missing
+ready-for-apply items exactly once.
 
 ### OpenSpec Import
 

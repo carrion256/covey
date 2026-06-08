@@ -27,6 +27,18 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
                 format!("queue {}", queue_id),
             ))
         }
+        QueueCommand::ReconcileApply(args) => {
+            let result =
+                store.reconcile_apply_queue(ReconcileApplyQueueReq::try_from_raw_parts(
+                    args.session_token,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("reconcile-apply-queue")),
+                )?)?;
+            Ok(Rendered::summary(
+                &result,
+                format!("apply queue reconciled {} item(s)", result.enqueued_count()),
+            ))
+        }
         QueueCommand::ClaimNext(args) => {
             let claim =
                 store.claim_next_ready_queue_item(ClaimReadyQueueReq::try_from_raw_parts(

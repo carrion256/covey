@@ -8,9 +8,10 @@ mod support;
 use covey::{
     ArtifactKind, ClaimNextReq, Covey, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     HeartbeatReq, IdempotencyKey, ManualClock, MarkAppliedReq, MarkInFlightReq, PublishArtifactReq,
-    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    RequestReservationReq, RequestReviewReq, ScopeClass, SessionRole, SessionState,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SubtaskTitle,
+    ReconcileApplyQueueReq, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ScopeClass,
+    SessionRole, SessionState, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    SubtaskTitle,
 };
 use rusqlite::params;
 use tempfile::TempDir;
@@ -249,8 +250,257 @@ fn expired_review_claim_can_be_reclaimed_started_and_decided() {
             .expect("work status")
             .subtask()
             .state(),
-        SubtaskState::Approved
+        SubtaskState::ReadyForApply
     );
+    let candidates = covey
+        .ready_queue_candidates(10)
+        .expect("approval enqueues apply candidate");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].subtask_id.as_str(), subtask_id);
+}
+
+#[test]
+fn reconcile_apply_queue_materializes_historical_approved_work() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let orchestrator = register(&covey, "orchestrator-reconcile", SessionRole::Orchestrator);
+    let worker = register(&covey, "worker-reconcile", SessionRole::Executor);
+    let reviewer = register(&covey, "reviewer-reconcile", SessionRole::Reviewer);
+
+    let meta_task_id = covey
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orchestrator.clone(),
+                "historical approved reconcile proof",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
+        .expect("submit meta task");
+    let subtask_id = covey
+        .create_subtask(
+            CreateSubtaskRequest::try_from_raw_parts(
+                orchestrator.clone(),
+                meta_task_id.clone(),
+                Some("historical_approved_work".into()),
+                "historical approved work",
+                1,
+                id_key("create-subtask"),
+            )
+            .expect("valid create-subtask request"),
+        )
+        .expect("create subtask");
+
+    let conn = rusqlite::Connection::open(&rig.db_path).expect("open test db");
+    conn.execute(
+        "INSERT INTO artifacts (
+            artifact_digest, artifact_kind, base_rev, produced_by_subtask_id,
+            produced_by_session, manifest_path, changed_paths_digest, created_at
+        ) VALUES (?1, 'patch_bundle', 'base', ?2, ?3, 'historical-approved.json', ?4, ?5)",
+        params![
+            "blake3:historical_approved_artifact",
+            subtask_id,
+            worker,
+            "blake3:historical_approved_paths",
+            1_700_000_000_001_i64,
+        ],
+    )
+    .expect("insert historical artifact");
+    conn.execute(
+        "UPDATE subtasks SET state = 'approved', artifact_digest = ?2, updated_at = ?3 WHERE subtask_id = ?1",
+        params![
+            subtask_id,
+            "blake3:historical_approved_artifact",
+            1_700_000_000_002_i64,
+        ],
+    )
+    .expect("set historical approved state");
+    conn.execute(
+        "INSERT INTO subtasks (
+            subtask_id, meta_task_id, title, kind, review_target_subtask_id,
+            review_target_artifact_digest, state, current_claim_id, artifact_digest,
+            priority, created_at, updated_at
+        ) VALUES ('review_historical_approved_subtask', ?1, 'historical approved review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, ?4, ?4)",
+        params![
+            meta_task_id,
+            &subtask_id,
+            "blake3:historical_approved_artifact",
+            1_700_000_000_003_i64,
+        ],
+    )
+    .expect("insert historical review subtask");
+    conn.execute(
+        "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES ('review_historical_approved_subtask', 1)",
+        [],
+    )
+    .expect("insert historical review fence counter");
+    conn.execute(
+        "INSERT INTO reviews (
+            review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id,
+            verdict, findings_digest, state, created_at, updated_at
+        ) VALUES ('review_historical_approved', ?1, ?2, ?3, 'review_historical_approved_subtask', 'approve', ?4, 'decided', ?5, ?5)",
+        params![
+            subtask_id,
+            "blake3:historical_approved_artifact",
+            reviewer,
+            "blake3:historical_approved_findings",
+            1_700_000_000_003_i64,
+        ],
+    )
+    .expect("insert historical approved review");
+    drop(conn);
+
+    let result = covey
+        .reconcile_apply_queue(
+            ReconcileApplyQueueReq::try_from_raw_parts(
+                orchestrator,
+                id_key("reconcile-apply-queue"),
+            )
+            .expect("valid reconcile request"),
+        )
+        .expect("reconcile apply queue");
+    assert_eq!(result.approved_enqueued_count, 1);
+    assert_eq!(result.ready_for_apply_enqueued_count, 0);
+
+    let status = covey
+        .subtask_status(&subtask_id)
+        .expect("historical approved status");
+    assert_eq!(status.subtask().state(), SubtaskState::ReadyForApply);
+    let candidates = covey
+        .ready_queue_candidates(10)
+        .expect("reconciled apply candidate");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].subtask_id.as_str(), subtask_id);
+}
+
+#[test]
+fn reconcile_apply_queue_skips_historical_approved_findings_bundle() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let orchestrator = register(
+        &covey,
+        "orchestrator-reconcile-findings",
+        SessionRole::Orchestrator,
+    );
+    let worker = register(&covey, "worker-reconcile-findings", SessionRole::Executor);
+    let reviewer = register(&covey, "reviewer-reconcile-findings", SessionRole::Reviewer);
+
+    let meta_task_id = covey
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orchestrator.clone(),
+                "historical findings reconcile proof",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
+        .expect("submit meta task");
+    let subtask_id = covey
+        .create_subtask(
+            CreateSubtaskRequest::try_from_raw_parts(
+                orchestrator.clone(),
+                meta_task_id.clone(),
+                Some("historical_findings_work".into()),
+                "historical findings work",
+                1,
+                id_key("create-subtask"),
+            )
+            .expect("valid create-subtask request"),
+        )
+        .expect("create subtask");
+
+    let conn = rusqlite::Connection::open(&rig.db_path).expect("open test db");
+    conn.execute(
+        "INSERT INTO artifacts (
+            artifact_digest, artifact_kind, base_rev, produced_by_subtask_id,
+            produced_by_session, manifest_path, changed_paths_digest, created_at
+        ) VALUES (?1, 'findings_bundle', 'base', ?2, ?3, 'historical-findings.json', ?4, ?5)",
+        params![
+            "blake3:historical_findings_artifact",
+            subtask_id,
+            worker,
+            "blake3:historical_findings_paths",
+            1_700_000_000_001_i64,
+        ],
+    )
+    .expect("insert historical findings artifact");
+    conn.execute(
+        "UPDATE subtasks SET state = 'approved', artifact_digest = ?2, updated_at = ?3 WHERE subtask_id = ?1",
+        params![
+            subtask_id,
+            "blake3:historical_findings_artifact",
+            1_700_000_000_002_i64,
+        ],
+    )
+    .expect("set historical approved state");
+    conn.execute(
+        "INSERT INTO subtasks (
+            subtask_id, meta_task_id, title, kind, review_target_subtask_id,
+            review_target_artifact_digest, state, current_claim_id, artifact_digest,
+            priority, created_at, updated_at
+        ) VALUES ('review_historical_findings_subtask', ?1, 'historical findings review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, ?4, ?4)",
+        params![
+            meta_task_id,
+            &subtask_id,
+            "blake3:historical_findings_artifact",
+            1_700_000_000_003_i64,
+        ],
+    )
+    .expect("insert historical findings review subtask");
+    conn.execute(
+        "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES ('review_historical_findings_subtask', 1)",
+        [],
+    )
+    .expect("insert historical findings review fence counter");
+    conn.execute(
+        "INSERT INTO reviews (
+            review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id,
+            verdict, findings_digest, state, created_at, updated_at
+        ) VALUES ('review_historical_findings', ?1, ?2, ?3, 'review_historical_findings_subtask', 'approve', ?4, 'decided', ?5, ?5)",
+        params![
+            subtask_id,
+            "blake3:historical_findings_artifact",
+            reviewer,
+            "blake3:historical_findings_digest",
+            1_700_000_000_003_i64,
+        ],
+    )
+    .expect("insert historical findings review");
+    drop(conn);
+
+    let result = covey
+        .reconcile_apply_queue(
+            ReconcileApplyQueueReq::try_from_raw_parts(
+                orchestrator.clone(),
+                id_key("reconcile-apply-queue"),
+            )
+            .expect("valid reconcile request"),
+        )
+        .expect("reconcile apply queue");
+    assert_eq!(result.enqueued_count(), 0);
+
+    let status = covey
+        .subtask_status(&subtask_id)
+        .expect("historical findings status");
+    assert_eq!(status.subtask().state(), SubtaskState::Approved);
+    assert!(
+        covey
+            .ready_queue_candidates(10)
+            .expect("queue candidates")
+            .is_empty()
+    );
+    covey
+        .enqueue_for_apply(
+            EnqueueForApplyReq::try_from_raw_parts(
+                orchestrator,
+                "blake3:historical_findings_artifact".to_owned(),
+                subtask_id,
+                SettlementTarget::Canonical,
+                id_key("enqueue-findings"),
+            )
+            .expect("valid enqueue request"),
+        )
+        .expect_err("findings bundles are not applyable artifacts");
 }
 
 #[test]
