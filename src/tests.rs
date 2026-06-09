@@ -339,6 +339,81 @@ fn changes_requested_reconciliation_creates_claimable_repair_followup() {
 }
 
 #[test]
+fn failed_review_reconciliation_creates_claimable_blocked_repair_followup() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let artifact_digest = "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let findings_digest = "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch-reconcile-blocked-followup', 'orch-reconcile-blocked-followup-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-blocked-followup', 'blocked followup', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('blocked-work', 'meta-blocked-followup', 'blocked work', 'work', NULL, NULL, 'available', NULL, NULL, 5, 2, 2)",
+            [],
+        )
+        .expect("insert blocked work");
+        conn.execute(
+            "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES ('blocked-work', 1)",
+            [],
+        )
+        .expect("insert blocked work fence counter");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES (?1, 'patch_bundle', 'HEAD', 'blocked-work', 'session-orch', 'blocked-work.json', ?1, 3)",
+            params![artifact_digest],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "UPDATE subtasks SET state = 'blocked', artifact_digest = ?1, updated_at = 3 WHERE subtask_id = 'blocked-work'",
+            params![artifact_digest],
+        )
+        .expect("mark blocked work blocked");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-blocked-work', 'meta-blocked-followup', 'review blocked work', 'review', 'blocked-work', ?1, 'decided', NULL, NULL, 1, 3, 3)",
+            params![artifact_digest],
+        )
+        .expect("insert decided review subtask");
+        conn.execute(
+            "INSERT INTO reviews (review_id, subtask_id, artifact_digest, review_subtask_id, reviewer_session, state, verdict, findings_digest, created_at, updated_at)
+             VALUES ('review-blocked-work-id', 'blocked-work', ?1, 'review-blocked-work', 'session-orch', 'decided', 'blocked', ?2, 3, 3)",
+            params![artifact_digest, findings_digest],
+        )
+        .expect("insert blocked review");
+    }
+
+    let result = covey
+        .reconcile_changes_requested_followups(
+            ReconcileChangesRequestedFollowupsReq::try_from_raw_parts(
+                "session-orch",
+                "reconcile-blocked-followups",
+            )
+            .expect("valid reconcile followups request"),
+        )
+        .expect("reconcile blocked followups");
+    assert_eq!(result.created_count, 1);
+
+    let candidates = covey
+        .subtask_candidates(SessionRole::Executor, 10, Some("meta-blocked-followup"))
+        .expect("executor candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].subtask_id, result.followup_subtask_ids[0]);
+    assert!(candidates[0].is_repair_followup);
+}
+
+#[test]
 fn recursive_review_followup_chain_satisfies_work_dependencies() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -467,6 +542,86 @@ fn recursive_review_followup_chain_satisfies_work_dependencies() {
         .expect("claim-next succeeds")
         .expect("dependent work should be claimable");
     assert_eq!(claim.subtask_id.as_str(), "dependent-work");
+}
+
+#[test]
+fn stuck_subtasks_exclude_failed_work_superseded_by_followup_chain() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let source_digest = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let repair_digest = "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let leaf_digest = "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch-stuck', 'orch-stuck-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+            [],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-stuck-chain', 'stuck chain', 'active', 'session-orch', 1, 1)",
+            [],
+        )
+        .expect("insert meta task");
+        for (subtask_id, state, artifact_digest, created_at) in [
+            ("source-work", "changes_requested", source_digest, 2),
+            ("applied-repair", "applied", repair_digest, 3),
+            ("unresolved-leaf", "changes_requested", leaf_digest, 4),
+        ] {
+            conn.execute(
+                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+                 VALUES (?1, 'meta-stuck-chain', ?1, 'work', NULL, NULL, 'available', NULL, NULL, 1, ?2, ?2)",
+                params![subtask_id, created_at],
+            )
+            .expect("insert work subtask");
+            conn.execute(
+                "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES (?1, 1)",
+                params![subtask_id],
+            )
+            .expect("insert fence counter");
+            conn.execute(
+                "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+                 VALUES (?1, 'patch_bundle', 'base', ?2, 'session-orch', ?2 || '.json', ?1, ?3)",
+                params![artifact_digest, subtask_id, created_at],
+            )
+            .expect("insert artifact");
+            conn.execute(
+                "UPDATE subtasks SET state = ?2, artifact_digest = ?3 WHERE subtask_id = ?1",
+                params![subtask_id, state, artifact_digest],
+            )
+            .expect("publish work artifact state");
+        }
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-source', 'meta-stuck-chain', 'review source', 'review', 'source-work', ?1, 'decided', NULL, NULL, 1, 3, 3)",
+            params![source_digest],
+        )
+        .expect("insert review subtask");
+        conn.execute(
+            "INSERT INTO reviews (review_id, subtask_id, artifact_digest, review_subtask_id, reviewer_session, state, verdict, findings_digest, created_at, updated_at)
+             VALUES ('review-source-id', 'source-work', ?1, 'review-source', 'session-orch', 'decided', 'changes_requested', ?1, 3, 3)",
+            params![source_digest],
+        )
+        .expect("insert review");
+        conn.execute(
+            "INSERT INTO review_followup_subtasks (review_id, source_subtask_id, source_artifact_digest, findings_digest, followup_subtask_id, created_by_session, created_at)
+             VALUES ('review-source-id', 'source-work', ?1, ?1, 'applied-repair', 'session-orch', 3)",
+            params![source_digest],
+        )
+        .expect("insert follow-up edge");
+    }
+
+    let stuck = covey
+        .list_stuck_subtasks(0, 10)
+        .expect("list stuck subtasks");
+    let stuck_ids = stuck
+        .iter()
+        .map(|row| row.subtask().subtask_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!stuck_ids.contains(&"source-work"));
+    assert!(stuck_ids.contains(&"unresolved-leaf"));
 }
 
 #[test]

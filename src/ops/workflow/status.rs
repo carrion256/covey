@@ -144,6 +144,23 @@ impl Covey {
                 LEFT JOIN sessions s ON s.session_token = c.owner_session_token
                 WHERE st.state NOT IN ('available', 'applied', 'abandoned', 'decided')
                   AND st.updated_at <= ?1
+                  AND NOT (
+                      st.state IN ('changes_requested', 'blocked')
+                      AND EXISTS (
+                          WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+                              SELECT f.followup_subtask_id
+                              FROM review_followup_subtasks f
+                              WHERE f.source_subtask_id = st.subtask_id
+                              UNION
+                              SELECT f.followup_subtask_id
+                              FROM review_followup_subtasks f
+                              JOIN followup_chain chain
+                                ON f.source_subtask_id = chain.followup_subtask_id
+                          )
+                          SELECT 1
+                          FROM followup_chain
+                      )
+                  )
                 ORDER BY st.updated_at ASC
                 LIMIT ?2
                 "#,

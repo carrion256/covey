@@ -692,9 +692,9 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
         FROM reviews r
         JOIN subtasks s ON s.subtask_id = r.subtask_id
         WHERE r.state = ?1
-          AND r.verdict = ?2
+          AND r.verdict IN (?2, ?5)
           AND s.kind = ?3
-          AND s.state = ?4
+          AND s.state IN (?4, ?6)
           AND NOT EXISTS (
               SELECT 1
               FROM review_followup_subtasks f
@@ -709,6 +709,8 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
             review_verdict_name(ReviewVerdict::ChangesRequested),
             subtask_kind_name(SubtaskKind::Work),
             subtask_state_name(SubtaskState::ChangesRequested),
+            review_verdict_name(ReviewVerdict::Blocked),
+            subtask_state_name(SubtaskState::Blocked),
         ],
         |row| row.get::<_, String>(0),
     )?;
