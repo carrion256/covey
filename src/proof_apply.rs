@@ -2766,15 +2766,27 @@ fn artifact_base_tree_oid(
     let manifest_path = PathBuf::from(artifact.manifest_path.as_str());
     let base_rev = read_json(&manifest_path)
         .ok()
-        .and_then(|manifest| {
-            manifest
-                .get("base_rev")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
+        .and_then(|manifest| artifact_manifest_base_tree_rev(&manifest))
         .unwrap_or_else(|| fallback_ref.to_owned());
     let base_tree_rev = format!("{base_rev}^{{tree}}");
     git(repo, ["rev-parse", base_tree_rev.as_str()])
+}
+
+fn artifact_manifest_base_tree_rev(manifest: &Value) -> Option<String> {
+    if manifest
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_some_and(|schema| schema == "mutai_scheduler_patch_artifact.v1")
+        && let Some(baseline_tree) = manifest.get("baseline_tree").and_then(Value::as_str)
+        && !baseline_tree.is_empty()
+    {
+        return Some(baseline_tree.to_owned());
+    }
+    manifest
+        .get("base_rev")
+        .and_then(Value::as_str)
+        .filter(|base_rev| !base_rev.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn load_review(conn: &Connection, review_id: &str) -> Result<ReviewRow, ApplyProofError> {
@@ -3981,6 +3993,29 @@ mod tests {
         assert_eq!(payload["base_tree_oid"], "tree-oid");
         assert_eq!(payload["changed_paths_digest"], "blake3:paths");
         assert!(payload.get("head_commit").is_none());
+    }
+
+    #[test]
+    fn scheduler_artifact_manifest_base_tree_prefers_assignment_baseline() {
+        let scheduler_manifest = serde_json::json!({
+            "schema": "mutai_scheduler_patch_artifact.v1",
+            "base_rev": "HEAD",
+            "baseline_tree": "tree-from-assignment-accept",
+        });
+        let hook_manifest = serde_json::json!({
+            "schema_version": "codex_hook_patch_bundle.v1",
+            "base_rev": "origin/main",
+            "baseline_tree": "ignored-for-hook-manifest",
+        });
+
+        assert_eq!(
+            artifact_manifest_base_tree_rev(&scheduler_manifest).as_deref(),
+            Some("tree-from-assignment-accept")
+        );
+        assert_eq!(
+            artifact_manifest_base_tree_rev(&hook_manifest).as_deref(),
+            Some("origin/main")
+        );
     }
 
     fn runtime_attestation_row(
