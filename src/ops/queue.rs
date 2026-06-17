@@ -10,13 +10,14 @@ use crate::{
     model::{
         ApplyQueueReconcileResult, ArtifactKind, ClaimReadyQueueReq, EnqueueForApplyReq, EventType,
         FenceSeq, FindingsDigest, LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq,
-        MetaTaskState, ObjectType, QueueId, ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem,
-        ReadyQueueMetrics, ReadyQueueState, ReconcileApplyQueueReq, RecordApplyVerificationReq,
-        RecordLandingReceiptReq, ReviewId, ReviewState, ReviewVerdict, RuntimeAttestation, Session,
-        SessionRole, SessionToken, SettlementTarget, SubtaskKind, SubtaskState,
+        MetaTaskState, ObjectType, OpenSpecArchiveStatus, OpenSpecArchiveStatusState, QueueId,
+        ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
+        ReconcileApplyQueueReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
+        RecordOpenSpecArchiveStatusReq, ReviewId, ReviewState, ReviewVerdict, RuntimeAttestation,
+        Session, SessionRole, SessionToken, SettlementTarget, SubtaskKind, SubtaskState,
         SupersedeQueueItemReq, VerifyLandingAuthorizationReq, meta_task_state_name,
-        ready_queue_state_name, review_state_name, review_verdict_name, subtask_kind_name,
-        subtask_state_name,
+        openspec_archive_status_state_name, ready_queue_state_name, review_state_name,
+        review_verdict_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -580,6 +581,13 @@ impl Covey {
                             object: ObjectType::Subtask,
                         });
                     }
+                    record_applied_openspec_archive_blocker_tx(
+                        tx,
+                        &req.session_token,
+                        &item,
+                        now,
+                        req.idempotency_key.as_str(),
+                    )?;
                     refresh_meta_task_state(tx, &subtask.meta_task_id, now)?;
                     append_session_event(
                         tx,
@@ -600,6 +608,166 @@ impl Covey {
             started_at,
             &result,
             |_| vec![format!("queue:{}", req.queue_id)],
+        );
+        result
+    }
+
+    /// Records or resolves the OpenSpec archive cleanup status for an applied queue item.
+    pub fn record_openspec_archive_status(
+        &self,
+        req: RecordOpenSpecArchiveStatusReq,
+    ) -> Result<OpenSpecArchiveStatus> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_openspec_archive_status",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
+                    ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+                    ensure_length(
+                        "openspec_change_id",
+                        &req.openspec_change_id,
+                        MAX_OBJECT_ID_LEN,
+                    )?;
+                    if let Some(reason) = &req.blocked_reason {
+                        ensure_length("blocked_reason", reason, MAX_OBJECT_ID_LEN)?;
+                    }
+                    if let Some(digest) = &req.archive_proof_digest {
+                        ensure_length("archive_proof_digest", digest, MAX_DIGEST_LEN)?;
+                    }
+
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
+                    let queue_id = QueueId::parse(item.queue_id())?;
+                    if item.state() != ReadyQueueState::Applied {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: queue_id.clone(),
+                            reason: "OpenSpec archive status requires an applied queue item"
+                                .to_owned(),
+                        });
+                    }
+                    if item.artifact_digest() != req.artifact_digest {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: queue_id.clone(),
+                            reason:
+                                "OpenSpec archive status artifact digest does not match queue item"
+                                    .to_owned(),
+                        });
+                    }
+                    let scope_change_id = openspec_change_id_for_subtask_tx(tx, item.subtask_id())?
+                        .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: queue_id.clone(),
+                            reason: "OpenSpec archive status requires imported subtask scope"
+                                .to_owned(),
+                        })?;
+                    if scope_change_id != req.openspec_change_id {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id,
+                            reason:
+                                "OpenSpec archive status change id does not match imported scope"
+                                    .to_owned(),
+                        });
+                    }
+
+                    let existing =
+                        load_openspec_archive_status_optional_tx(tx, req.queue_id.as_str())?;
+                    if let Some(existing) = existing {
+                        if archive_status_matches_req(&existing, &req) {
+                            return Ok(existing);
+                        }
+                        if existing.state == OpenSpecArchiveStatusState::Blocked
+                            && req.state == OpenSpecArchiveStatusState::Archived
+                        {
+                            update_openspec_archive_status_tx(tx, &req, item.subtask_id(), now)?;
+                            append_session_event(
+                                tx,
+                                EventType::OpenSpecArchiveStatusRecorded,
+                                ObjectType::ReadyQueue,
+                                &req.queue_id,
+                                &req.session_token,
+                                &req,
+                                now,
+                            )?;
+                            return load_openspec_archive_status_tx(tx, req.queue_id.as_str());
+                        }
+                        return Err(CoveyError::IllegalTransition {
+                            from: existing.state.into(),
+                            to: req.state.into(),
+                            object: ObjectType::ReadyQueue,
+                        });
+                    }
+
+                    insert_openspec_archive_status_tx(tx, &req, item.subtask_id(), now, now)?;
+                    append_session_event(
+                        tx,
+                        EventType::OpenSpecArchiveStatusRecorded,
+                        ObjectType::ReadyQueue,
+                        &req.queue_id,
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    load_openspec_archive_status_tx(tx, req.queue_id.as_str())
+                },
+            )
+        });
+        self.log_operation(
+            "record_openspec_archive_status",
+            &req.session_token,
+            started_at,
+            &result,
+            |status| vec![format!("queue:{}", status.queue_id())],
+        );
+        result
+    }
+
+    /// Returns applied OpenSpec queue items still blocked on archive cleanup.
+    pub fn open_openspec_archive_blockers(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<OpenSpecArchiveStatus>> {
+        let started_at = Instant::now();
+        let result = if limit == 0 {
+            Ok(Vec::new())
+        } else {
+            self.with_read_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    r#"
+                    SELECT queue_id, subtask_id, artifact_digest, openspec_change_id, state,
+                           blocked_reason, archive_proof_digest, recorded_by_session,
+                           created_at, updated_at
+                    FROM openspec_archive_status
+                    WHERE state = ?1
+                    ORDER BY updated_at ASC, queue_id ASC
+                    LIMIT ?2
+                    "#,
+                )?;
+                let rows = stmt.query_map(
+                    params![
+                        openspec_archive_status_state_name(OpenSpecArchiveStatusState::Blocked),
+                        limit as i64
+                    ],
+                    deserialize_row::<OpenSpecArchiveStatus>,
+                )?;
+                collect_rows(rows)
+            })
+        };
+        self.log_operation(
+            "open_openspec_archive_blockers",
+            "system",
+            started_at,
+            &result,
+            |items| {
+                items
+                    .iter()
+                    .map(|item| format!("queue:{}", item.queue_id()))
+                    .collect()
+            },
         );
         result
     }
@@ -1181,6 +1349,188 @@ fn insert_ready_queue_item_tx(
         now,
     )?;
     Ok(Some(queue_id))
+}
+
+fn record_applied_openspec_archive_blocker_tx(
+    tx: &Transaction<'_>,
+    session_token: &SessionToken,
+    item: &ReadyQueueItem,
+    now: i64,
+    idempotency_key: &str,
+) -> Result<()> {
+    let Some(openspec_change_id) = openspec_change_id_for_subtask_tx(tx, item.subtask_id())? else {
+        return Ok(());
+    };
+    let req = RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+        session_token.as_str(),
+        item.queue_id().to_owned(),
+        item.artifact_digest().to_owned(),
+        openspec_change_id.as_str().to_owned(),
+        OpenSpecArchiveStatusState::Blocked,
+        Some("applied_but_unarchived".to_owned()),
+        None,
+        format!("auto-openspec-archive-blocker:{idempotency_key}"),
+    )?;
+    let existing = load_openspec_archive_status_optional_tx(tx, item.queue_id())?;
+    if let Some(existing) = existing {
+        if archive_status_matches_req(&existing, &req) {
+            return Ok(());
+        }
+        return Err(CoveyError::IllegalTransition {
+            from: existing.state.into(),
+            to: req.state.into(),
+            object: ObjectType::ReadyQueue,
+        });
+    }
+    insert_openspec_archive_status_tx(tx, &req, item.subtask_id(), now, now)?;
+    append_session_event(
+        tx,
+        EventType::OpenSpecArchiveStatusRecorded,
+        ObjectType::ReadyQueue,
+        item.queue_id(),
+        session_token.as_str(),
+        &req,
+        now,
+    )
+}
+
+fn openspec_change_id_for_subtask_tx(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+) -> Result<Option<crate::model::OpenSpecChangeId>> {
+    tx.query_row(
+        "SELECT openspec_change_id FROM openspec_subtask_scope WHERE subtask_id = ?1",
+        params![subtask_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(crate::model::OpenSpecChangeId::parse)
+    .transpose()
+    .map_err(Into::into)
+}
+
+fn load_openspec_archive_status_tx(
+    tx: &Transaction<'_>,
+    queue_id: &str,
+) -> Result<OpenSpecArchiveStatus> {
+    tx.query_row(
+        r#"
+        SELECT queue_id, subtask_id, artifact_digest, openspec_change_id, state,
+               blocked_reason, archive_proof_digest, recorded_by_session,
+               created_at, updated_at
+        FROM openspec_archive_status
+        WHERE queue_id = ?1
+        "#,
+        params![queue_id],
+        deserialize_row::<OpenSpecArchiveStatus>,
+    )
+    .map_err(Into::into)
+}
+
+fn load_openspec_archive_status_optional_tx(
+    tx: &Transaction<'_>,
+    queue_id: &str,
+) -> Result<Option<OpenSpecArchiveStatus>> {
+    tx.query_row(
+        r#"
+        SELECT queue_id, subtask_id, artifact_digest, openspec_change_id, state,
+               blocked_reason, archive_proof_digest, recorded_by_session,
+               created_at, updated_at
+        FROM openspec_archive_status
+        WHERE queue_id = ?1
+        "#,
+        params![queue_id],
+        deserialize_row::<OpenSpecArchiveStatus>,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn archive_status_matches_req(
+    status: &OpenSpecArchiveStatus,
+    req: &RecordOpenSpecArchiveStatusReq,
+) -> bool {
+    status.queue_id == req.queue_id
+        && status.artifact_digest == req.artifact_digest
+        && status.openspec_change_id == req.openspec_change_id
+        && status.state == req.state
+        && status.blocked_reason == req.blocked_reason
+        && status.archive_proof_digest == req.archive_proof_digest
+}
+
+fn insert_openspec_archive_status_tx(
+    tx: &Transaction<'_>,
+    req: &RecordOpenSpecArchiveStatusReq,
+    subtask_id: &str,
+    created_at: i64,
+    updated_at: i64,
+) -> Result<()> {
+    tx.execute(
+        r#"
+        INSERT INTO openspec_archive_status (
+            queue_id, subtask_id, artifact_digest, openspec_change_id, state,
+            blocked_reason, archive_proof_digest, recorded_by_session,
+            created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            req.queue_id.as_str(),
+            subtask_id,
+            req.artifact_digest.as_str(),
+            req.openspec_change_id.as_str(),
+            openspec_archive_status_state_name(req.state),
+            req.blocked_reason.as_ref().map(AsRef::as_ref),
+            req.archive_proof_digest.as_ref().map(AsRef::as_ref),
+            req.session_token.as_str(),
+            created_at,
+            updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn update_openspec_archive_status_tx(
+    tx: &Transaction<'_>,
+    req: &RecordOpenSpecArchiveStatusReq,
+    subtask_id: &str,
+    now: i64,
+) -> Result<()> {
+    let updated = tx.execute(
+        r#"
+        UPDATE openspec_archive_status
+        SET state = ?2,
+            blocked_reason = ?3,
+            archive_proof_digest = ?4,
+            recorded_by_session = ?5,
+            updated_at = ?6
+        WHERE queue_id = ?1
+          AND subtask_id = ?7
+          AND artifact_digest = ?8
+          AND openspec_change_id = ?9
+          AND state = ?10
+        "#,
+        params![
+            req.queue_id.as_str(),
+            openspec_archive_status_state_name(req.state),
+            req.blocked_reason.as_ref().map(AsRef::as_ref),
+            req.archive_proof_digest.as_ref().map(AsRef::as_ref),
+            req.session_token.as_str(),
+            now,
+            subtask_id,
+            req.artifact_digest.as_str(),
+            req.openspec_change_id.as_str(),
+            openspec_archive_status_state_name(OpenSpecArchiveStatusState::Blocked),
+        ],
+    )?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(CoveyError::IllegalTransition {
+            from: OpenSpecArchiveStatusState::Blocked.into(),
+            to: req.state.into(),
+            object: ObjectType::ReadyQueue,
+        })
+    }
 }
 
 const fn artifact_kind_name(kind: ArtifactKind) -> &'static str {

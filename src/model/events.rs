@@ -66,6 +66,9 @@ impl EventPayload {
             EventType::ReadyQueueApplied => {
                 Self::ReadyQueueApplied(serde_json::from_str(payload_json)?)
             }
+            EventType::OpenSpecArchiveStatusRecorded => {
+                Self::OpenSpecArchiveStatusRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::ReadyQueueSuperseded => {
                 Self::ReadyQueueSuperseded(serde_json::from_str(payload_json)?)
             }

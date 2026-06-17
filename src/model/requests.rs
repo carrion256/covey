@@ -12,11 +12,12 @@ use super::{
     AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
     CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid,
-    LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, PermissiveLandingReceiptDigest,
-    PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath,
-    ReservationId, ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId,
-    ScopeClass, SessionRole, SessionToken, SettlementTarget, SubtaskId, SubtaskPriority,
-    SubtaskTitle, TimestampMs, VerifierId,
+    LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, OpenSpecArchiveBlockedReason,
+    OpenSpecArchiveStatusState, OpenSpecChangeId, PermissiveLandingReceiptDigest, PromptText,
+    ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId,
+    ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass,
+    SessionRole, SessionToken, SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle,
+    TimestampMs, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -1234,6 +1235,74 @@ impl MarkAppliedReq {
             session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
             claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record cleanup status for an applied OpenSpec-imported queue item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordOpenSpecArchiveStatusReq {
+    pub session_token: SessionToken,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub state: OpenSpecArchiveStatusState,
+    pub blocked_reason: Option<OpenSpecArchiveBlockedReason>,
+    pub archive_proof_digest: Option<ArtifactDigest>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordOpenSpecArchiveStatusReq {
+    /// Builds an OpenSpec archive cleanup status request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identifiers or digests are invalid, or when the
+    /// evidence fields do not match the requested cleanup state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        queue_id: impl Into<String>,
+        artifact_digest: impl Into<String>,
+        openspec_change_id: impl Into<String>,
+        state: OpenSpecArchiveStatusState,
+        blocked_reason: Option<String>,
+        archive_proof_digest: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        let blocked_reason = blocked_reason
+            .map(OpenSpecArchiveBlockedReason::parse)
+            .transpose()?;
+        let archive_proof_digest = archive_proof_digest
+            .map(ArtifactDigest::parse)
+            .transpose()?;
+        match state {
+            OpenSpecArchiveStatusState::Blocked => {
+                if blocked_reason.is_none() || archive_proof_digest.is_some() {
+                    return Err(CoveyTypeValidationError::new(
+                        "openspec_archive_status",
+                        "blocked status requires blocked_reason only",
+                    ));
+                }
+            }
+            OpenSpecArchiveStatusState::Archived => {
+                if blocked_reason.is_some() || archive_proof_digest.is_none() {
+                    return Err(CoveyTypeValidationError::new(
+                        "openspec_archive_status",
+                        "archived status requires archive_proof_digest only",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            queue_id: QueueId::parse(queue_id.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())?,
+            state,
+            blocked_reason,
+            archive_proof_digest,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }

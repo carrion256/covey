@@ -7,14 +7,14 @@ mod support;
 
 use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
-    Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, FenceSeq,
-    IdempotencyKey, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
-    PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
-    ResolveConflictReq, ReviewState, ReviewVerdict, ScopeClass, SessionRole, SettlementTarget,
-    StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SubtaskTitle, SupersedeQueueItemReq,
-    VerifyLandingAuthorizationReq,
+    Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, EventPayload,
+    FenceSeq, IdempotencyKey, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq,
+    OpenSpecArchiveStatusState, OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq,
+    RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
+    ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    SubtaskTitle, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -306,6 +306,305 @@ fn record_apply_verification(
             .expect("valid apply verification request"),
         )
         .expect("record apply verification");
+}
+
+fn attach_openspec_scope(rig: &Rig, subtask_id: &str, change_id: &str) {
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    conn.execute(
+        r#"
+        INSERT INTO openspec_subtask_scope (
+            subtask_id, openspec_change_id, openspec_task_id, source_path,
+            scenario_refs_json, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, '[]', ?5)
+        "#,
+        params![
+            subtask_id,
+            change_id,
+            format!("{subtask_id}-task"),
+            format!("openspec/changes/{change_id}/tasks.md"),
+            1_700_000_000_000_i64,
+        ],
+    )
+    .expect("insert openspec scope");
+}
+
+fn apply_queue_item(rig: &Rig, queue_id: &str, gate_principal: &str) -> FenceSeq {
+    let item = rig.covey.ready_queue_item(queue_id).expect("queue item");
+    let gate = register(&rig.covey, gate_principal, SessionRole::ApplyGate);
+    let claim = rig
+        .covey
+        .claim_next_ready_queue_item(claim_ready_queue_req(
+            gate.clone(),
+            30_000,
+            id_key("claim-ready-queue"),
+        ))
+        .expect("claim ready queue")
+        .expect("queue claim");
+    record_apply_verification(
+        &rig.covey,
+        &gate,
+        queue_id,
+        item.subtask_id(),
+        item.artifact_digest(),
+        &format!("{}-findings", item.artifact_digest()),
+        claim.claim_fence_seq,
+    );
+    rig.covey
+        .mark_applied(mark_applied_req(
+            gate,
+            queue_id.to_owned(),
+            claim.claim_fence_seq,
+            id_key("mark-applied"),
+        ))
+        .expect("mark applied");
+    claim.claim_fence_seq
+}
+
+fn record_archive_status_req(
+    session_token: impl Into<String>,
+    queue_id: impl Into<String>,
+    artifact_digest: impl Into<String>,
+    openspec_change_id: impl Into<String>,
+    state: OpenSpecArchiveStatusState,
+    blocked_reason: Option<&str>,
+    archive_proof_digest: Option<&str>,
+    idempotency_label: &str,
+) -> RecordOpenSpecArchiveStatusReq {
+    RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+        session_token,
+        queue_id,
+        artifact_digest,
+        openspec_change_id,
+        state,
+        blocked_reason.map(ToOwned::to_owned),
+        archive_proof_digest.map(ToOwned::to_owned),
+        id_key(idempotency_label),
+    )
+    .expect("valid archive status request")
+}
+
+#[rstest]
+fn mark_applied_creates_openspec_archive_blocker_for_imported_subtasks(rig: Rig) {
+    let (_orch, queue_id) = enqueue_ready_item(
+        &rig,
+        "openspec_archive_auto",
+        "blake3:openspec_archive_auto",
+    );
+    let item = rig.covey.ready_queue_item(&queue_id).expect("queue item");
+    attach_openspec_scope(&rig, item.subtask_id(), "change-auto");
+
+    apply_queue_item(&rig, &queue_id, "gate-openspec-archive-auto");
+
+    let blockers = rig
+        .covey
+        .open_openspec_archive_blockers(10)
+        .expect("archive blockers");
+    assert_eq!(blockers.len(), 1);
+    let blocker = &blockers[0];
+    assert_eq!(blocker.queue_id(), queue_id);
+    assert_eq!(blocker.subtask_id(), item.subtask_id());
+    assert_eq!(blocker.artifact_digest(), item.artifact_digest());
+    assert_eq!(blocker.openspec_change_id(), "change-auto");
+    assert_eq!(blocker.state, OpenSpecArchiveStatusState::Blocked);
+    assert_eq!(
+        blocker.blocked_reason.as_ref().map(AsRef::as_ref),
+        Some("applied_but_unarchived")
+    );
+    assert!(blocker.archive_proof_digest.is_none());
+    assert!(
+        rig.covey
+            .fetch_events(0, 100)
+            .expect("events")
+            .into_iter()
+            .filter_map(|event| event.typed().ok())
+            .any(|event| matches!(
+                event.payload,
+                EventPayload::OpenSpecArchiveStatusRecorded(_)
+            ))
+    );
+}
+
+#[rstest]
+fn mark_applied_does_not_create_archive_blocker_for_non_openspec_work(rig: Rig) {
+    let (_orch, queue_id) =
+        enqueue_ready_item(&rig, "non_openspec_archive", "blake3:non_openspec_archive");
+
+    apply_queue_item(&rig, &queue_id, "gate-non-openspec-archive");
+
+    assert_eq!(
+        rig.covey
+            .open_openspec_archive_blockers(10)
+            .expect("archive blockers"),
+        []
+    );
+}
+
+#[rstest]
+fn record_openspec_archive_status_rejects_invalid_targets_and_roles(rig: Rig) {
+    let (orch, queue_id) = enqueue_ready_item(
+        &rig,
+        "openspec_archive_reject",
+        "blake3:openspec_archive_reject",
+    );
+    let item = rig.covey.ready_queue_item(&queue_id).expect("queue item");
+    attach_openspec_scope(&rig, item.subtask_id(), "change-reject");
+
+    let non_applied = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            orch.clone(),
+            queue_id.clone(),
+            item.artifact_digest().to_owned(),
+            "change-reject",
+            OpenSpecArchiveStatusState::Blocked,
+            Some("applied_but_unarchived"),
+            None,
+            "archive-non-applied",
+        ));
+    assert!(matches!(
+        non_applied,
+        Err(CoveyError::ApplyGateEvidenceMissing { .. })
+    ));
+
+    apply_queue_item(&rig, &queue_id, "gate-openspec-archive-reject");
+    let worker = register(&rig.covey, "worker-archive-status", SessionRole::Executor);
+    let wrong_role = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            worker,
+            queue_id.clone(),
+            item.artifact_digest().to_owned(),
+            "change-reject",
+            OpenSpecArchiveStatusState::Archived,
+            None,
+            Some("blake3:archive_reject_proof"),
+            "archive-wrong-role",
+        ));
+    assert!(matches!(wrong_role, Err(CoveyError::WrongRole { .. })));
+
+    let mismatch = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            orch,
+            queue_id,
+            "blake3:wrong_artifact",
+            "change-reject",
+            OpenSpecArchiveStatusState::Archived,
+            None,
+            Some("blake3:archive_reject_proof"),
+            "archive-artifact-mismatch",
+        ));
+    assert!(matches!(
+        mismatch,
+        Err(CoveyError::ApplyGateEvidenceMissing { .. })
+    ));
+
+    assert!(
+        RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+            "session-token",
+            "queue-id",
+            "blake3:artifact",
+            "change-reject",
+            OpenSpecArchiveStatusState::Blocked,
+            None,
+            None,
+            "invalid-combo",
+        )
+        .is_err()
+    );
+    assert!(
+        RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+            "session-token",
+            "queue-id",
+            "blake3:artifact",
+            "change-reject",
+            OpenSpecArchiveStatusState::Archived,
+            Some("still blocked".to_owned()),
+            Some("blake3:proof".to_owned()),
+            "invalid-combo",
+        )
+        .is_err()
+    );
+}
+
+#[rstest]
+fn archive_status_receipts_are_idempotent_and_divergent_receipts_fail(rig: Rig) {
+    let (orch, queue_id) = enqueue_ready_item(
+        &rig,
+        "openspec_archive_idem",
+        "blake3:openspec_archive_idem",
+    );
+    let item = rig.covey.ready_queue_item(&queue_id).expect("queue item");
+    attach_openspec_scope(&rig, item.subtask_id(), "change-idem");
+    apply_queue_item(&rig, &queue_id, "gate-openspec-archive-idem");
+
+    let blocked = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            orch.clone(),
+            queue_id.clone(),
+            item.artifact_digest().to_owned(),
+            "change-idem",
+            OpenSpecArchiveStatusState::Blocked,
+            Some("applied_but_unarchived"),
+            None,
+            "archive-blocked-replay",
+        ))
+        .expect("replay blocked receipt");
+    assert_eq!(blocked.state, OpenSpecArchiveStatusState::Blocked);
+
+    let archived = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            orch.clone(),
+            queue_id.clone(),
+            item.artifact_digest().to_owned(),
+            "change-idem",
+            OpenSpecArchiveStatusState::Archived,
+            None,
+            Some("blake3:archive_idem_proof"),
+            "archive-archived",
+        ))
+        .expect("record archive proof");
+    assert_eq!(archived.state, OpenSpecArchiveStatusState::Archived);
+    assert_eq!(
+        rig.covey
+            .open_openspec_archive_blockers(10)
+            .expect("archive blockers"),
+        []
+    );
+
+    let archived_replay = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            orch.clone(),
+            queue_id.clone(),
+            item.artifact_digest().to_owned(),
+            "change-idem",
+            OpenSpecArchiveStatusState::Archived,
+            None,
+            Some("blake3:archive_idem_proof"),
+            "archive-archived-replay",
+        ))
+        .expect("replay archive proof");
+    assert_eq!(archived_replay.state, OpenSpecArchiveStatusState::Archived);
+
+    let divergent = rig
+        .covey
+        .record_openspec_archive_status(record_archive_status_req(
+            orch,
+            queue_id,
+            item.artifact_digest().to_owned(),
+            "change-idem",
+            OpenSpecArchiveStatusState::Archived,
+            None,
+            Some("blake3:different_archive_proof"),
+            "archive-divergent",
+        ));
+    assert!(matches!(
+        divergent,
+        Err(CoveyError::IllegalTransition { .. })
+    ));
 }
 
 #[rstest]

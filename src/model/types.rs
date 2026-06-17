@@ -645,6 +645,11 @@ string_newtype!(ConflictId, "conflict_id", validate_tokenish);
 string_newtype!(EventObjectId, "event_object_id", validate_tokenish);
 string_newtype!(ArtifactDigest, "artifact_digest", validate_digest);
 string_newtype!(
+    OpenSpecArchiveBlockedReason,
+    "blocked_reason",
+    validate_normalized_text
+);
+string_newtype!(
     ArtifactManifestPath,
     "manifest_path",
     validate_manifest_path

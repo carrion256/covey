@@ -9,8 +9,9 @@ use super::{
     CoveyTypeValidationError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     EventObjectId, EventSeq, EventType, ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq,
     ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId, MetaTaskState, ModelId,
-    ObjectType, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq,
-    QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq,
+    ObjectType, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
+    PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq, QueueId,
+    ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq, RecordOpenSpecArchiveStatusReq,
     RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq, ReleaseClaimReq,
     RequestReservationReq, RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
     ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass,
@@ -3474,6 +3475,181 @@ impl<'de> Deserialize<'de> for ReadyQueueItem {
     }
 }
 
+/// Durable cleanup status for an applied OpenSpec-imported queue item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenSpecArchiveStatus {
+    pub queue_id: QueueId,
+    pub subtask_id: SubtaskId,
+    pub artifact_digest: ArtifactDigest,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub state: OpenSpecArchiveStatusState,
+    pub blocked_reason: Option<OpenSpecArchiveBlockedReason>,
+    pub archive_proof_digest: Option<ArtifactDigest>,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawOpenSpecArchiveStatus {
+    queue_id: String,
+    subtask_id: String,
+    artifact_digest: String,
+    openspec_change_id: String,
+    state: OpenSpecArchiveStatusState,
+    blocked_reason: Option<String>,
+    archive_proof_digest: Option<String>,
+    recorded_by_session: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl OpenSpecArchiveStatus {
+    /// Builds a cleanup status row, rejecting invalid state/evidence shapes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when timestamps are not monotonic or state-specific
+    /// evidence fields are missing or contradictory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_parts(
+        queue_id: QueueId,
+        subtask_id: SubtaskId,
+        artifact_digest: ArtifactDigest,
+        openspec_change_id: OpenSpecChangeId,
+        state: OpenSpecArchiveStatusState,
+        blocked_reason: Option<OpenSpecArchiveBlockedReason>,
+        archive_proof_digest: Option<ArtifactDigest>,
+        recorded_by_session: SessionToken,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        if updated_at < created_at {
+            return Err(
+                "openspec archive status updated_at must be greater than or equal to created_at"
+                    .to_owned(),
+            );
+        }
+        match state {
+            OpenSpecArchiveStatusState::Blocked => {
+                if blocked_reason.is_none() || archive_proof_digest.is_some() {
+                    return Err(
+                        "blocked OpenSpec archive status requires blocked_reason only".to_owned(),
+                    );
+                }
+            }
+            OpenSpecArchiveStatusState::Archived => {
+                if blocked_reason.is_some() || archive_proof_digest.is_none() {
+                    return Err(
+                        "archived OpenSpec archive status requires archive_proof_digest only"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(Self {
+            queue_id,
+            subtask_id,
+            artifact_digest,
+            openspec_change_id,
+            state,
+            blocked_reason,
+            archive_proof_digest,
+            recorded_by_session,
+            created_at,
+            updated_at,
+        })
+    }
+
+    #[must_use]
+    pub fn queue_id(&self) -> &str {
+        self.queue_id.as_str()
+    }
+
+    #[must_use]
+    pub fn subtask_id(&self) -> &str {
+        self.subtask_id.as_str()
+    }
+
+    #[must_use]
+    pub fn artifact_digest(&self) -> &str {
+        self.artifact_digest.as_str()
+    }
+
+    #[must_use]
+    pub fn openspec_change_id(&self) -> &str {
+        self.openspec_change_id.as_str()
+    }
+}
+
+impl TryFrom<RawOpenSpecArchiveStatus> for OpenSpecArchiveStatus {
+    type Error = String;
+
+    fn try_from(raw: RawOpenSpecArchiveStatus) -> Result<Self, Self::Error> {
+        Self::try_from_parts(
+            QueueId::parse(raw.queue_id).map_err(|err| err.to_string())?,
+            SubtaskId::parse(raw.subtask_id).map_err(|err| err.to_string())?,
+            ArtifactDigest::parse(raw.artifact_digest).map_err(|err| err.to_string())?,
+            OpenSpecChangeId::parse(raw.openspec_change_id).map_err(|err| err.to_string())?,
+            raw.state,
+            raw.blocked_reason
+                .map(OpenSpecArchiveBlockedReason::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            raw.archive_proof_digest
+                .map(ArtifactDigest::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            SessionToken::parse(raw.recorded_by_session).map_err(|err| err.to_string())?,
+            TimestampMs::parse(raw.created_at).map_err(|err| err.to_string())?,
+            TimestampMs::parse(raw.updated_at).map_err(|err| err.to_string())?,
+        )
+    }
+}
+
+impl From<&OpenSpecArchiveStatus> for RawOpenSpecArchiveStatus {
+    fn from(status: &OpenSpecArchiveStatus) -> Self {
+        Self {
+            queue_id: status.queue_id().to_owned(),
+            subtask_id: status.subtask_id().to_owned(),
+            artifact_digest: status.artifact_digest().to_owned(),
+            openspec_change_id: status.openspec_change_id().to_owned(),
+            state: status.state,
+            blocked_reason: status
+                .blocked_reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_owned()),
+            archive_proof_digest: status
+                .archive_proof_digest
+                .as_ref()
+                .map(|digest| digest.as_str().to_owned()),
+            recorded_by_session: status.recorded_by_session.as_str().to_owned(),
+            created_at: status.created_at.get(),
+            updated_at: status.updated_at.get(),
+        }
+    }
+}
+
+impl Serialize for OpenSpecArchiveStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawOpenSpecArchiveStatus::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenSpecArchiveStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawOpenSpecArchiveStatus::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Accepted verifier evidence bound to one apply attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyVerification {
@@ -3896,6 +4072,7 @@ pub enum EventPayload {
     ReadyQueueInFlight(ReadyQueueClaim),
     ApplyVerificationRecorded(RecordApplyVerificationReq),
     ReadyQueueApplied(MarkAppliedReq),
+    OpenSpecArchiveStatusRecorded(RecordOpenSpecArchiveStatusReq),
     ReadyQueueSuperseded(SupersedeQueueItemReq),
     ReservationRequested(RequestReservationReq),
     ReservationReleased(Reservation),
@@ -3932,6 +4109,7 @@ impl EventPayload {
             Self::ReadyQueueInFlight(_) => EventType::ReadyQueueInFlight,
             Self::ApplyVerificationRecorded(_) => EventType::ApplyVerificationRecorded,
             Self::ReadyQueueApplied(_) => EventType::ReadyQueueApplied,
+            Self::OpenSpecArchiveStatusRecorded(_) => EventType::OpenSpecArchiveStatusRecorded,
             Self::ReadyQueueSuperseded(_) => EventType::ReadyQueueSuperseded,
             Self::ReservationRequested(_) => EventType::ReservationRequested,
             Self::ReservationReleased(_) => EventType::ReservationReleased,
@@ -3969,6 +4147,7 @@ impl EventPayload {
             | Self::ReadyQueueInFlight(_)
             | Self::ApplyVerificationRecorded(_)
             | Self::ReadyQueueApplied(_)
+            | Self::OpenSpecArchiveStatusRecorded(_)
             | Self::ReadyQueueSuperseded(_) => ObjectType::ReadyQueue,
             Self::ReservationRequested(_)
             | Self::ReservationReleased(_)

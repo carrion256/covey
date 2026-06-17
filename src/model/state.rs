@@ -86,6 +86,15 @@ pub(crate) const fn ready_queue_state_name(state: ReadyQueueState) -> &'static s
     }
 }
 
+pub(crate) const fn openspec_archive_status_state_name(
+    state: OpenSpecArchiveStatusState,
+) -> &'static str {
+    match state {
+        OpenSpecArchiveStatusState::Blocked => "blocked",
+        OpenSpecArchiveStatusState::Archived => "archived",
+    }
+}
+
 pub(crate) const fn meta_task_state_name(state: MetaTaskState) -> &'static str {
     match state {
         MetaTaskState::Planning => "planning",
@@ -166,6 +175,7 @@ pub enum EventType {
     ReadyQueueInFlight,
     ApplyVerificationRecorded,
     ReadyQueueApplied,
+    OpenSpecArchiveStatusRecorded,
     ReadyQueueSuperseded,
     ReservationRequested,
     ReservationReleased,
@@ -255,6 +265,15 @@ pub enum ClaimState {
     Released,
     Expired,
     Revoked,
+}
+
+/// Cleanup status for applied OpenSpec-imported queue items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OpenSpecArchiveStatusState {
+    Blocked,
+    Archived,
 }
 
 /// Immutable artifact bundle kinds tracked by Covey.
@@ -424,6 +443,8 @@ pub enum StateValue {
     Reservation(ReservationState),
     #[display("{_0}")]
     ReadyQueue(ReadyQueueState),
+    #[display("{_0}")]
+    OpenSpecArchiveStatus(OpenSpecArchiveStatusState),
     #[display("{_0}")]
     ConflictResolution(ConflictResolutionState),
 }

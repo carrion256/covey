@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::OpenSpecArchiveStatusStateArg;
 
 pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Result<Rendered> {
     match command {
@@ -157,6 +158,37 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
                 },
                 format!("queue applied {}", args.queue_id),
             ))
+        }
+        QueueCommand::RecordOpenSpecArchiveStatus(args) => {
+            let state = match args.state {
+                OpenSpecArchiveStatusStateArg::Blocked => OpenSpecArchiveStatusState::Blocked,
+                OpenSpecArchiveStatusStateArg::Archived => OpenSpecArchiveStatusState::Archived,
+            };
+            let status = store.record_openspec_archive_status(
+                RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+                    args.session_token,
+                    args.queue_id.clone(),
+                    args.artifact_digest,
+                    args.openspec_change_id,
+                    state,
+                    args.blocked_reason,
+                    args.archive_proof_digest,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("record-openspec-archive-status")),
+                )?,
+            )?;
+            Ok(Rendered::summary(
+                &status,
+                format!(
+                    "openspec archive status recorded {} state={:?}",
+                    status.queue_id(),
+                    status.state
+                ),
+            ))
+        }
+        QueueCommand::ListOpenSpecArchiveBlockers(args) => {
+            let blockers = store.open_openspec_archive_blockers(args.limit)?;
+            Ok(Rendered::pretty(&blockers))
         }
         QueueCommand::Supersede(args) => {
             store.supersede_queue_item(SupersedeQueueItemReq::try_from_raw_parts(

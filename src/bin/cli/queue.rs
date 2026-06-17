@@ -1,4 +1,11 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum OpenSpecArchiveStatusStateArg {
+    Blocked,
+    Archived,
+}
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QueueCommand {
@@ -19,6 +26,10 @@ pub(crate) enum QueueCommand {
     RecordLandingReceipt(RecordLandingReceiptArgs),
     #[command(name = "mark-applied")]
     MarkApplied(MarkAppliedArgs),
+    #[command(name = "record-openspec-archive-status")]
+    RecordOpenSpecArchiveStatus(RecordOpenSpecArchiveStatusArgs),
+    #[command(name = "list-openspec-archive-blockers")]
+    ListOpenSpecArchiveBlockers(ListOpenSpecArchiveBlockersArgs),
     Supersede(SupersedeQueueArgs),
     Metrics,
 }
@@ -149,6 +160,32 @@ pub(crate) struct MarkAppliedArgs {
     pub(crate) claim_fence_seq: i64,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RecordOpenSpecArchiveStatusArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) queue_id: String,
+    #[arg(long)]
+    pub(crate) artifact_digest: String,
+    #[arg(long)]
+    pub(crate) openspec_change_id: String,
+    #[arg(long, value_enum)]
+    pub(crate) state: OpenSpecArchiveStatusStateArg,
+    #[arg(long)]
+    pub(crate) blocked_reason: Option<String>,
+    #[arg(long)]
+    pub(crate) archive_proof_digest: Option<String>,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ListOpenSpecArchiveBlockersArgs {
+    #[arg(long, default_value_t = 100)]
+    pub(crate) limit: usize,
 }
 
 #[derive(Args, Debug)]

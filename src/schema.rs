@@ -43,6 +43,7 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::ReadyQueueInFlight => "ready_queue_in_flight",
         EventType::ApplyVerificationRecorded => "apply_verification_recorded",
         EventType::ReadyQueueApplied => "ready_queue_applied",
+        EventType::OpenSpecArchiveStatusRecorded => "open_spec_archive_status_recorded",
         EventType::ReadyQueueSuperseded => "ready_queue_superseded",
         EventType::ReservationRequested => "reservation_requested",
         EventType::ReservationReleased => "reservation_released",
