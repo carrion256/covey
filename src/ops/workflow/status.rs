@@ -450,6 +450,11 @@ fn landing_receipt_exists_for_subtask_tx(
             FROM landing_receipts receipt
             JOIN ready_queue queue ON queue.queue_id = receipt.queue_id
             WHERE queue.subtask_id = ?1
+            UNION ALL
+            SELECT 1
+            FROM permissive_landing_receipts receipt
+            JOIN reviews review ON review.review_id = receipt.review_id
+            WHERE review.subtask_id = ?1
         )
         "#,
         params![subtask_id],

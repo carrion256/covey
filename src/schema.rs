@@ -38,6 +38,7 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::ArtifactPublished => "artifact_published",
         EventType::ReviewRequested => "review_requested",
         EventType::ReviewDecided => "review_decided",
+        EventType::PermissiveLandingRecorded => "permissive_landing_recorded",
         EventType::ReadyQueueEnqueued => "ready_queue_enqueued",
         EventType::ReadyQueueInFlight => "ready_queue_in_flight",
         EventType::ApplyVerificationRecorded => "apply_verification_recorded",

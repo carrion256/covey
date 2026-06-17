@@ -51,6 +51,9 @@ impl EventPayload {
                 Self::ReviewRequested(serde_json::from_str(payload_json)?)
             }
             EventType::ReviewDecided => Self::ReviewDecided(serde_json::from_str(payload_json)?),
+            EventType::PermissiveLandingRecorded => {
+                Self::PermissiveLandingRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::ReadyQueueEnqueued => {
                 Self::ReadyQueueEnqueued(serde_json::from_str(payload_json)?)
             }

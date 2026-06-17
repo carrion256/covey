@@ -12,10 +12,11 @@ use super::{
     AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
     CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid,
-    LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, PromptText, ProviderId, ProviderRunId,
-    ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope, ReviewId,
-    ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole, SessionToken,
-    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
+    LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, PermissiveLandingReceiptDigest,
+    PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath,
+    ReservationId, ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId,
+    ScopeClass, SessionRole, SessionToken, SettlementTarget, SubtaskId, SubtaskPriority,
+    SubtaskTitle, TimestampMs, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -1103,6 +1104,59 @@ impl RecordLandingReceiptReq {
             claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
             target_ref: BaseRev::parse(target_ref.into())?,
             landed_commit_oid: LandedCommitOid::parse(landed_commit_oid.into())?,
+        })
+    }
+}
+
+/// Request to record a reviewer-led permissive landing receipt.
+///
+/// This is audit evidence for permissive fleet mode. It does not represent an
+/// Authority apply-gate settlement verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordPermissiveLandingReceiptReq {
+    pub session_token: SessionToken,
+    pub review_id: ReviewId,
+    pub claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub artifact_digest: ArtifactDigest,
+    pub findings_digest: FindingsDigest,
+    pub target_ref: BaseRev,
+    pub landed_commit_oid: Option<LandedCommitOid>,
+    pub receipt_digest: PermissiveLandingReceiptDigest,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordPermissiveLandingReceiptReq {
+    /// Builds a permissive landing receipt request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identifier, digest, fence, ref, or optional
+    /// landed commit oid is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        review_id: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        artifact_digest: impl Into<String>,
+        findings_digest: impl Into<String>,
+        target_ref: impl Into<String>,
+        landed_commit_oid: Option<String>,
+        receipt_digest: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            review_id: ReviewId::parse(review_id.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            findings_digest: FindingsDigest::parse(findings_digest.into())?,
+            target_ref: BaseRev::parse(target_ref.into())?,
+            landed_commit_oid: landed_commit_oid.map(LandedCommitOid::parse).transpose()?,
+            receipt_digest: PermissiveLandingReceiptDigest::parse(receipt_digest.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
 }

@@ -423,6 +423,7 @@ pub(crate) fn ensure_subtask_transition(
                 | (SubtaskState::ReviewPending, SubtaskState::ChangesRequested)
                 | (SubtaskState::ReviewPending, SubtaskState::Blocked)
                 | (SubtaskState::ReviewPending, SubtaskState::Approved)
+                | (SubtaskState::ReviewPending, SubtaskState::Applied)
                 | (SubtaskState::Approved, SubtaskState::ReadyForApply)
                 | (SubtaskState::ReadyForApply, SubtaskState::Applied)
         ),
@@ -727,6 +728,14 @@ mod tests {
                 SubtaskKind::Work,
                 SubtaskState::ReviewPending,
                 SubtaskState::Blocked,
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_subtask_transition(
+                SubtaskKind::Work,
+                SubtaskState::ReviewPending,
+                SubtaskState::Applied,
             )
             .is_ok()
         );

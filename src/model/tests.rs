@@ -11,18 +11,18 @@ use super::{
     OpenSpecImportProvenance, OpenSpecImportProvenanceCommon, OpenSpecMissionArtifactMetadata,
     OpenSpecSourceDigest, OpenSpecTaskId, OverlapQueryReq, PublishArtifactReq, QueueId,
     ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
-    RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
-    RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, RequestReservationReq,
-    RequestReviewReq, Reservation, ReservationId, ReservationOverlapConflictPayload,
-    ReservationScope, ReservationState, ResolveConflictReq, Review, ReviewSubtask, ReviewTarget,
-    ReviewVerdict, ScopeClass, Session, SessionHandle, SessionRole, SessionState, SessionStatus,
-    SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq, StuckSubtask,
-    SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority,
-    SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
-    TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id,
-    make_id, parse_generated_members,
+    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordPermissiveLandingReceiptReq,
+    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
+    RenewClaimReq, RenewReservationReq, RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact,
+    RepoopsAuthorityLockFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq,
+    RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
+    ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
+    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
+    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
+    StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
+    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
+    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq,
+    WorkSubtask, bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::CoveyError;
 use serde::Serialize;
@@ -2321,6 +2321,68 @@ fn landing_receipt_payload_rejects_invalid_typed_fields() {
     });
     serde_json::from_value::<RecordLandingReceiptReq>(invalid_landed_commit_oid)
         .expect_err("landing receipt should reject invalid commit oids");
+}
+
+#[test]
+fn permissive_landing_receipt_payload_rejects_invalid_typed_fields() {
+    let req = RecordPermissiveLandingReceiptReq::try_from_raw_parts(
+        "session-1",
+        "review-1",
+        "claim-1",
+        1,
+        "blake3:artifact",
+        "blake3:findings",
+        "refs/heads/main",
+        Some("0123456789abcdef".to_owned()),
+        "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "idem-1",
+    )
+    .expect("valid permissive landing receipt request");
+    assert_eq!(req.session_token, "session-1");
+    let value = serde_json::to_value(&req).expect("permissive receipt request serializes");
+    assert_eq!(value["review_id"], "review-1");
+    assert_eq!(value["claim_id"], "claim-1");
+    assert_eq!(value["artifact_digest"], "blake3:artifact");
+    assert_eq!(value["findings_digest"], "blake3:findings");
+    assert_eq!(value["target_ref"], "refs/heads/main");
+    assert_eq!(value["landed_commit_oid"], "0123456789abcdef");
+    assert_eq!(
+        value["receipt_digest"],
+        "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+    );
+    let decoded: RecordPermissiveLandingReceiptReq =
+        serde_json::from_value(value).expect("permissive receipt request deserializes");
+    assert_eq!(decoded, req);
+
+    let invalid_receipt_digest = serde_json::json!({
+        "session_token": "session-1",
+        "review_id": "review-1",
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "artifact_digest": "blake3:artifact",
+        "findings_digest": "blake3:findings",
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": null,
+        "receipt_digest": "receipt",
+        "idempotency_key": "idem-1"
+    });
+    serde_json::from_value::<RecordPermissiveLandingReceiptReq>(invalid_receipt_digest)
+        .expect_err("permissive receipt should reject invalid receipt digests");
+
+    let invalid_landed_commit_oid = serde_json::json!({
+        "session_token": "session-1",
+        "review_id": "review-1",
+        "claim_id": "claim-1",
+        "fence_seq": 1,
+        "artifact_digest": "blake3:artifact",
+        "findings_digest": "blake3:findings",
+        "target_ref": "refs/heads/main",
+        "landed_commit_oid": "not-a-hex-oid",
+        "receipt_digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "idempotency_key": "idem-1"
+    });
+    serde_json::from_value::<RecordPermissiveLandingReceiptReq>(invalid_landed_commit_oid)
+        .expect_err("permissive receipt should reject invalid commit oids");
 }
 
 #[test]
@@ -5775,6 +5837,19 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         "idem-decision".to_owned(),
     )
     .expect("valid review decision request");
+    let permissive_landing = RecordPermissiveLandingReceiptReq::try_from_raw_parts(
+        "session-reviewer",
+        "review-1",
+        "claim-review",
+        1,
+        "blake3:artifact",
+        "blake3:findings",
+        "refs/heads/main",
+        Some("0123456789abcdef".to_owned()),
+        "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "idem-permissive-landing",
+    )
+    .expect("valid permissive landing receipt request");
     let enqueue = EnqueueForApplyReq::try_from_raw_parts(
         "session-1".to_owned(),
         "blake3:artifact".to_owned(),
@@ -5897,6 +5972,11 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
             EventType::ReviewDecided,
             payload_json(&review_decision),
             EventPayload::ReviewDecided(review_decision),
+        ),
+        (
+            EventType::PermissiveLandingRecorded,
+            payload_json(&permissive_landing),
+            EventPayload::PermissiveLandingRecorded(permissive_landing),
         ),
         (
             EventType::ReadyQueueEnqueued,

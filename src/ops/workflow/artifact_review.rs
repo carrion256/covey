@@ -10,9 +10,10 @@ use crate::{
     model::{
         ArtifactKind, ChangesRequestedFollowupReconcileResult, ClaimState, DecideReviewReq,
         EventType, FailedReviewVerdict, ObjectType, PublishArtifactReq,
-        ReconcileChangesRequestedFollowupsReq, ReviewDecisionResult, ReviewState, ReviewVerdict,
-        SessionRole, SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle, review_state_name,
-        review_verdict_name, subtask_kind_name, subtask_state_name,
+        ReconcileChangesRequestedFollowupsReq, RecordPermissiveLandingReceiptReq,
+        ReviewDecisionResult, ReviewState, ReviewVerdict, SessionRole, SubtaskId, SubtaskKind,
+        SubtaskState, SubtaskTitle, review_state_name, review_verdict_name, subtask_kind_name,
+        subtask_state_name,
     },
     ops::queue::enqueue_approved_subtask_for_apply_tx,
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
@@ -496,6 +497,231 @@ impl Covey {
         });
         self.log_operation(
             "decide_review",
+            &req.session_token,
+            started_at,
+            &result,
+            |decision| {
+                vec![
+                    format!("review:{}", decision.review_id()),
+                    format!("claim:{}", req.claim_id),
+                ]
+            },
+        );
+        result
+    }
+
+    /// Records reviewer approval and an audit-only permissive landing receipt.
+    ///
+    /// This bypasses Authority apply-gate settlement by design. The receipt is
+    /// Covey audit evidence for permissive fleet mode, not settlement evidence.
+    pub fn record_permissive_landing_receipt(
+        &self,
+        req: RecordPermissiveLandingReceiptReq,
+    ) -> Result<ReviewDecisionResult> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            let lease_now = advance_lease_clock(tx, now)?;
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_permissive_landing_receipt",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    let session = crate::validators::require_role(
+                        tx,
+                        &req.session_token,
+                        &[SessionRole::Reviewer],
+                    )?;
+                    ensure_length("review_id", &req.review_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+                    ensure_length("findings_digest", &req.findings_digest, MAX_DIGEST_LEN)?;
+                    ensure_length("target_ref", &req.target_ref, MAX_BASE_REV_LEN)?;
+                    ensure_length("receipt_digest", &req.receipt_digest, MAX_DIGEST_LEN)?;
+                    if let Some(landed_commit_oid) = &req.landed_commit_oid {
+                        ensure_length(
+                            "landed_commit_oid",
+                            landed_commit_oid.as_str(),
+                            MAX_OBJECT_ID_LEN,
+                        )?;
+                    }
+                    let claim = require_current_claim(
+                        tx,
+                        &req.session_token,
+                        &req.claim_id,
+                        req.fence_seq,
+                        lease_now,
+                    )?;
+                    let review = load_review_tx(tx, &req.review_id)?;
+                    let review_subtask_id = review.review_subtask_id();
+                    if claim.subtask_id.as_str() != review_subtask_id {
+                        return Err(CoveyError::FenceTokenMismatch);
+                    }
+                    if review.artifact_digest() != req.artifact_digest.as_str() {
+                        return Err(CoveyError::UnknownArtifactDigest {
+                            digest: req.artifact_digest.to_string(),
+                        });
+                    }
+                    let review_subtask = load_subtask_tx(tx, review_subtask_id)?;
+                    ensure_meta_task_is_schedulable(tx, &review_subtask.meta_task_id)?;
+                    require_session_can_claim_kind(&session, review_subtask.kind())?;
+                    let artifact = load_artifact_tx(tx, review.artifact_digest())?;
+                    let producer_session = load_session_tx(tx, &artifact.produced_by_session)?;
+                    if producer_session.agent_principal_id == session.agent_principal_id {
+                        return Err(CoveyError::SeparationOfDutiesViolation {
+                            reviewer_principal_id: session.agent_principal_id().to_owned(),
+                            producer_principal_id: producer_session.agent_principal_id().to_owned(),
+                        });
+                    }
+                    let work_subtask = load_subtask_tx(tx, review.subtask_id())?;
+                    if work_subtask.artifact_digest().map(AsRef::as_ref)
+                        != Some(review.artifact_digest())
+                    {
+                        let Some(current_artifact_digest) = work_subtask.artifact_digest().cloned()
+                        else {
+                            return Err(CoveyError::UnknownArtifactDigest {
+                                digest: review.artifact_digest().to_owned(),
+                            });
+                        };
+                        return Err(CoveyError::StaleReviewArtifact {
+                            review_id: req.review_id.to_string(),
+                            subtask_id: crate::model::SubtaskId::parse(review.subtask_id())?,
+                            artifact_digest: crate::model::ArtifactDigest::parse(
+                                review.artifact_digest(),
+                            )?,
+                            current_artifact_digest,
+                        });
+                    }
+                    crate::validators::ensure_review_transition(
+                        review.state(),
+                        ReviewState::Decided,
+                    )?;
+
+                    let review_updated = tx.execute(
+                        r#"
+                        UPDATE reviews
+                        SET reviewer_session = ?2,
+                            verdict = ?3,
+                            findings_digest = ?4,
+                            state = ?5,
+                            updated_at = ?6
+                        WHERE review_id = ?1 AND state = ?7
+                        "#,
+                        params![
+                            req.review_id,
+                            req.session_token,
+                            review_verdict_name(ReviewVerdict::Approve),
+                            req.findings_digest,
+                            review_state_name(ReviewState::Decided),
+                            now,
+                            review_state_name(review.state())
+                        ],
+                    )?;
+                    if review_updated != 1 {
+                        return Err(CoveyError::IllegalTransition {
+                            from: review.state().into(),
+                            to: ReviewState::Decided.into(),
+                            object: ObjectType::Review,
+                        });
+                    }
+                    ensure_subtask_transition(
+                        review_subtask.kind(),
+                        review_subtask.state(),
+                        SubtaskState::Decided,
+                    )?;
+                    let subtask_updated = tx.execute(
+                        "UPDATE subtasks SET state = ?2, current_claim_id = NULL, updated_at = ?3 WHERE subtask_id = ?1 AND current_claim_id = ?4 AND state = ?5",
+                        params![
+                            review_subtask_id,
+                            subtask_state_name(SubtaskState::Decided),
+                            now,
+                            claim.claim_id,
+                            subtask_state_name(review_subtask.state())
+                        ],
+                    )?;
+                    if subtask_updated != 1 {
+                        return Err(CoveyError::IllegalTransition {
+                            from: review_subtask.state().into(),
+                            to: SubtaskState::Decided.into(),
+                            object: ObjectType::Subtask,
+                        });
+                    }
+                    close_claim_and_detach(tx, &claim, ClaimState::Released, now)?;
+                    clear_session_active_subtask(tx, &req.session_token, now)?;
+
+                    ensure_subtask_transition(
+                        work_subtask.kind(),
+                        work_subtask.state(),
+                        SubtaskState::Applied,
+                    )?;
+                    let work_updated = tx.execute(
+                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
+                        params![
+                            review.subtask_id(),
+                            subtask_state_name(SubtaskState::Applied),
+                            now,
+                            review.artifact_digest(),
+                            subtask_state_name(work_subtask.state())
+                        ],
+                    )?;
+                    if work_updated != 1 {
+                        return Err(CoveyError::IllegalTransition {
+                            from: work_subtask.state().into(),
+                            to: SubtaskState::Applied.into(),
+                            object: ObjectType::Subtask,
+                        });
+                    }
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO permissive_landing_receipts (
+                            review_id,
+                            artifact_digest,
+                            findings_digest,
+                            target_ref,
+                            landed_commit_oid,
+                            receipt_digest,
+                            recorded_by_session,
+                            claim_id,
+                            fence_seq,
+                            created_at
+                        )
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                        "#,
+                        params![
+                            req.review_id,
+                            req.artifact_digest,
+                            req.findings_digest,
+                            req.target_ref,
+                            req.landed_commit_oid.as_ref().map(AsRef::as_ref),
+                            req.receipt_digest,
+                            req.session_token,
+                            req.claim_id,
+                            req.fence_seq,
+                            now
+                        ],
+                    )?;
+
+                    append_session_event(
+                        tx,
+                        EventType::PermissiveLandingRecorded,
+                        ObjectType::Review,
+                        &req.review_id,
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+
+                    Ok(ReviewDecisionResult::Approved {
+                        review_id: req.review_id.clone(),
+                    })
+                },
+            )
+        });
+        self.log_operation(
+            "record_permissive_landing_receipt",
             &req.session_token,
             started_at,
             &result,

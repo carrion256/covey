@@ -19,11 +19,11 @@ use covey::{
     HeartbeatReq, IdempotencyKey, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
     ImportBdV1SkipReason, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq,
     MetaTaskState, ObjectType, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
-    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
-    RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq, ScopeClass,
-    SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq, StateValue,
-    SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle,
+    RecordApplyVerificationReq, RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RequestReservationReq, RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq,
+    ScopeClass, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
+    StateValue, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle,
 };
 use rusqlite::ffi::{SQLITE_TESTCTRL_FAULT_INSTALL, sqlite3_test_control};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -189,6 +189,237 @@ fn record_apply_verification(
             .expect("valid apply verification request"),
         )
         .expect("record apply verification");
+}
+
+struct PermissiveReviewFixture {
+    covey: Covey,
+    subtask_id: String,
+    artifact_digest: String,
+    reviewer: String,
+    review_id: String,
+    review_claim: ClaimResult,
+}
+
+fn seed_permissive_review_fixture(rig: &Rig) -> PermissiveReviewFixture {
+    let covey = rig.covey();
+    let (_, subtask_id) = seed_work_subtask(rig);
+    let worker = register(
+        &covey,
+        "worker-permissive-landing",
+        "worker-permissive-landing",
+        SessionRole::Executor,
+    );
+    let reviewer = register(
+        &covey,
+        "reviewer-permissive-landing",
+        "reviewer-permissive-landing",
+        SessionRole::Reviewer,
+    );
+    let work_claim = covey
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                subtask_id.clone(),
+                30_000,
+                id_key("claim-permissive-work"),
+            )
+            .expect("valid work claim"),
+        )
+        .expect("claim work");
+    covey
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                id_key("start-permissive-work"),
+            )
+            .expect("valid work start"),
+        )
+        .expect("start work");
+    let artifact_digest = "blake3:permissive_landing_artifact".to_owned();
+    covey
+        .publish_artifact(
+            PublishArtifactReq::try_from_raw_parts(
+                worker.clone(),
+                work_claim.claim_id.clone(),
+                work_claim.fence_seq,
+                artifact_digest.clone(),
+                ArtifactKind::PatchBundle,
+                "base".to_owned(),
+                "permissive-landing.json".to_owned(),
+                "blake3:permissive_landing_paths".to_owned(),
+                id_key("publish-permissive-artifact"),
+            )
+            .expect("valid artifact publication"),
+        )
+        .expect("publish artifact");
+    let review_id = covey
+        .request_review(
+            RequestReviewReq::try_from_raw_parts(
+                worker,
+                subtask_id.clone(),
+                artifact_digest.clone(),
+                Some("permissive_landing_review".to_owned()),
+                1,
+                id_key("request-permissive-review"),
+            )
+            .expect("valid review request"),
+        )
+        .expect("request review");
+    let review_claim = covey
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                "permissive_landing_review",
+                30_000,
+                id_key("claim-permissive-review"),
+            )
+            .expect("valid review claim"),
+        )
+        .expect("claim review");
+    covey
+        .start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                reviewer.clone(),
+                review_claim.claim_id.clone(),
+                review_claim.fence_seq,
+                id_key("start-permissive-review"),
+            )
+            .expect("valid review start"),
+        )
+        .expect("start review");
+
+    PermissiveReviewFixture {
+        covey,
+        subtask_id,
+        artifact_digest,
+        reviewer,
+        review_id,
+        review_claim,
+    }
+}
+
+#[test]
+fn permissive_landing_records_review_and_applied_audit_receipt_without_apply_queue() {
+    let rig = Rig::new();
+    let fixture = seed_permissive_review_fixture(&rig);
+
+    let decision = fixture
+        .covey
+        .record_permissive_landing_receipt(
+            RecordPermissiveLandingReceiptReq::try_from_raw_parts(
+                fixture.reviewer.clone(),
+                fixture.review_id.clone(),
+                fixture.review_claim.claim_id.clone(),
+                fixture.review_claim.fence_seq,
+                fixture.artifact_digest.clone(),
+                "blake3:permissive_landing_findings",
+                "refs/heads/main",
+                Some("0123456789abcdef".to_owned()),
+                "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+                id_key("record-permissive-landing"),
+            )
+            .expect("valid permissive landing request"),
+        )
+        .expect("record permissive landing");
+
+    assert_eq!(decision.review_id().as_str(), fixture.review_id);
+    let status = fixture
+        .covey
+        .subtask_status(&fixture.subtask_id)
+        .expect("subtask status");
+    assert_eq!(status.subtask().state(), SubtaskState::Applied);
+    assert!(status.ready_queue().is_empty());
+    assert!(status.readiness().landed);
+    let review = status
+        .reviews()
+        .iter()
+        .find(|review| review.review_id() == fixture.review_id)
+        .expect("review row");
+    assert_eq!(review.verdict(), Some(covey::ReviewVerdict::Approve));
+    assert_eq!(
+        review.findings_digest(),
+        Some("blake3:permissive_landing_findings")
+    );
+    assert!(
+        fixture
+            .covey
+            .ready_queue_candidates(10)
+            .expect("ready queue candidates")
+            .is_empty()
+    );
+    let recorded = fixture
+        .covey
+        .fetch_events(0, 1_000)
+        .expect("events")
+        .into_iter()
+        .filter_map(|event| event.typed().ok())
+        .any(|event| {
+            matches!(
+                event.payload,
+                EventPayload::PermissiveLandingRecorded(ref req)
+                    if req.review_id.as_str() == fixture.review_id
+                        && req.artifact_digest.as_str() == fixture.artifact_digest
+                        && req.receipt_digest.as_str()
+                            == "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+            )
+        });
+    assert!(recorded);
+}
+
+#[test]
+fn permissive_landing_rejects_stale_fence_and_mismatched_artifact() {
+    let rig = Rig::new();
+    let fixture = seed_permissive_review_fixture(&rig);
+
+    let stale_fence = fixture.review_claim.fence_seq.get() + 1;
+    let stale_result = fixture.covey.record_permissive_landing_receipt(
+        RecordPermissiveLandingReceiptReq::try_from_raw_parts(
+            fixture.reviewer.clone(),
+            fixture.review_id.clone(),
+            fixture.review_claim.claim_id.clone(),
+            stale_fence,
+            fixture.artifact_digest.clone(),
+            "blake3:stale_fence_findings",
+            "refs/heads/main",
+            None,
+            "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+            id_key("record-permissive-stale-fence"),
+        )
+        .expect("valid stale-fence request"),
+    );
+    assert!(matches!(
+        stale_result,
+        Err(CoveyError::StaleFenceToken { .. })
+    ));
+
+    let mismatch_result = fixture.covey.record_permissive_landing_receipt(
+        RecordPermissiveLandingReceiptReq::try_from_raw_parts(
+            fixture.reviewer.clone(),
+            fixture.review_id.clone(),
+            fixture.review_claim.claim_id.clone(),
+            fixture.review_claim.fence_seq,
+            "blake3:other_artifact",
+            "blake3:mismatch_findings",
+            "refs/heads/main",
+            None,
+            "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+            id_key("record-permissive-mismatch"),
+        )
+        .expect("valid mismatch request"),
+    );
+    assert!(matches!(
+        mismatch_result,
+        Err(CoveyError::UnknownArtifactDigest { .. })
+    ));
+
+    let status = fixture
+        .covey
+        .subtask_status(&fixture.subtask_id)
+        .expect("subtask status");
+    assert_eq!(status.subtask().state(), SubtaskState::ReviewPending);
+    assert!(!status.readiness().landed);
 }
 
 fn seed_changes_requested_work_subtask(rig: &Rig) -> String {

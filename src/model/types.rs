@@ -104,6 +104,26 @@ fn validate_blake3_digest(
     Ok(())
 }
 
+fn validate_blake3_hex_digest(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    validate_blake3_digest(field, value)?;
+    let Some((_, digest)) = value.split_once(':') else {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must include an algorithm prefix",
+        ));
+    };
+    if digest.len() != 64 || !digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must be a 64-character blake3 hex digest",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_manifest_path(
     field: &'static str,
     value: &str,
@@ -631,6 +651,11 @@ string_newtype!(
 );
 string_newtype!(ChangedPathsDigest, "changed_paths_digest", validate_digest);
 string_newtype!(FindingsDigest, "findings_digest", validate_digest);
+string_newtype!(
+    PermissiveLandingReceiptDigest,
+    "receipt_digest",
+    validate_blake3_hex_digest
+);
 string_newtype!(OpenSpecDigest, "openspec_digest", validate_blake3_digest);
 string_newtype!(BaseRev, "base_rev", validate_tokenish);
 string_newtype!(LandedCommitOid, "landed_commit_oid", validate_commit_oid);

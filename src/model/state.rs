@@ -161,6 +161,7 @@ pub enum EventType {
     ArtifactPublished,
     ReviewRequested,
     ReviewDecided,
+    PermissiveLandingRecorded,
     ReadyQueueEnqueued,
     ReadyQueueInFlight,
     ApplyVerificationRecorded,

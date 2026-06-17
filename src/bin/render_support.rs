@@ -368,6 +368,7 @@ pub(crate) struct ReviewDecisionAck {
     pub(crate) fence_seq: i64,
     pub(crate) verdict: ReviewDecisionAckVerdict,
     pub(crate) followup_subtask_id: Option<String>,
+    pub(crate) receipt_digest: Option<String>,
 }
 
 #[derive(Serialize)]

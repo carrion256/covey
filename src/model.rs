@@ -29,10 +29,10 @@ pub use types::{
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, CoveyTypeValidationError,
     EventObjectId, EventSeq, FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid,
     LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, OpenSpecChangeId, OpenSpecDigest,
-    PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsClaimRef,
-    RepoopsPath, ReservationId, ReviewId, RuntimeContainerId, RuntimeProcessId,
-    SessionHeartbeatTick, SessionToken, SourceIssueId, SubtaskId, SubtaskPriority, SubtaskTitle,
-    TimestampMs, VerifierId,
+    PermissiveLandingReceiptDigest, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
+    QueueId, RepoopsClaimRef, RepoopsPath, ReservationId, ReviewId, RuntimeContainerId,
+    RuntimeProcessId, SessionHeartbeatTick, SessionToken, SourceIssueId, SubtaskId,
+    SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
 };
 pub use views::*;
 

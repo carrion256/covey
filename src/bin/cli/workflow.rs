@@ -31,6 +31,8 @@ pub(crate) enum ArtifactCommand {
 pub(crate) enum ReviewCommand {
     Request(RequestReviewArgs),
     Decide(DecideReviewArgs),
+    #[command(name = "permissive-land")]
+    PermissiveLand(PermissiveLandReviewArgs),
 }
 #[derive(Args, Debug)]
 pub(crate) struct CreateSubtaskArgs {
@@ -218,6 +220,30 @@ pub(crate) struct DecideReviewArgs {
     pub(crate) verdict: ReviewVerdictArg,
     #[arg(long)]
     pub(crate) findings_digest: String,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct PermissiveLandReviewArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) review_id: String,
+    #[arg(long)]
+    pub(crate) claim_id: String,
+    #[arg(long)]
+    pub(crate) fence_seq: i64,
+    #[arg(long)]
+    pub(crate) artifact_digest: String,
+    #[arg(long)]
+    pub(crate) findings_digest: String,
+    #[arg(long)]
+    pub(crate) target_ref: String,
+    #[arg(long)]
+    pub(crate) landed_commit_oid: Option<String>,
+    #[arg(long)]
+    pub(crate) receipt_digest: String,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }

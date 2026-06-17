@@ -13,10 +13,10 @@ use covey::{
     CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq,
     ImportBdV1Req, ImportOpenSpecReq, MarkAppliedReq, MarkInFlightReq, OverlapQueryReq,
     PublishArtifactReq, ReconcileApplyQueueReq, RecordApplyVerificationReq,
-    RecordLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
-    RequestReviewReq, ResolveConflictReq, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    SubtaskKind, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    RecordLandingReceiptReq, RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RequestReservationReq, RequestReviewReq, ResolveConflictReq, SettlementTarget, StartSubtaskReq,
+    SubmitMetaTaskReq, SubtaskKind, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use uuid::Uuid;
 

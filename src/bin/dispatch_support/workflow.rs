@@ -250,8 +250,40 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
                     fence_seq: args.fence_seq,
                     verdict,
                     followup_subtask_id: result.followup_subtask_id().map(ToString::to_string),
+                    receipt_digest: None,
                 },
                 format!("review decided {}", review_id),
+            ))
+        }
+        ReviewCommand::PermissiveLand(args) => {
+            let review_id = args.review_id.clone();
+            let claim_id = args.claim_id.clone();
+            let receipt_digest = args.receipt_digest.clone();
+            let req = RecordPermissiveLandingReceiptReq::try_from_raw_parts(
+                args.session_token,
+                args.review_id,
+                args.claim_id,
+                args.fence_seq,
+                args.artifact_digest,
+                args.findings_digest,
+                args.target_ref,
+                args.landed_commit_oid,
+                args.receipt_digest,
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("permissive-land-review")),
+            )?;
+            let result = store.record_permissive_landing_receipt(req)?;
+            Ok(Rendered::summary(
+                ReviewDecisionAck {
+                    operation: "permissive-land",
+                    review_id: review_id.clone(),
+                    claim_id,
+                    fence_seq: args.fence_seq,
+                    verdict: ReviewDecisionAckVerdict::Approve,
+                    followup_subtask_id: result.followup_subtask_id().map(ToString::to_string),
+                    receipt_digest: Some(receipt_digest),
+                },
+                format!("permissive landing recorded for review {}", review_id),
             ))
         }
     }

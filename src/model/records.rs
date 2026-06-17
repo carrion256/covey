@@ -11,12 +11,12 @@ use super::{
     ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId, MetaTaskState, ModelId,
     ObjectType, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq,
     QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq,
-    RecordRuntimeAttestationReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
-    ReservationId, ReservationState, ResolveConflictReq, ReviewId, ReviewState, ReviewVerdict,
-    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick,
-    SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
-    SubtaskId, SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq,
-    TimestampMs, VerifierId,
+    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq, ReleaseClaimReq,
+    RequestReservationReq, RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
+    ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass,
+    SessionHandle, SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskPriority, SubtaskState,
+    SubtaskTitle, SupersedeQueueItemReq, TimestampMs, VerifierId,
 };
 
 /// Persisted session row.
@@ -3891,6 +3891,7 @@ pub enum EventPayload {
     ArtifactPublished(PublishArtifactReq),
     ReviewRequested(RequestReviewReq),
     ReviewDecided(DecideReviewReq),
+    PermissiveLandingRecorded(RecordPermissiveLandingReceiptReq),
     ReadyQueueEnqueued(EnqueueForApplyReq),
     ReadyQueueInFlight(ReadyQueueClaim),
     ApplyVerificationRecorded(RecordApplyVerificationReq),
@@ -3926,6 +3927,7 @@ impl EventPayload {
             Self::ArtifactPublished(_) => EventType::ArtifactPublished,
             Self::ReviewRequested(_) => EventType::ReviewRequested,
             Self::ReviewDecided(_) => EventType::ReviewDecided,
+            Self::PermissiveLandingRecorded(_) => EventType::PermissiveLandingRecorded,
             Self::ReadyQueueEnqueued(_) => EventType::ReadyQueueEnqueued,
             Self::ReadyQueueInFlight(_) => EventType::ReadyQueueInFlight,
             Self::ApplyVerificationRecorded(_) => EventType::ApplyVerificationRecorded,
@@ -3960,7 +3962,9 @@ impl EventPayload {
             | Self::ClaimRenewed(_)
             | Self::ClaimsExpired(_) => ObjectType::Claim,
             Self::ArtifactPublished(_) => ObjectType::Artifact,
-            Self::ReviewRequested(_) | Self::ReviewDecided(_) => ObjectType::Review,
+            Self::ReviewRequested(_)
+            | Self::ReviewDecided(_)
+            | Self::PermissiveLandingRecorded(_) => ObjectType::Review,
             Self::ReadyQueueEnqueued(_)
             | Self::ReadyQueueInFlight(_)
             | Self::ApplyVerificationRecorded(_)
