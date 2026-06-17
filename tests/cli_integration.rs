@@ -1735,7 +1735,11 @@ fn seed_openspec_change(root: &Path, change_id: &str, task_lines: &[&str]) {
     let change_dir = root.join("openspec").join("changes").join(change_id);
     fs::create_dir_all(change_dir.join("specs").join("covey-openspec-import"))
         .expect("create OpenSpec dirs");
-    fs::write(change_dir.join(".openspec.yaml"), "schema: better-droid\n").expect("openspec yaml");
+    fs::write(
+        change_dir.join(".openspec.yaml"),
+        "schema: better-droid\nplanning_class: work_packet\n",
+    )
+    .expect("openspec yaml");
     fs::write(change_dir.join("proposal.md"), "## Why\n\nTest proposal.\n").expect("proposal");
     fs::write(change_dir.join("design.md"), "## Context\n\nTest design.\n").expect("design");
     let tasks = task_lines

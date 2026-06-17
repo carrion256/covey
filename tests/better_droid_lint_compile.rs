@@ -259,7 +259,11 @@ fn changes_requested_followup_is_scoped_to_openspec_task_and_scenarios() {
 fn seed_better_droid_change(root: &Path, change_id: &str) {
     let change_dir = root.join("openspec").join("changes").join(change_id);
     fs::create_dir_all(change_dir.join("specs").join("covey")).expect("create dirs");
-    fs::write(change_dir.join(".openspec.yaml"), "schema: better-droid\n").expect("yaml");
+    fs::write(
+        change_dir.join(".openspec.yaml"),
+        "schema: better-droid\nplanning_class: work_packet\n",
+    )
+    .expect("yaml");
     fs::write(
         change_dir.join("proposal.md"),
         "## Why\n\nCompile source for Covey import tests.\n",

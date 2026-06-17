@@ -373,11 +373,11 @@ fn openspec_mission_packet_loader_rejects_corrupt_compiled_artifact_shapes() {
         report["status"] = Value::String("blocked".to_owned());
         report["import_ready"] = Value::Bool(false);
         report["blockers"] = serde_json::json!([{
-            "id": "roadmap_not_importable",
+            "id": "invalid_planning_class",
             "source_path": "openspec/changes/roadmap-packet/.openspec.yaml",
             "task_id": null,
             "scenario_id": null,
-            "detail": "planning_class=roadmap is planning-only and cannot be imported into Covey"
+            "detail": "planning_class must be work_packet, got roadmap"
         }]);
     });
     assert_invalid_source_detail(
@@ -579,7 +579,11 @@ fn openspec_mission_packet_private_loader_returns_sorted_digest_vectors() {
 fn seed_better_droid_change(root: &Path, change_id: &str) {
     let change_dir = root.join("openspec").join("changes").join(change_id);
     fs::create_dir_all(change_dir.join("specs").join("example")).expect("create dirs");
-    fs::write(change_dir.join(".openspec.yaml"), "schema: better-droid\n").expect("yaml");
+    fs::write(
+        change_dir.join(".openspec.yaml"),
+        "schema: better-droid\nplanning_class: work_packet\n",
+    )
+    .expect("yaml");
     fs::write(
         change_dir.join("proposal.md"),
         "## Why\n\nCompile source for importer tests.\n",
