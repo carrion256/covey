@@ -8,16 +8,21 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ApplyQueueReconcileResult, ArtifactKind, ClaimReadyQueueReq, EnqueueForApplyReq, EventType,
-        FenceSeq, FindingsDigest, LandingAuthorizationStatus, MarkAppliedReq, MarkInFlightReq,
-        MetaTaskState, ObjectType, OpenSpecArchiveStatus, OpenSpecArchiveStatusState, QueueId,
+        ApplyQueueReconcileResult, ArtifactKind, BeginOpenSpecArchiveCleanupReq, ClaimId,
+        ClaimReadyQueueReq, ClaimResult, ClaimState, EnqueueForApplyReq, EventType, FenceSeq,
+        FindingsDigest, FinishOpenSpecArchiveCleanupReq, LandingAuthorizationStatus,
+        LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
+        OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility,
+        OpenSpecArchiveStatus, OpenSpecArchiveStatusState, OpenSpecChangeId, QueueId,
         ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
         ReconcileApplyQueueReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
-        RecordOpenSpecArchiveStatusReq, ReviewId, ReviewState, ReviewVerdict, RuntimeAttestation,
-        Session, SessionRole, SessionToken, SettlementTarget, SubtaskKind, SubtaskState,
-        SupersedeQueueItemReq, VerifyLandingAuthorizationReq, meta_task_state_name,
-        openspec_archive_status_state_name, ready_queue_state_name, review_state_name,
-        review_verdict_name, subtask_kind_name, subtask_state_name,
+        RecordOpenSpecArchiveStatusReq, ReleaseClaimReq, ReviewId, ReviewState, ReviewVerdict,
+        RuntimeAttestation, ScopeClass, Session, SessionRole, SessionToken, SettlementTarget,
+        SubtaskKind, SubtaskState, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
+        VerifyLandingAuthorizationReq, claim_state_name, meta_task_state_name,
+        openspec_archive_status_state_name, ready_queue_state_name, reservation_state_name,
+        review_state_name, review_verdict_name, scope_class_name, subtask_kind_name,
+        subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -31,8 +36,8 @@ use crate::{
     validators::{
         MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, ensure_length, ensure_meta_task_is_schedulable,
         ensure_positive_lease_duration, ensure_ready_queue_transition, ensure_subtask_transition,
-        require_active_session, require_role, require_runtime_attestation,
-        require_session_can_enqueue,
+        issue_fence_seq, require_active_session, require_current_claim, require_role,
+        require_runtime_attestation, require_session_can_enqueue,
     },
 };
 
@@ -772,6 +777,408 @@ impl Covey {
         result
     }
 
+    /// Returns Covey-owned archive eligibility facts for one OpenSpec change.
+    pub fn openspec_archive_eligibility(
+        &self,
+        openspec_change_id: &str,
+    ) -> Result<OpenSpecArchiveEligibility> {
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| {
+            let change_id = OpenSpecChangeId::parse(openspec_change_id.to_owned())?;
+            let scoped_subtasks = load_openspec_scoped_subtasks_tx(tx, &change_id)?;
+            let open_archive_blockers =
+                load_open_openspec_archive_blockers_for_change_tx(tx, &change_id)?;
+            let pending_subtasks = scoped_subtasks
+                .iter()
+                .filter(|subtask| {
+                    !matches!(
+                        subtask.state(),
+                        SubtaskState::Applied | SubtaskState::Abandoned
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(OpenSpecArchiveEligibility::new(
+                change_id,
+                scoped_subtasks,
+                open_archive_blockers,
+                pending_subtasks,
+            ))
+        });
+        self.log_operation(
+            "openspec_archive_eligibility",
+            "system",
+            started_at,
+            &result,
+            |eligibility| {
+                vec![format!(
+                    "openspec-change:{}",
+                    eligibility.openspec_change_id
+                )]
+            },
+        );
+        result
+    }
+
+    /// Creates or reuses an orchestrator-owned cleanup claim for one OpenSpec archive.
+    pub fn begin_openspec_archive_cleanup(
+        &self,
+        req: BeginOpenSpecArchiveCleanupReq,
+    ) -> Result<OpenSpecArchiveCleanupClaim> {
+        const CLEANUP_LEASE_MS: i64 = 600_000;
+
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            let lease_now = advance_lease_clock(tx, now)?;
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "begin_openspec_archive_cleanup",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
+                    let eligibility =
+                        archive_eligibility_for_change_tx(tx, &req.openspec_change_id)?;
+                    if !eligibility.safe_to_archive {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: QueueId::parse("queue-openspec-archive-cleanup")?,
+                            reason: "OpenSpec archive cleanup requires all scoped subtasks applied and at least one open archive blocker".to_owned(),
+                        });
+                    }
+                    if let Some(existing) = load_cleanup_claim_for_change_tx(
+                        tx,
+                        &req.openspec_change_id,
+                        eligibility.open_archive_blockers.clone(),
+                    )? {
+                        return Ok(existing);
+                    }
+
+                    let meta_task_id = format!("openspec:{}", req.openspec_change_id);
+                    ensure_meta_task_is_schedulable(tx, &meta_task_id)?;
+                    let cleanup_subtask_id =
+                        format!("openspec:{}:cleanup:archive", req.openspec_change_id);
+                    let title = SubtaskTitle::parse(format!(
+                        "Archive OpenSpec change {}",
+                        req.openspec_change_id
+                    ))?;
+                    tx.execute(
+                        r#"
+                        INSERT INTO subtasks (
+                            subtask_id, meta_task_id, title, kind,
+                            review_target_subtask_id, review_target_artifact_digest,
+                            state, current_claim_id, artifact_digest, priority,
+                            created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, 1000, ?6, ?6)
+                        ON CONFLICT(subtask_id) DO NOTHING
+                        "#,
+                        params![
+                            cleanup_subtask_id,
+                            meta_task_id,
+                            title.as_str(),
+                            subtask_kind_name(SubtaskKind::Cleanup),
+                            subtask_state_name(SubtaskState::Available),
+                            now,
+                        ],
+                    )?;
+                    let fence_seq = issue_fence_seq(tx, &cleanup_subtask_id)?;
+                    let claim_id = crate::model::make_id("claim");
+                    let lease_deadline =
+                        LeaseDeadlineMs::parse(lease_now + CLEANUP_LEASE_MS)?;
+                    tx.execute(
+                        r#"
+                        INSERT INTO claims (
+                            claim_id, subtask_id, owner_session_token, fence_seq,
+                            lease_deadline, state, created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                        "#,
+                        params![
+                            claim_id,
+                            cleanup_subtask_id,
+                            req.session_token.as_str(),
+                            fence_seq,
+                            lease_deadline,
+                            claim_state_name(ClaimState::Held),
+                            now,
+                        ],
+                    )?;
+                    tx.execute(
+                        r#"
+                        UPDATE subtasks
+                        SET state = ?2, current_claim_id = ?3, updated_at = ?4
+                        WHERE subtask_id = ?1
+                          AND state = ?5
+                          AND current_claim_id IS NULL
+                        "#,
+                        params![
+                            cleanup_subtask_id,
+                            subtask_state_name(SubtaskState::InProgress),
+                            claim_id,
+                            now,
+                            subtask_state_name(SubtaskState::Available),
+                        ],
+                    )?;
+                    let archive_paths = req
+                        .paths()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    for archive_path in &archive_paths {
+                        let reservation_id = crate::model::make_id("reservation");
+                        tx.execute(
+                            r#"
+                            INSERT INTO reservations (
+                                reservation_id, owner_subtask_id, scope_class, scope_key,
+                                lease_deadline, state, created_at, updated_at
+                            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                            "#,
+                            params![
+                                reservation_id,
+                                cleanup_subtask_id,
+                                scope_class_name(ScopeClass::Subtree),
+                                archive_path,
+                                lease_deadline,
+                                reservation_state_name(crate::model::ReservationState::Active),
+                                now,
+                            ],
+                        )?;
+                        let cleanup_queue_id = QueueId::parse("queue-openspec-archive-cleanup")?;
+                        let reservation_req =
+                            crate::model::RequestReservationReq::try_from_raw_parts(
+                                req.session_token.as_str(),
+                                cleanup_subtask_id.clone(),
+                                ScopeClass::Subtree,
+                                archive_path.clone(),
+                                Vec::new(),
+                                CLEANUP_LEASE_MS,
+                                format!(
+                                    "begin-openspec-archive-cleanup-reservation:{}:{}",
+                                    req.openspec_change_id, archive_path
+                                ),
+                            )
+                            .map_err(|reason| CoveyError::ApplyGateEvidenceMissing {
+                                queue_id: cleanup_queue_id,
+                                reason,
+                            })?;
+                        append_session_event(
+                            tx,
+                            EventType::ReservationRequested,
+                            ObjectType::Reservation,
+                            &reservation_id,
+                            req.session_token.as_str(),
+                            &reservation_req,
+                            now,
+                        )?;
+                    }
+                    tx.execute(
+                        r#"
+                        INSERT INTO openspec_archive_cleanup_claims (
+                            openspec_change_id, cleanup_subtask_id, cleanup_claim_id,
+                            archive_paths_json, archive_proof_digest, recorded_by_session,
+                            created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?6)
+                        "#,
+                        params![
+                            req.openspec_change_id.as_str(),
+                            cleanup_subtask_id,
+                            claim_id,
+                            serde_json::to_string(&archive_paths)?,
+                            req.session_token.as_str(),
+                            now,
+                        ],
+                    )?;
+                    let claim_result = ClaimResult::new(
+                        ClaimId::parse(claim_id.clone())?,
+                        crate::model::SubtaskId::parse(cleanup_subtask_id.clone())?,
+                        fence_seq,
+                        lease_deadline,
+                    );
+                    append_session_event(
+                        tx,
+                        EventType::SubtaskClaimed,
+                        ObjectType::Claim,
+                        &claim_result.claim_id,
+                        req.session_token.as_str(),
+                        &claim_result,
+                        now,
+                    )?;
+                    Ok(OpenSpecArchiveCleanupClaim::new(
+                        req.openspec_change_id.clone(),
+                        crate::model::SubtaskId::parse(cleanup_subtask_id)?,
+                        ClaimId::parse(claim_id)?,
+                        fence_seq,
+                        req.paths().to_vec(),
+                        eligibility.open_archive_blockers,
+                    ))
+                },
+            )
+        });
+        self.log_operation(
+            "begin_openspec_archive_cleanup",
+            &req.session_token,
+            started_at,
+            &result,
+            |claim| vec![format!("claim:{}", claim.cleanup_claim_id)],
+        );
+        result
+    }
+
+    /// Resolves all open OpenSpec archive blockers for one change with one proof digest.
+    pub fn finish_openspec_archive_cleanup(
+        &self,
+        req: FinishOpenSpecArchiveCleanupReq,
+    ) -> Result<OpenSpecArchiveCleanupFinish> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "finish_openspec_archive_cleanup",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
+                    let cleanup_subtask_id = cleanup_subtask_id_for_change_tx(
+                        tx,
+                        &req.openspec_change_id,
+                        &req.cleanup_claim_id,
+                    )?;
+                    let _claim = require_current_claim(
+                        tx,
+                        &req.session_token,
+                        &req.cleanup_claim_id,
+                        req.fence_seq,
+                        now,
+                    )?;
+                    let open_blockers = load_open_openspec_archive_blockers_for_change_tx(
+                        tx,
+                        &req.openspec_change_id,
+                    )?;
+                    if open_blockers.is_empty() {
+                        return archived_cleanup_finish_tx(tx, &req);
+                    }
+                    for blocker in &open_blockers {
+                        let status_req = RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+                            req.session_token.as_str(),
+                            blocker.queue_id().to_owned(),
+                            blocker.artifact_digest().to_owned(),
+                            req.openspec_change_id.as_str().to_owned(),
+                            OpenSpecArchiveStatusState::Archived,
+                            None,
+                            Some(req.archive_proof_digest.as_str().to_owned()),
+                            format!(
+                                "finish-openspec-archive-cleanup:{}:{}",
+                                req.openspec_change_id,
+                                blocker.queue_id()
+                            ),
+                        )?;
+                        update_openspec_archive_status_tx(
+                            tx,
+                            &status_req,
+                            blocker.subtask_id(),
+                            now,
+                        )?;
+                        append_session_event(
+                            tx,
+                            EventType::OpenSpecArchiveStatusRecorded,
+                            ObjectType::ReadyQueue,
+                            blocker.queue_id(),
+                            req.session_token.as_str(),
+                            &status_req,
+                            now,
+                        )?;
+                    }
+                    tx.execute(
+                        r#"
+                        UPDATE openspec_archive_cleanup_claims
+                        SET archive_proof_digest = ?2, recorded_by_session = ?3, updated_at = ?4
+                        WHERE openspec_change_id = ?1
+                          AND cleanup_claim_id = ?5
+                          AND (archive_proof_digest IS NULL OR archive_proof_digest = ?2)
+                        "#,
+                        params![
+                            req.openspec_change_id.as_str(),
+                            req.archive_proof_digest.as_str(),
+                            req.session_token.as_str(),
+                            now,
+                            req.cleanup_claim_id.as_str(),
+                        ],
+                    )?;
+                    tx.execute(
+                        r#"
+                        UPDATE claims
+                        SET state = ?2, updated_at = ?3
+                        WHERE claim_id = ?1 AND state = ?4
+                        "#,
+                        params![
+                            req.cleanup_claim_id.as_str(),
+                            claim_state_name(ClaimState::Released),
+                            now,
+                            claim_state_name(ClaimState::Held),
+                        ],
+                    )?;
+                    tx.execute(
+                        r#"
+                        UPDATE subtasks
+                        SET state = ?2, current_claim_id = NULL, updated_at = ?3
+                        WHERE subtask_id = ?1 AND current_claim_id = ?4
+                        "#,
+                        params![
+                            cleanup_subtask_id.as_str(),
+                            subtask_state_name(SubtaskState::Abandoned),
+                            now,
+                            req.cleanup_claim_id.as_str(),
+                        ],
+                    )?;
+                    let release_req = ReleaseClaimReq::try_from_raw_parts(
+                        req.session_token.as_str(),
+                        req.cleanup_claim_id.as_str(),
+                        req.fence_seq.get(),
+                        format!(
+                            "finish-openspec-archive-cleanup-release:{}",
+                            req.openspec_change_id
+                        ),
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::ClaimReleased,
+                        ObjectType::Claim,
+                        req.cleanup_claim_id.as_str(),
+                        req.session_token.as_str(),
+                        &release_req,
+                        now,
+                    )?;
+                    Ok(OpenSpecArchiveCleanupFinish {
+                        openspec_change_id: req.openspec_change_id.clone(),
+                        archive_proof_digest: req.archive_proof_digest.clone(),
+                        archived_queue_ids: open_blockers
+                            .iter()
+                            .map(|blocker| blocker.queue_id.clone())
+                            .collect(),
+                        cleanup_subtask_id,
+                        cleanup_claim_id: req.cleanup_claim_id.clone(),
+                    })
+                },
+            )
+        });
+        self.log_operation(
+            "finish_openspec_archive_cleanup",
+            &req.session_token,
+            started_at,
+            &result,
+            |finish| {
+                finish
+                    .archived_queue_ids
+                    .iter()
+                    .map(|queue_id| format!("queue:{queue_id}"))
+                    .collect()
+            },
+        );
+        result
+    }
+
     /// Supersedes a queued or in-flight apply item.
     pub fn supersede_queue_item(&self, req: SupersedeQueueItemReq) -> Result<()> {
         let started_at = Instant::now();
@@ -1073,6 +1480,197 @@ where
     T::try_from(value).map_err(|err| CoveyError::ApplyGateEvidenceMissing {
         queue_id: queue_id.clone(),
         reason: format!("invalid landing authorization value: {err}"),
+    })
+}
+
+fn archive_eligibility_for_change_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+) -> Result<OpenSpecArchiveEligibility> {
+    let scoped_subtasks = load_openspec_scoped_subtasks_tx(tx, openspec_change_id)?;
+    let open_archive_blockers =
+        load_open_openspec_archive_blockers_for_change_tx(tx, openspec_change_id)?;
+    let pending_subtasks = scoped_subtasks
+        .iter()
+        .filter(|subtask| {
+            !matches!(
+                subtask.state(),
+                SubtaskState::Applied | SubtaskState::Abandoned
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(OpenSpecArchiveEligibility::new(
+        openspec_change_id.clone(),
+        scoped_subtasks,
+        open_archive_blockers,
+        pending_subtasks,
+    ))
+}
+
+fn load_openspec_scoped_subtasks_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+) -> Result<Vec<SubtaskView>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT s.subtask_id, s.meta_task_id, s.title, s.kind,
+               s.review_target_subtask_id, s.review_target_artifact_digest,
+               s.state, s.current_claim_id, s.artifact_digest, s.priority,
+               s.created_at, s.updated_at
+        FROM openspec_subtask_scope scope
+        JOIN subtasks s ON s.subtask_id = scope.subtask_id
+        WHERE scope.openspec_change_id = ?1
+        ORDER BY s.created_at ASC, s.subtask_id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![openspec_change_id.as_str()], |row| {
+        let subtask = deserialize_row::<crate::model::SubtaskRow>(row)?;
+        SubtaskView::try_from(subtask)
+    })?;
+    collect_rows(rows)
+}
+
+fn load_open_openspec_archive_blockers_for_change_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+) -> Result<Vec<OpenSpecArchiveStatus>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT queue_id, subtask_id, artifact_digest, openspec_change_id, state,
+               blocked_reason, archive_proof_digest, recorded_by_session,
+               created_at, updated_at
+        FROM openspec_archive_status
+        WHERE openspec_change_id = ?1
+          AND state = ?2
+        ORDER BY updated_at ASC, queue_id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            openspec_change_id.as_str(),
+            openspec_archive_status_state_name(OpenSpecArchiveStatusState::Blocked),
+        ],
+        deserialize_row::<OpenSpecArchiveStatus>,
+    )?;
+    collect_rows(rows)
+}
+
+fn load_cleanup_claim_for_change_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+    open_archive_blockers: Vec<OpenSpecArchiveStatus>,
+) -> Result<Option<OpenSpecArchiveCleanupClaim>> {
+    let row = tx
+        .query_row(
+            r#"
+            SELECT cleanup_subtask_id, cleanup_claim_id, archive_paths_json
+            FROM openspec_archive_cleanup_claims
+            WHERE openspec_change_id = ?1
+              AND archive_proof_digest IS NULL
+            "#,
+            params![openspec_change_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((cleanup_subtask_id, cleanup_claim_id, archive_paths_json)) = row else {
+        return Ok(None);
+    };
+    let claim = tx.query_row(
+        "SELECT fence_seq FROM claims WHERE claim_id = ?1 AND state = ?2",
+        params![cleanup_claim_id, claim_state_name(ClaimState::Held)],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let archive_paths = serde_json::from_str::<Vec<String>>(&archive_paths_json)?
+        .into_iter()
+        .map(crate::model::RepoopsPath::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(Some(OpenSpecArchiveCleanupClaim::new(
+        openspec_change_id.clone(),
+        crate::model::SubtaskId::parse(cleanup_subtask_id)?,
+        ClaimId::parse(cleanup_claim_id)?,
+        FenceSeq::parse(claim)?,
+        archive_paths,
+        open_archive_blockers,
+    )))
+}
+
+fn cleanup_subtask_id_for_change_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+    cleanup_claim_id: &ClaimId,
+) -> Result<crate::model::SubtaskId> {
+    let raw = tx.query_row(
+        r#"
+        SELECT cleanup_subtask_id
+        FROM openspec_archive_cleanup_claims
+        WHERE openspec_change_id = ?1
+          AND cleanup_claim_id = ?2
+        "#,
+        params![openspec_change_id.as_str(), cleanup_claim_id.as_str()],
+        |row| row.get::<_, String>(0),
+    )?;
+    crate::model::SubtaskId::parse(raw).map_err(Into::into)
+}
+
+fn archived_cleanup_finish_tx(
+    tx: &Transaction<'_>,
+    req: &FinishOpenSpecArchiveCleanupReq,
+) -> Result<OpenSpecArchiveCleanupFinish> {
+    let (cleanup_subtask_id, proof): (String, Option<String>) = tx.query_row(
+        r#"
+        SELECT cleanup_subtask_id, archive_proof_digest
+        FROM openspec_archive_cleanup_claims
+        WHERE openspec_change_id = ?1
+          AND cleanup_claim_id = ?2
+        "#,
+        params![
+            req.openspec_change_id.as_str(),
+            req.cleanup_claim_id.as_str()
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if proof.as_deref() != Some(req.archive_proof_digest.as_str()) {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id: QueueId::parse("queue-openspec-archive-cleanup")?,
+            reason: "OpenSpec archive cleanup proof digest does not match recorded proof"
+                .to_owned(),
+        });
+    }
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT queue_id
+        FROM openspec_archive_status
+        WHERE openspec_change_id = ?1
+          AND state = ?2
+          AND archive_proof_digest = ?3
+        ORDER BY queue_id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            req.openspec_change_id.as_str(),
+            openspec_archive_status_state_name(OpenSpecArchiveStatusState::Archived),
+            req.archive_proof_digest.as_str(),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let queue_ids = collect_rows(rows)?
+        .into_iter()
+        .map(QueueId::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(OpenSpecArchiveCleanupFinish {
+        openspec_change_id: req.openspec_change_id.clone(),
+        archive_proof_digest: req.archive_proof_digest.clone(),
+        archived_queue_ids: queue_ids,
+        cleanup_subtask_id: crate::model::SubtaskId::parse(cleanup_subtask_id)?,
+        cleanup_claim_id: req.cleanup_claim_id.clone(),
     })
 }
 

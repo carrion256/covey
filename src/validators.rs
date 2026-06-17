@@ -183,6 +183,7 @@ pub(crate) fn require_session_can_claim_kind(session: &Session, kind: SubtaskKin
     let allowed = match kind {
         SubtaskKind::Work => session.role == SessionRole::Executor,
         SubtaskKind::Review => session.role == SessionRole::Reviewer,
+        SubtaskKind::Cleanup => false,
     };
     if allowed {
         Ok(())
@@ -190,6 +191,7 @@ pub(crate) fn require_session_can_claim_kind(session: &Session, kind: SubtaskKin
         let expected = match kind {
             SubtaskKind::Work => vec![SessionRole::Executor],
             SubtaskKind::Review => vec![SessionRole::Reviewer],
+            SubtaskKind::Cleanup => vec![SessionRole::Orchestrator],
         };
         Err(CoveyError::WrongRole {
             expected,
@@ -432,6 +434,13 @@ pub(crate) fn ensure_subtask_transition(
             (SubtaskState::Available, SubtaskState::Claimed)
                 | (SubtaskState::Claimed, SubtaskState::InProgress)
                 | (SubtaskState::InProgress, SubtaskState::Decided)
+        ),
+        SubtaskKind::Cleanup => matches!(
+            (from, to),
+            (SubtaskState::Available, SubtaskState::Claimed)
+                | (SubtaskState::Claimed, SubtaskState::InProgress)
+                | (SubtaskState::InProgress, SubtaskState::Applied)
+                | (SubtaskState::Available, SubtaskState::Applied)
         ),
     };
     ensure_transition(from, to, ObjectType::Subtask, allowed)

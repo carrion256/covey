@@ -9,10 +9,10 @@ use strum::Display;
 use super::{
     AgentPrincipalId, Artifact, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask,
-    MetaTaskId, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, Review, ReviewId,
-    ReviewTarget, ReviewVerdict, Session, SessionToken, SettlementTarget, Subtask, SubtaskId,
-    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle,
-    TimestampMs, VerifierId,
+    MetaTaskId, OpenSpecArchiveStatus, OpenSpecChangeId, QueueId, ReadyQueueItem, ReadyQueueState,
+    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewTarget, ReviewVerdict, Session,
+    SessionToken, SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
+    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -33,6 +33,7 @@ pub struct SubtaskView {
 enum SubtaskViewKind {
     Work,
     Review { review_target: ReviewTarget },
+    Cleanup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +146,14 @@ impl SubtaskViewKind {
                 };
                 Ok(Self::Review { review_target })
             }
+            SubtaskKind::Cleanup => {
+                if review_target.is_some() {
+                    return Err(invalid_subtask_view(
+                        "cleanup subtask view cannot carry review target",
+                    ));
+                }
+                Ok(Self::Cleanup)
+            }
         }
     }
 
@@ -152,12 +161,13 @@ impl SubtaskViewKind {
         match self {
             Self::Work => SubtaskKind::Work,
             Self::Review { .. } => SubtaskKind::Review,
+            Self::Cleanup => SubtaskKind::Cleanup,
         }
     }
 
     const fn review_target(&self) -> Option<&ReviewTarget> {
         match self {
-            Self::Work => None,
+            Self::Work | Self::Cleanup => None,
             Self::Review { review_target } => Some(review_target),
         }
     }
@@ -895,11 +905,15 @@ impl SubtaskCandidate {
             review_target_artifact_digest,
         ) {
             (SubtaskKind::Work, None, None) => None,
+            (SubtaskKind::Cleanup, None, None) => None,
             (SubtaskKind::Review, Some(subtask_id), Some(artifact_digest)) => {
                 Some(ReviewTarget::new(subtask_id, artifact_digest))
             }
             (SubtaskKind::Work, _, _) => {
                 return Err("work candidate cannot carry review target".to_owned());
+            }
+            (SubtaskKind::Cleanup, _, _) => {
+                return Err("cleanup candidate cannot carry review target".to_owned());
             }
             (SubtaskKind::Review, _, _) => {
                 return Err("review candidate requires complete review target".to_owned());
@@ -1028,6 +1042,84 @@ impl ChangesRequestedFollowupReconcileResult {
             followup_subtask_ids,
         })
     }
+}
+
+/// Covey-owned archive readiness facts for one OpenSpec change.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecArchiveEligibility {
+    pub openspec_change_id: OpenSpecChangeId,
+    pub scoped_subtasks: Vec<SubtaskView>,
+    pub open_archive_blockers: Vec<OpenSpecArchiveStatus>,
+    pub pending_subtasks: Vec<SubtaskView>,
+    pub safe_to_archive: bool,
+}
+
+impl OpenSpecArchiveEligibility {
+    /// Builds archive eligibility facts.
+    #[must_use]
+    pub fn new(
+        openspec_change_id: OpenSpecChangeId,
+        scoped_subtasks: Vec<SubtaskView>,
+        open_archive_blockers: Vec<OpenSpecArchiveStatus>,
+        pending_subtasks: Vec<SubtaskView>,
+    ) -> Self {
+        let safe_to_archive = !scoped_subtasks.is_empty()
+            && pending_subtasks.is_empty()
+            && !open_archive_blockers.is_empty();
+        Self {
+            openspec_change_id,
+            scoped_subtasks,
+            open_archive_blockers,
+            pending_subtasks,
+            safe_to_archive,
+        }
+    }
+}
+
+/// Orchestrator-owned cleanup claim facts for one OpenSpec archive operation.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecArchiveCleanupClaim {
+    pub openspec_change_id: OpenSpecChangeId,
+    pub cleanup_subtask_id: SubtaskId,
+    pub cleanup_claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub archive_paths: Vec<RepoopsPath>,
+    pub open_archive_blockers: Vec<OpenSpecArchiveStatus>,
+}
+
+impl OpenSpecArchiveCleanupClaim {
+    /// Builds cleanup claim facts.
+    #[must_use]
+    pub fn new(
+        openspec_change_id: OpenSpecChangeId,
+        cleanup_subtask_id: SubtaskId,
+        cleanup_claim_id: ClaimId,
+        fence_seq: FenceSeq,
+        archive_paths: Vec<RepoopsPath>,
+        open_archive_blockers: Vec<OpenSpecArchiveStatus>,
+    ) -> Self {
+        Self {
+            openspec_change_id,
+            cleanup_subtask_id,
+            cleanup_claim_id,
+            fence_seq,
+            archive_paths,
+            open_archive_blockers,
+        }
+    }
+}
+
+/// Result of resolving OpenSpec archive blockers for one change.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecArchiveCleanupFinish {
+    pub openspec_change_id: OpenSpecChangeId,
+    pub archive_proof_digest: ArtifactDigest,
+    pub archived_queue_ids: Vec<QueueId>,
+    pub cleanup_subtask_id: SubtaskId,
+    pub cleanup_claim_id: ClaimId,
 }
 
 /// Observability row for a subtask that has not moved recently enough to merit attention.

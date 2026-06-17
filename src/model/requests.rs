@@ -1308,6 +1308,117 @@ impl RecordOpenSpecArchiveStatusReq {
     }
 }
 
+/// Request to begin or reuse an orchestrator-owned OpenSpec archive cleanup claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginOpenSpecArchiveCleanupReq {
+    pub session_token: SessionToken,
+    pub openspec_change_id: OpenSpecChangeId,
+    paths: NonEmptyRepoopsPaths,
+    pub idempotency_key: IdempotencyKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawBeginOpenSpecArchiveCleanupReq {
+    session_token: String,
+    openspec_change_id: String,
+    paths: Vec<String>,
+    idempotency_key: String,
+}
+
+impl BeginOpenSpecArchiveCleanupReq {
+    /// Builds an archive cleanup begin request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session, change id, paths, or idempotency key are invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        openspec_change_id: impl Into<String>,
+        paths: Vec<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())?,
+            paths: NonEmptyRepoopsPaths::try_from_raw(paths)?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Returns the normalized archive mutation paths.
+    #[must_use]
+    pub fn paths(&self) -> &[RepoopsPath] {
+        self.paths.as_slice()
+    }
+}
+
+impl Serialize for BeginOpenSpecArchiveCleanupReq {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawBeginOpenSpecArchiveCleanupReq {
+            session_token: self.session_token.to_string(),
+            openspec_change_id: self.openspec_change_id.to_string(),
+            paths: self.paths.as_strings(),
+            idempotency_key: self.idempotency_key.to_string(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BeginOpenSpecArchiveCleanupReq {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawBeginOpenSpecArchiveCleanupReq::deserialize(deserializer)?;
+        Self::try_from_raw_parts(
+            raw.session_token,
+            raw.openspec_change_id,
+            raw.paths,
+            raw.idempotency_key,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Request to finish an OpenSpec archive cleanup claim and resolve all matching blockers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishOpenSpecArchiveCleanupReq {
+    pub session_token: SessionToken,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub cleanup_claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub archive_proof_digest: ArtifactDigest,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl FinishOpenSpecArchiveCleanupReq {
+    /// Builds an archive cleanup finish request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identifier, fence, or digest is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        openspec_change_id: impl Into<String>,
+        cleanup_claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        archive_proof_digest: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())?,
+            cleanup_claim_id: ClaimId::parse(cleanup_claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            archive_proof_digest: ArtifactDigest::parse(archive_proof_digest.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
 /// Request to supersede a queued or in-flight queue item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupersedeQueueItemReq {

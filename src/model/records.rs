@@ -1109,6 +1109,7 @@ pub(crate) struct SubtaskRow {
 enum SubtaskRowKind {
     Work,
     Review { review_target: ReviewTarget },
+    Cleanup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1238,6 +1239,12 @@ impl SubtaskRowKind {
                     review_target: ReviewTarget::new(target_subtask_id, target_artifact_digest),
                 })
             }
+            SubtaskKind::Cleanup => {
+                if review_target_subtask_id.is_some() || review_target_artifact_digest.is_some() {
+                    return Err(invalid_subtask_row("cleanup subtask has a review target"));
+                }
+                Ok(Self::Cleanup)
+            }
         }
     }
 
@@ -1245,12 +1252,13 @@ impl SubtaskRowKind {
         match self {
             Self::Work => SubtaskKind::Work,
             Self::Review { .. } => SubtaskKind::Review,
+            Self::Cleanup => SubtaskKind::Cleanup,
         }
     }
 
     const fn review_target(&self) -> Option<&ReviewTarget> {
         match self {
-            Self::Work => None,
+            Self::Work | Self::Cleanup => None,
             Self::Review { review_target } => Some(review_target),
         }
     }
@@ -1579,6 +1587,9 @@ impl SubtaskLifecycle {
             (SubtaskKind::Work, SubtaskState::Decided) => Err(invalid_subtask_row(
                 "work subtasks cannot use decided review lifecycle state",
             )),
+            (SubtaskKind::Cleanup, SubtaskState::Decided) => Err(invalid_subtask_row(
+                "cleanup subtasks cannot use decided review lifecycle state",
+            )),
             (SubtaskKind::Review, SubtaskState::Blocked) => Err(invalid_subtask_row(
                 "review subtasks cannot use blocked work lifecycle state",
             )),
@@ -1592,6 +1603,17 @@ impl SubtaskLifecycle {
                 | SubtaskState::Applied,
             ) => Err(invalid_subtask_row(
                 "review subtasks cannot use work artifact lifecycle states",
+            )),
+            (
+                SubtaskKind::Cleanup,
+                SubtaskState::Blocked
+                | SubtaskState::ArtifactPublished
+                | SubtaskState::ReviewPending
+                | SubtaskState::ChangesRequested
+                | SubtaskState::Approved
+                | SubtaskState::ReadyForApply,
+            ) => Err(invalid_subtask_row(
+                "cleanup subtasks cannot use work artifact or review lifecycle states",
             )),
             _ => Ok(()),
         }
@@ -1653,6 +1675,19 @@ pub struct ReviewSubtask {
     timestamps: SubtaskTimestamps,
 }
 
+/// Orchestrator-owned cleanup subtask that is not dispatchable to worker lanes.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::too_many_arguments)]
+pub struct CleanupSubtask {
+    subtask_id: SubtaskId,
+    meta_task_id: MetaTaskId,
+    title: SubtaskTitle,
+    lifecycle: SubtaskLifecycle,
+    priority: SubtaskPriority,
+    timestamps: SubtaskTimestamps,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawWorkSubtask {
     subtask_id: SubtaskId,
@@ -1670,6 +1705,17 @@ struct RawReviewSubtask {
     meta_task_id: MetaTaskId,
     title: String,
     review_target: ReviewTarget,
+    lifecycle: SubtaskLifecycle,
+    priority: SubtaskPriority,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawCleanupSubtask {
+    subtask_id: SubtaskId,
+    meta_task_id: MetaTaskId,
+    title: String,
     lifecycle: SubtaskLifecycle,
     priority: SubtaskPriority,
     created_at: TimestampMs,
@@ -1733,6 +1779,37 @@ impl ReviewSubtask {
             meta_task_id,
             title,
             review_target,
+            lifecycle,
+            priority,
+            timestamps,
+        })
+    }
+}
+
+impl CleanupSubtask {
+    /// Builds a cleanup subtask, rejecting worker/review-only lifecycle states.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `lifecycle` is not legal for cleanup subtasks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        subtask_id: SubtaskId,
+        meta_task_id: MetaTaskId,
+        title: String,
+        lifecycle: SubtaskLifecycle,
+        priority: SubtaskPriority,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> rusqlite::Result<Self> {
+        lifecycle.ensure_allowed_for_kind(SubtaskKind::Cleanup)?;
+        let title =
+            SubtaskTitle::parse(title).map_err(|err| invalid_subtask_row(&err.to_string()))?;
+        let timestamps = SubtaskTimestamps::new(created_at, updated_at)?;
+        Ok(Self {
+            subtask_id,
+            meta_task_id,
+            title,
             lifecycle,
             priority,
             timestamps,
@@ -1842,6 +1919,56 @@ impl<'de> Deserialize<'de> for ReviewSubtask {
     }
 }
 
+impl TryFrom<RawCleanupSubtask> for CleanupSubtask {
+    type Error = rusqlite::Error;
+
+    fn try_from(raw: RawCleanupSubtask) -> Result<Self, Self::Error> {
+        Self::new(
+            raw.subtask_id,
+            raw.meta_task_id,
+            raw.title,
+            raw.lifecycle,
+            raw.priority,
+            raw.created_at,
+            raw.updated_at,
+        )
+    }
+}
+
+impl From<&CleanupSubtask> for RawCleanupSubtask {
+    fn from(subtask: &CleanupSubtask) -> Self {
+        Self {
+            subtask_id: subtask.subtask_id.clone(),
+            meta_task_id: subtask.meta_task_id.clone(),
+            title: subtask.title.as_str().to_owned(),
+            lifecycle: subtask.lifecycle.clone(),
+            priority: subtask.priority,
+            created_at: subtask.timestamps.created_at(),
+            updated_at: subtask.timestamps.updated_at(),
+        }
+    }
+}
+
+impl Serialize for CleanupSubtask {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawCleanupSubtask::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CleanupSubtask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawCleanupSubtask::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Domain representation of a subtask.
 ///
 /// Work subtasks and review subtasks are distinct variants so the domain API
@@ -1853,6 +1980,7 @@ impl<'de> Deserialize<'de> for ReviewSubtask {
 pub enum Subtask {
     Work(WorkSubtask),
     Review(ReviewSubtask),
+    Cleanup(CleanupSubtask),
 }
 
 impl Subtask {
@@ -1860,6 +1988,7 @@ impl Subtask {
         match self {
             Self::Work(subtask) => &subtask.subtask_id,
             Self::Review(subtask) => &subtask.subtask_id,
+            Self::Cleanup(subtask) => &subtask.subtask_id,
         }
     }
 
@@ -1867,6 +1996,7 @@ impl Subtask {
         match self {
             Self::Work(subtask) => &subtask.meta_task_id,
             Self::Review(subtask) => &subtask.meta_task_id,
+            Self::Cleanup(subtask) => &subtask.meta_task_id,
         }
     }
 
@@ -1874,6 +2004,7 @@ impl Subtask {
         match self {
             Self::Work(subtask) => &subtask.title,
             Self::Review(subtask) => &subtask.title,
+            Self::Cleanup(subtask) => &subtask.title,
         }
     }
 
@@ -1881,6 +2012,7 @@ impl Subtask {
         match self {
             Self::Work(_) => SubtaskKind::Work,
             Self::Review(_) => SubtaskKind::Review,
+            Self::Cleanup(_) => SubtaskKind::Cleanup,
         }
     }
 
@@ -1888,12 +2020,13 @@ impl Subtask {
         match self {
             Self::Work(subtask) => &subtask.lifecycle,
             Self::Review(subtask) => &subtask.lifecycle,
+            Self::Cleanup(subtask) => &subtask.lifecycle,
         }
     }
 
     pub fn review_target(&self) -> Option<&ReviewTarget> {
         match self {
-            Self::Work(_) => None,
+            Self::Work(_) | Self::Cleanup(_) => None,
             Self::Review(subtask) => Some(&subtask.review_target),
         }
     }
@@ -1920,6 +2053,15 @@ impl TryFrom<SubtaskRow> for Subtask {
                 row.meta_task_id,
                 row.title.into(),
                 review_target,
+                row.lifecycle,
+                row.priority,
+                created_at,
+                updated_at,
+            )?)),
+            SubtaskRowKind::Cleanup => Ok(Self::Cleanup(CleanupSubtask::new(
+                row.subtask_id,
+                row.meta_task_id,
+                row.title.into(),
                 row.lifecycle,
                 row.priority,
                 created_at,

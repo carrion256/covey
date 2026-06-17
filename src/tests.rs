@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use crate::{
-    ClaimNextReq, ClaimReadyQueueReq, Clock, Covey, ManualClock,
-    ReconcileChangesRequestedFollowupsReq, RegisterSessionReq, Result, SessionRole,
-    SubmitMetaTaskReq,
+    BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock, Covey,
+    FinishOpenSpecArchiveCleanupReq, ManualClock, ReconcileChangesRequestedFollowupsReq,
+    RegisterSessionReq, Result, SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -238,6 +238,313 @@ fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
     );
     assert_eq!(queue_candidates.len(), 1);
     assert_eq!(queue_candidates[0].queue_id.as_str(), "queue-candidate");
+}
+
+fn seed_archive_session_and_meta(covey: &Covey, change_id: &str) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+         VALUES ('session-orch-archive', 'orch-archive', 'orch-archive-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+        [],
+    )
+    .expect("insert orchestrator session");
+    conn.execute(
+        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+         VALUES ('session-exec-archive', 'exec-archive', 'exec-archive-1', 'executor', 'active', NULL, 1, 1, 1, 1)",
+        [],
+    )
+    .expect("insert executor session");
+    conn.execute(
+        "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+         VALUES (?1, 'archive fixture', 'active', 'session-orch-archive', 1, 1)",
+        params![format!("openspec:{change_id}")],
+    )
+    .expect("insert OpenSpec meta task");
+}
+
+fn seed_archive_scoped_subtask(
+    covey: &Covey,
+    change_id: &str,
+    subtask_id: &str,
+    queue_id: Option<&str>,
+    artifact_digest: &str,
+    state: &str,
+    created_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    let initial_state = if state == "applied" {
+        "available"
+    } else {
+        state
+    };
+    conn.execute(
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'work', NULL, NULL, ?4, NULL, ?5, 1, ?6, ?6)",
+        params![
+            subtask_id,
+            format!("openspec:{change_id}"),
+            format!("work {subtask_id}"),
+            initial_state,
+            Option::<&str>::None,
+            created_at,
+        ],
+    )
+    .expect("insert scoped subtask");
+    conn.execute(
+        "INSERT INTO openspec_subtask_scope (subtask_id, openspec_change_id, openspec_task_id, source_path, scenario_refs_json, updated_at)
+         VALUES (?1, ?2, ?3, ?4, '[]', ?5)",
+        params![
+            subtask_id,
+            change_id,
+            format!("task-{subtask_id}"),
+            format!("openspec/changes/{change_id}/tasks.md"),
+            created_at,
+        ],
+    )
+    .expect("insert OpenSpec scope");
+    if let Some(queue_id) = queue_id {
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES (?1, 'patch_bundle', 'base', ?2, 'session-orch-archive', ?3, ?4, ?5)",
+            params![
+                artifact_digest,
+                subtask_id,
+                format!("{subtask_id}.json"),
+                format!("blake3:paths-{subtask_id}"),
+                created_at,
+            ],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "UPDATE subtasks SET state = 'applied', artifact_digest = ?2, updated_at = ?3 WHERE subtask_id = ?1",
+            params![subtask_id, artifact_digest, created_at],
+        )
+        .expect("mark scoped subtask applied");
+        conn.execute(
+            "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
+             VALUES (?1, ?2, ?3, 'canonical', 'applied', NULL, NULL, NULL, ?4, ?4)",
+            params![queue_id, artifact_digest, subtask_id, created_at],
+        )
+        .expect("insert applied queue item");
+        conn.execute(
+            "INSERT INTO openspec_archive_status (queue_id, subtask_id, artifact_digest, openspec_change_id, state, blocked_reason, archive_proof_digest, recorded_by_session, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'blocked', 'applied_but_unarchived', NULL, 'session-orch-archive', ?5, ?5)",
+            params![queue_id, subtask_id, artifact_digest, change_id, created_at],
+        )
+        .expect("insert archive blocker");
+    }
+}
+
+#[test]
+fn openspec_archive_eligibility_blocks_until_all_scoped_subtasks_are_terminal() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-pending");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-pending",
+        "work-applied",
+        Some("queue-applied"),
+        "blake3:archive-applied",
+        "applied",
+        2,
+    );
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-pending",
+        "work-pending",
+        None,
+        "blake3:archive-pending",
+        "available",
+        3,
+    );
+
+    let eligibility = covey
+        .openspec_archive_eligibility("change-pending")
+        .expect("archive eligibility");
+
+    assert!(!eligibility.safe_to_archive);
+    assert_eq!(eligibility.scoped_subtasks.len(), 2);
+    assert_eq!(eligibility.pending_subtasks.len(), 1);
+    assert_eq!(
+        eligibility.pending_subtasks[0].subtask_id.as_str(),
+        "work-pending"
+    );
+    assert_eq!(eligibility.open_archive_blockers.len(), 1);
+}
+
+#[test]
+fn openspec_archive_cleanup_claim_is_orchestrator_only_idempotent_and_non_dispatchable() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-cleanup");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-cleanup",
+        "work-cleanup",
+        Some("queue-cleanup"),
+        "blake3:archive-cleanup",
+        "applied",
+        2,
+    );
+    let paths = vec![
+        "openspec/changes/change-cleanup".to_owned(),
+        "openspec/archive".to_owned(),
+        "openspec/specs".to_owned(),
+    ];
+
+    let executor_err = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-exec-archive",
+                "change-cleanup",
+                paths.clone(),
+                "begin-cleanup-executor",
+            )
+            .expect("valid executor cleanup request"),
+        )
+        .expect_err("executor must not begin cleanup");
+    assert!(
+        executor_err.to_string().contains("wrong role"),
+        "unexpected error: {executor_err}"
+    );
+
+    let first = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup",
+                paths.clone(),
+                "begin-cleanup-once",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin cleanup");
+    let second = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup",
+                paths,
+                "begin-cleanup-twice",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("reuse cleanup");
+
+    assert_eq!(first.cleanup_subtask_id, second.cleanup_subtask_id);
+    assert_eq!(first.cleanup_claim_id, second.cleanup_claim_id);
+    assert_eq!(first.open_archive_blockers.len(), 1);
+    let active_reservations: i64 = {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.query_row(
+            "SELECT COUNT(*) FROM reservations WHERE owner_subtask_id = ?1 AND state = 'active'",
+            params![first.cleanup_subtask_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("count cleanup reservations")
+    };
+    assert_eq!(active_reservations, 3);
+    assert!(
+        covey
+            .subtask_candidates(SessionRole::Executor, 10, None)
+            .expect("executor candidates")
+            .iter()
+            .all(|candidate| candidate.subtask_id != first.cleanup_subtask_id)
+    );
+    assert!(
+        covey
+            .subtask_candidates(SessionRole::Reviewer, 10, None)
+            .expect("reviewer candidates")
+            .iter()
+            .all(|candidate| candidate.subtask_id != first.cleanup_subtask_id)
+    );
+}
+
+#[test]
+fn finish_openspec_archive_cleanup_resolves_all_open_blockers_for_one_change() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-finish");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-finish",
+        "work-finish-a",
+        Some("queue-finish-a"),
+        "blake3:archive-finish-a",
+        "applied",
+        2,
+    );
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-finish",
+        "work-finish-b",
+        Some("queue-finish-b"),
+        "blake3:archive-finish-b",
+        "applied",
+        3,
+    );
+    let cleanup = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-finish",
+                vec![
+                    "openspec/changes/change-finish".to_owned(),
+                    "openspec/archive".to_owned(),
+                    "openspec/specs".to_owned(),
+                ],
+                "begin-finish-cleanup",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin cleanup");
+
+    let finish = covey
+        .finish_openspec_archive_cleanup(
+            FinishOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-finish",
+                cleanup.cleanup_claim_id.to_string(),
+                cleanup.fence_seq.get(),
+                "blake3:archive-proof-finish",
+                "finish-cleanup-once",
+            )
+            .expect("valid cleanup finish"),
+        )
+        .expect("finish cleanup");
+    let finish_again = covey
+        .finish_openspec_archive_cleanup(
+            FinishOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-finish",
+                cleanup.cleanup_claim_id.to_string(),
+                cleanup.fence_seq.get(),
+                "blake3:archive-proof-finish",
+                "finish-cleanup-once",
+            )
+            .expect("valid cleanup finish"),
+        )
+        .expect("finish cleanup idempotently");
+
+    assert_eq!(finish.archived_queue_ids.len(), 2);
+    assert_eq!(finish.archived_queue_ids, finish_again.archived_queue_ids);
+    assert!(
+        covey
+            .open_openspec_archive_blockers(10)
+            .expect("open blockers")
+            .is_empty()
+    );
+    let archived_rows: i64 = {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.query_row(
+            "SELECT COUNT(*) FROM openspec_archive_status WHERE openspec_change_id = 'change-finish' AND state = 'archived' AND archive_proof_digest = 'blake3:archive-proof-finish'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count archived rows")
+    };
+    assert_eq!(archived_rows, 2);
 }
 
 #[test]

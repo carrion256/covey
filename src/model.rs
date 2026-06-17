@@ -13,12 +13,12 @@ mod views;
 
 pub use imports::*;
 pub use records::{
-    AppliedReadyQueueItem, ApplyVerification, Artifact, CancelledReadyQueueItem, Claim, Conflict,
-    DecidedReview, Event, EventPayload, ExpiredCountPayload, InFlightReadyQueueItem,
-    InProgressReview, MetaTask, OpenSpecArchiveStatus, QueuedReadyQueueItem, ReadyQueueActiveClaim,
-    ReadyQueueCommon, ReadyQueueItem, RequestedReview, Reservation,
-    ReservationOverlapConflictPayload, Review, ReviewCommon, ReviewSubtask, ReviewTarget,
-    RuntimeAttestation, Session, StaleSessionsPayload, Subtask, SubtaskLifecycle,
+    AppliedReadyQueueItem, ApplyVerification, Artifact, CancelledReadyQueueItem, Claim,
+    CleanupSubtask, Conflict, DecidedReview, Event, EventPayload, ExpiredCountPayload,
+    InFlightReadyQueueItem, InProgressReview, MetaTask, OpenSpecArchiveStatus,
+    QueuedReadyQueueItem, ReadyQueueActiveClaim, ReadyQueueCommon, ReadyQueueItem, RequestedReview,
+    Reservation, ReservationOverlapConflictPayload, Review, ReviewCommon, ReviewSubtask,
+    ReviewTarget, RuntimeAttestation, Session, StaleSessionsPayload, Subtask, SubtaskLifecycle,
     SupersededReadyQueueItem, SupersededReview, TypedEvent, WorkSubtask,
 };
 #[allow(unused_imports)]

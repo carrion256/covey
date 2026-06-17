@@ -445,6 +445,7 @@ pub(crate) fn ordered_claim_candidate(
                 .map_err(Into::into)
             }
         }
+        SubtaskKind::Cleanup => Ok(None),
     }
 }
 

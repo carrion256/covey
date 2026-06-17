@@ -108,6 +108,7 @@ pub(crate) const fn subtask_kind_name(kind: SubtaskKind) -> &'static str {
     match kind {
         SubtaskKind::Work => "work",
         SubtaskKind::Review => "review",
+        SubtaskKind::Cleanup => "cleanup",
     }
 }
 
@@ -235,6 +236,7 @@ pub enum MetaTaskState {
 pub enum SubtaskKind {
     Work,
     Review,
+    Cleanup,
 }
 
 /// Unified subtask states across work and review subtasks.

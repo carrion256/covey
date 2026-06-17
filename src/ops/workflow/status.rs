@@ -257,6 +257,7 @@ fn subtask_candidates_tx(
     match kind {
         SubtaskKind::Work => subtask_work_candidates_tx(tx, meta_task_id, limit, now),
         SubtaskKind::Review => subtask_review_candidates_tx(tx, meta_task_id, limit),
+        SubtaskKind::Cleanup => Ok(Vec::new()),
     }
 }
 
@@ -607,6 +608,7 @@ fn claimable_subtask_count_tx(
                 )?
             }
         }
+        SubtaskKind::Cleanup => 0,
     };
     usize::try_from(count).map_err(|_| CoveyError::InvalidObservabilityRow {
         reason: "claimable subtask count must not be negative".to_owned(),
