@@ -91,7 +91,7 @@ impl ImportBdV1Req {
         }
     }
 
-    /// Builds a bd import request from the legacy flat selector fields.
+    /// Builds a bd import request from the retained flat selector fields.
     ///
     /// # Errors
     ///
@@ -392,7 +392,7 @@ impl ImportBdV1Result {
         &self.items
     }
 
-    /// Splits this result into the legacy flat response parts.
+    /// Splits this result into the retained flat response parts.
     #[must_use]
     pub fn into_flat_parts(self) -> (String, usize, usize, Vec<ImportBdV1ItemResult>) {
         (
@@ -751,7 +751,7 @@ impl ImportOpenSpecReq {
         }
     }
 
-    /// Builds an OpenSpec import request from the legacy flat mode fields.
+    /// Builds an OpenSpec import request from the retained flat mode fields.
     ///
     /// # Errors
     ///
@@ -986,7 +986,7 @@ impl ImportOpenSpecResult {
         &self.items
     }
 
-    /// Splits this result into the legacy flat response parts.
+    /// Splits this result into the retained flat response parts.
     #[must_use]
     pub fn into_flat_parts(
         self,

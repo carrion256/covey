@@ -1309,7 +1309,7 @@ fn claim_lifecycle_preserves_flat_state_shape() {
     assert_eq!(serialized, raw);
     assert!(
         serialized.get("lifecycle").is_none(),
-        "claim JSON must remain the legacy flat storage shape"
+        "claim JSON must remain the retained flat storage shape"
     );
 }
 
@@ -1370,7 +1370,7 @@ fn meta_task_lifecycle_preserves_flat_state_shape() {
     assert_eq!(serialized, raw);
     assert!(
         serialized.get("lifecycle").is_none(),
-        "meta-task JSON must remain the legacy flat storage shape"
+        "meta-task JSON must remain the retained flat storage shape"
     );
 }
 
@@ -4579,7 +4579,7 @@ fn reservation_lifecycle_preserves_flat_state_shape() {
     assert_eq!(serialized, raw);
     assert!(
         serialized.get("lifecycle").is_none(),
-        "reservation JSON must remain the legacy flat storage shape"
+        "reservation JSON must remain the retained flat storage shape"
     );
 }
 
