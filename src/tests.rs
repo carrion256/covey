@@ -4,7 +4,8 @@ use rusqlite::{Connection, params};
 
 use crate::{
     BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock, Covey,
-    FinishOpenSpecArchiveCleanupReq, ManualClock, ReconcileChangesRequestedFollowupsReq,
+    FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecCurrentWorkBlockerKind,
+    OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState, ReconcileChangesRequestedFollowupsReq,
     RegisterSessionReq, Result, SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
@@ -243,13 +244,13 @@ fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
 fn seed_archive_session_and_meta(covey: &Covey, change_id: &str) {
     let conn = covey.conn.lock().expect("covey connection mutex");
     conn.execute(
-        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+        "INSERT OR IGNORE INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
          VALUES ('session-orch-archive', 'orch-archive', 'orch-archive-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
         [],
     )
     .expect("insert orchestrator session");
     conn.execute(
-        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+        "INSERT OR IGNORE INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
          VALUES ('session-exec-archive', 'exec-archive', 'exec-archive-1', 'executor', 'active', NULL, 1, 1, 1, 1)",
         [],
     )
@@ -322,7 +323,7 @@ fn seed_archive_scoped_subtask(
         .expect("mark scoped subtask applied");
         conn.execute(
             "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
-             VALUES (?1, ?2, ?3, 'canonical', 'applied', NULL, NULL, NULL, ?4, ?4)",
+             VALUES (?1, ?2, ?3, 'canonical', 'applied', NULL, 1, NULL, ?4, ?4)",
             params![queue_id, artifact_digest, subtask_id, created_at],
         )
         .expect("insert applied queue item");
@@ -333,6 +334,458 @@ fn seed_archive_scoped_subtask(
         )
         .expect("insert archive blocker");
     }
+}
+
+fn seed_current_work_scoped_subtask(
+    covey: &Covey,
+    change_id: &str,
+    subtask_id: &str,
+    state: &str,
+    artifact_digest: Option<&str>,
+    created_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'work', NULL, NULL, 'available', NULL, NULL, 1, ?4, ?4)",
+        params![
+            subtask_id,
+            format!("openspec:{change_id}"),
+            format!("work {subtask_id}"),
+            created_at,
+        ],
+    )
+    .expect("insert current-work scoped subtask");
+    if let Some(artifact_digest) = artifact_digest {
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES (?1, 'patch_bundle', 'base', ?2, 'session-orch-archive', ?3, ?4, ?5)",
+            params![
+                artifact_digest,
+                subtask_id,
+                format!("{subtask_id}.json"),
+                format!("blake3:paths-{subtask_id}"),
+                created_at,
+            ],
+        )
+        .expect("insert current-work artifact");
+    }
+    conn.execute(
+        "UPDATE subtasks SET state = ?1, artifact_digest = ?2, updated_at = ?3 WHERE subtask_id = ?4",
+        params![state, artifact_digest, created_at, subtask_id],
+    )
+    .expect("update current-work scoped subtask lifecycle");
+    conn.execute(
+        "INSERT INTO openspec_subtask_scope (subtask_id, openspec_change_id, openspec_task_id, source_path, scenario_refs_json, updated_at)
+         VALUES (?1, ?2, ?3, ?4, '[]', ?5)",
+        params![
+            subtask_id,
+            change_id,
+            format!("task-{subtask_id}"),
+            format!("openspec/changes/{change_id}/tasks.md"),
+            created_at,
+        ],
+    )
+    .expect("insert current-work OpenSpec scope");
+}
+
+fn seed_current_work_claimed_subtask(
+    covey: &Covey,
+    change_id: &str,
+    subtask_id: &str,
+    claim_id: &str,
+    created_at: i64,
+) {
+    seed_current_work_scoped_subtask(covey, change_id, subtask_id, "available", None, created_at);
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'executor', 'active', ?4, ?5, ?5, ?5, ?5)",
+        params![
+            format!("session-{claim_id}"),
+            format!("agent-{claim_id}"),
+            format!("instance-{claim_id}"),
+            subtask_id,
+            created_at,
+        ],
+    )
+    .expect("insert executor session");
+    conn.execute(
+        "INSERT INTO claims (claim_id, subtask_id, owner_session_token, fence_seq, lease_deadline, state, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, 'held', ?5, ?5)",
+        params![
+            claim_id,
+            subtask_id,
+            format!("session-{claim_id}"),
+            created_at + 60_000,
+            created_at,
+        ],
+    )
+    .expect("insert current-work claim");
+    conn.execute(
+        "UPDATE subtasks SET state = 'claimed', current_claim_id = ?1, updated_at = ?2 WHERE subtask_id = ?3",
+        params![claim_id, created_at, subtask_id],
+    )
+    .expect("mark current-work subtask claimed");
+}
+
+fn seed_current_work_queue(
+    covey: &Covey,
+    subtask_id: &str,
+    queue_id: &str,
+    artifact_digest: &str,
+    state: &str,
+    created_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    let claim_fence_seq = if state == "applied" {
+        Some(1_i64)
+    } else {
+        None
+    };
+    conn.execute(
+        "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
+         VALUES (?1, ?2, ?3, 'canonical', ?4, NULL, ?5, NULL, ?6, ?6)",
+        params![queue_id, artifact_digest, subtask_id, state, claim_fence_seq, created_at],
+    )
+    .expect("insert current-work queue item");
+}
+
+#[test]
+fn openspec_current_work_reports_each_covey_derived_state() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+
+    seed_archive_session_and_meta(&covey, "current-imported");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-imported",
+        "current-imported-work",
+        "available",
+        None,
+        2,
+    );
+
+    seed_archive_session_and_meta(&covey, "current-claimed");
+    seed_current_work_claimed_subtask(
+        &covey,
+        "current-claimed",
+        "current-claimed-work",
+        "claim-current-work",
+        3,
+    );
+
+    seed_archive_session_and_meta(&covey, "current-reviewing");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-reviewing",
+        "current-reviewing-work",
+        "review_pending",
+        Some("blake3:current-reviewing"),
+        4,
+    );
+
+    seed_archive_session_and_meta(&covey, "current-applying");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-applying",
+        "current-applying-work",
+        "ready_for_apply",
+        Some("blake3:current-applying"),
+        5,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-applying-work",
+        "queue-current-applying",
+        "blake3:current-applying",
+        "queued",
+        5,
+    );
+
+    seed_archive_session_and_meta(&covey, "current-archived");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-archived",
+        "current-archived-work",
+        "applied",
+        Some("blake3:current-archived"),
+        6,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-archived-work",
+        "queue-current-archived",
+        "blake3:current-archived",
+        "applied",
+        6,
+    );
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO openspec_archive_status (queue_id, subtask_id, artifact_digest, openspec_change_id, state, blocked_reason, archive_proof_digest, recorded_by_session, created_at, updated_at)
+             VALUES ('queue-current-archived', 'current-archived-work', 'blake3:current-archived', 'current-archived', 'archived', NULL, 'blake3:archive-current-archived', 'session-orch-archive', 6, 6)",
+            [],
+        )
+        .expect("insert archived status");
+    }
+
+    seed_archive_session_and_meta(&covey, "current-blocked");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-blocked",
+        "current-blocked-work",
+        "changes_requested",
+        Some("blake3:current-blocked"),
+        7,
+    );
+
+    let cases = [
+        (
+            "current-imported",
+            OpenSpecCurrentWorkState::Imported,
+            OpenSpecCurrentWorkOwner::Executor,
+        ),
+        (
+            "current-claimed",
+            OpenSpecCurrentWorkState::Claimed,
+            OpenSpecCurrentWorkOwner::Executor,
+        ),
+        (
+            "current-reviewing",
+            OpenSpecCurrentWorkState::Reviewing,
+            OpenSpecCurrentWorkOwner::Reviewer,
+        ),
+        (
+            "current-applying",
+            OpenSpecCurrentWorkState::Applying,
+            OpenSpecCurrentWorkOwner::ApplyGate,
+        ),
+        (
+            "current-archived",
+            OpenSpecCurrentWorkState::Archived,
+            OpenSpecCurrentWorkOwner::Operator,
+        ),
+        (
+            "current-blocked",
+            OpenSpecCurrentWorkState::Blocked,
+            OpenSpecCurrentWorkOwner::Executor,
+        ),
+    ];
+
+    for (change_id, expected_state, expected_owner) in cases {
+        let current = covey
+            .openspec_current_work(change_id)
+            .expect("current work");
+        assert_eq!(current.state, expected_state, "state for {change_id}");
+        assert_eq!(
+            current.next_owner, expected_owner,
+            "next owner for {change_id}"
+        );
+    }
+}
+
+#[test]
+fn openspec_current_work_reports_missing_import_as_blocked() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+
+    let current = covey
+        .openspec_current_work("missing-current-work")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Covey);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::MissingImport
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:missing_import:missing-current-work"
+    );
+}
+
+#[test]
+fn openspec_current_work_is_scoped_to_one_change() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+
+    seed_archive_session_and_meta(&covey, "scope-claimed");
+    seed_current_work_claimed_subtask(
+        &covey,
+        "scope-claimed",
+        "scope-claimed-work",
+        "claim-scope-claimed",
+        2,
+    );
+    seed_archive_session_and_meta(&covey, "scope-applying");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "scope-applying",
+        "scope-applying-work",
+        "ready_for_apply",
+        Some("blake3:scope-applying"),
+        3,
+    );
+    seed_current_work_queue(
+        &covey,
+        "scope-applying-work",
+        "queue-scope-applying",
+        "blake3:scope-applying",
+        "queued",
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("scope-claimed")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Claimed);
+    assert_eq!(current.subtask_ids.len(), 1);
+    assert_eq!(current.subtask_ids[0].as_str(), "scope-claimed-work");
+    assert!(current.queue_ids.is_empty());
+}
+
+#[test]
+fn openspec_current_work_does_not_archive_when_any_scoped_subtask_is_non_terminal() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-nonterminal");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-nonterminal",
+        "current-terminal-work",
+        "applied",
+        Some("blake3:current-terminal"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-terminal-work",
+        "queue-current-terminal",
+        "blake3:current-terminal",
+        "applied",
+        2,
+    );
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO openspec_archive_status (queue_id, subtask_id, artifact_digest, openspec_change_id, state, blocked_reason, archive_proof_digest, recorded_by_session, created_at, updated_at)
+             VALUES ('queue-current-terminal', 'current-terminal-work', 'blake3:current-terminal', 'current-nonterminal', 'archived', NULL, 'blake3:archive-current-terminal', 'session-orch-archive', 2, 2)",
+            [],
+        )
+        .expect("insert archived status");
+    }
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-nonterminal",
+        "current-open-work",
+        "available",
+        None,
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-nonterminal")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Imported);
+}
+
+#[test]
+fn openspec_current_work_applied_but_unarchived_is_named_blocker() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-unarchived");
+    seed_archive_scoped_subtask(
+        &covey,
+        "current-unarchived",
+        "current-unarchived-work",
+        Some("queue-current-unarchived"),
+        "blake3:current-unarchived",
+        "applied",
+        2,
+    );
+
+    let current = covey
+        .openspec_current_work("current-unarchived")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(
+        current.next_owner,
+        OpenSpecCurrentWorkOwner::OpenSpecArchive
+    );
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived
+    );
+    assert_eq!(
+        current.blockers[0].blocker_id,
+        "blocker_openspec_current_work_applied_but_unarchived_queue-current-unarchived"
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:applied_but_unarchived:queue-current-unarchived:blake3:current-unarchived"
+    );
+    assert_eq!(
+        current.blockers[0].queue_id.as_ref().map(|id| id.as_str()),
+        Some("queue-current-unarchived")
+    );
+}
+
+#[test]
+fn openspec_current_work_applied_but_unarchived_precedes_subtask_blockers() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-precedence");
+    seed_archive_scoped_subtask(
+        &covey,
+        "current-precedence",
+        "current-precedence-applied",
+        Some("queue-current-precedence"),
+        "blake3:current-precedence-applied",
+        "applied",
+        2,
+    );
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-precedence",
+        "current-precedence-blocked",
+        "changes_requested",
+        Some("blake3:current-precedence-blocked"),
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-precedence")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(
+        current.next_owner,
+        OpenSpecCurrentWorkOwner::OpenSpecArchive
+    );
+    assert_eq!(current.blockers.len(), 2);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:applied_but_unarchived:queue-current-precedence:blake3:current-precedence-applied"
+    );
+    assert_eq!(
+        current.blockers[1].kind,
+        OpenSpecCurrentWorkBlockerKind::SubtaskBlocked
+    );
+    assert_eq!(
+        current.blockers[1].evidence_id,
+        "openspec_current_work:subtask_blocked:current-precedence-blocked:changes_requested"
+    );
 }
 
 #[test]

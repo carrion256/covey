@@ -10,8 +10,8 @@ use super::{
     AgentPrincipalId, Artifact, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, Claim, ClaimId, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask,
     MetaTaskId, OpenSpecArchiveStatus, OpenSpecChangeId, QueueId, ReadyQueueItem, ReadyQueueState,
-    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewTarget, ReviewVerdict, Session,
-    SessionToken, SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
+    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict,
+    Session, SessionToken, SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
     SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VerifierId,
 };
 
@@ -1120,6 +1120,341 @@ pub struct OpenSpecArchiveCleanupFinish {
     pub archived_queue_ids: Vec<QueueId>,
     pub cleanup_subtask_id: SubtaskId,
     pub cleanup_claim_id: ClaimId,
+}
+
+/// Covey-derived current-work label for one OpenSpec work packet.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenSpecCurrentWorkState {
+    Imported,
+    Claimed,
+    Reviewing,
+    Applying,
+    Archived,
+    Blocked,
+}
+
+/// Surface that owns the next move for the current-work projection.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenSpecCurrentWorkOwner {
+    Covey,
+    Executor,
+    Reviewer,
+    ApplyGate,
+    OpenSpecArchive,
+    Authority,
+    Operator,
+}
+
+/// Stable blocker kind emitted by the current-work projection.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenSpecCurrentWorkBlockerKind {
+    MissingImport,
+    AppliedButUnarchived,
+    SubtaskBlocked,
+}
+
+/// One named blocker for a current-work projection.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecCurrentWorkBlocker {
+    pub blocker_id: String,
+    pub evidence_id: String,
+    pub kind: OpenSpecCurrentWorkBlockerKind,
+    pub owner: OpenSpecCurrentWorkOwner,
+    pub subtask_id: Option<SubtaskId>,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub review_id: Option<ReviewId>,
+    pub reason: String,
+}
+
+impl OpenSpecCurrentWorkBlocker {
+    /// Builds a missing-import blocker.
+    #[must_use]
+    pub fn missing_import(openspec_change_id: &OpenSpecChangeId) -> Self {
+        Self {
+            blocker_id: format!(
+                "blocker_openspec_current_work_missing_import_{}",
+                openspec_change_id.as_str()
+            ),
+            evidence_id: format!(
+                "openspec_current_work:missing_import:{}",
+                openspec_change_id.as_str()
+            ),
+            kind: OpenSpecCurrentWorkBlockerKind::MissingImport,
+            owner: OpenSpecCurrentWorkOwner::Covey,
+            subtask_id: None,
+            queue_id: None,
+            artifact_digest: None,
+            review_id: None,
+            reason: format!(
+                "OpenSpec change {} has no Covey scoped subtasks",
+                openspec_change_id.as_str()
+            ),
+        }
+    }
+
+    /// Builds a blocker for an applied queue item that still needs archive cleanup.
+    #[must_use]
+    pub fn applied_but_unarchived(status: &OpenSpecArchiveStatus) -> Self {
+        Self {
+            blocker_id: format!(
+                "blocker_openspec_current_work_applied_but_unarchived_{}",
+                status.queue_id.as_str()
+            ),
+            evidence_id: format!(
+                "openspec_current_work:applied_but_unarchived:{}:{}",
+                status.queue_id.as_str(),
+                status.artifact_digest.as_str()
+            ),
+            kind: OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived,
+            owner: OpenSpecCurrentWorkOwner::OpenSpecArchive,
+            subtask_id: Some(status.subtask_id.clone()),
+            queue_id: Some(status.queue_id.clone()),
+            artifact_digest: Some(status.artifact_digest.clone()),
+            review_id: None,
+            reason: status
+                .blocked_reason
+                .as_ref()
+                .map_or_else(|| "applied_but_unarchived".to_owned(), ToString::to_string),
+        }
+    }
+
+    /// Builds a blocker for a terminal blocked or changes-requested subtask.
+    #[must_use]
+    pub fn subtask_blocked(subtask: &SubtaskView) -> Self {
+        Self {
+            blocker_id: format!(
+                "blocker_openspec_current_work_subtask_blocked_{}",
+                subtask.subtask_id.as_str()
+            ),
+            evidence_id: format!(
+                "openspec_current_work:subtask_blocked:{}:{}",
+                subtask.subtask_id.as_str(),
+                subtask.state()
+            ),
+            kind: OpenSpecCurrentWorkBlockerKind::SubtaskBlocked,
+            owner: OpenSpecCurrentWorkOwner::Executor,
+            subtask_id: Some(subtask.subtask_id.clone()),
+            queue_id: None,
+            artifact_digest: subtask.artifact_digest().cloned(),
+            review_id: None,
+            reason: format!("subtask state is {}", subtask.state()),
+        }
+    }
+}
+
+/// Covey-first current-work projection for one OpenSpec work packet.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecCurrentWork {
+    pub openspec_change_id: OpenSpecChangeId,
+    pub state: OpenSpecCurrentWorkState,
+    pub next_owner: OpenSpecCurrentWorkOwner,
+    pub subtask_ids: Vec<SubtaskId>,
+    pub claim_ids: Vec<ClaimId>,
+    pub queue_ids: Vec<QueueId>,
+    pub artifact_digests: Vec<ArtifactDigest>,
+    pub review_ids: Vec<ReviewId>,
+    pub archive_blockers: Vec<OpenSpecArchiveStatus>,
+    pub blockers: Vec<OpenSpecCurrentWorkBlocker>,
+}
+
+impl OpenSpecCurrentWork {
+    /// Builds the current-work projection from Covey-owned lifecycle facts.
+    #[must_use]
+    pub fn from_parts(
+        openspec_change_id: OpenSpecChangeId,
+        subtasks: Vec<SubtaskView>,
+        reviews: Vec<Review>,
+        queue_items: Vec<ReadyQueueItem>,
+        archive_statuses: Vec<OpenSpecArchiveStatus>,
+    ) -> Self {
+        let open_archive_blockers = archive_statuses
+            .iter()
+            .filter(|status| status.state == super::OpenSpecArchiveStatusState::Blocked)
+            .cloned()
+            .collect::<Vec<_>>();
+        let blockers =
+            current_work_blockers(&openspec_change_id, &subtasks, &open_archive_blockers);
+        let state = current_work_state(
+            &subtasks,
+            &reviews,
+            &queue_items,
+            &archive_statuses,
+            &blockers,
+        );
+        let next_owner = current_work_next_owner(state, &blockers);
+        Self {
+            openspec_change_id,
+            state,
+            next_owner,
+            subtask_ids: subtasks
+                .iter()
+                .map(|subtask| subtask.subtask_id.clone())
+                .collect(),
+            claim_ids: subtasks
+                .iter()
+                .filter_map(|subtask| subtask.active_claim_id().cloned())
+                .collect(),
+            queue_ids: queue_items
+                .iter()
+                .map(|item| {
+                    QueueId::parse(item.queue_id().to_owned()).expect("loaded queue id is valid")
+                })
+                .collect(),
+            artifact_digests: current_work_artifact_digests(
+                &subtasks,
+                &queue_items,
+                &archive_statuses,
+            ),
+            review_ids: reviews
+                .iter()
+                .map(|review| {
+                    ReviewId::parse(review.review_id().to_owned())
+                        .expect("loaded review id is valid")
+                })
+                .collect(),
+            archive_blockers: open_archive_blockers,
+            blockers,
+        }
+    }
+}
+
+fn current_work_state(
+    subtasks: &[SubtaskView],
+    reviews: &[Review],
+    queue_items: &[ReadyQueueItem],
+    archive_statuses: &[OpenSpecArchiveStatus],
+    blockers: &[OpenSpecCurrentWorkBlocker],
+) -> OpenSpecCurrentWorkState {
+    if !blockers.is_empty() {
+        return OpenSpecCurrentWorkState::Blocked;
+    }
+    if !subtasks.is_empty()
+        && subtasks
+            .iter()
+            .all(|subtask| subtask.state() == SubtaskState::Applied)
+        && archive_statuses
+            .iter()
+            .any(|status| status.state == super::OpenSpecArchiveStatusState::Archived)
+        && archive_statuses
+            .iter()
+            .filter(|status| status.state == super::OpenSpecArchiveStatusState::Archived)
+            .count()
+            >= queue_items
+                .iter()
+                .filter(|item| item.state() == ReadyQueueState::Applied)
+                .count()
+    {
+        return OpenSpecCurrentWorkState::Archived;
+    }
+    if queue_items.iter().any(|item| {
+        matches!(
+            item.state(),
+            ReadyQueueState::Queued | ReadyQueueState::InFlight
+        )
+    }) || subtasks.iter().any(|subtask| {
+        matches!(
+            subtask.state(),
+            SubtaskState::Approved | SubtaskState::ReadyForApply
+        )
+    }) {
+        return OpenSpecCurrentWorkState::Applying;
+    }
+    if reviews.iter().any(|review| {
+        matches!(
+            review.state(),
+            ReviewState::Requested | ReviewState::InProgress
+        )
+    }) || subtasks.iter().any(|subtask| {
+        matches!(
+            subtask.state(),
+            SubtaskState::ArtifactPublished | SubtaskState::ReviewPending
+        )
+    }) {
+        return OpenSpecCurrentWorkState::Reviewing;
+    }
+    if subtasks.iter().any(|subtask| {
+        subtask.active_claim_id().is_some()
+            || matches!(
+                subtask.state(),
+                SubtaskState::Claimed | SubtaskState::InProgress
+            )
+    }) {
+        return OpenSpecCurrentWorkState::Claimed;
+    }
+    OpenSpecCurrentWorkState::Imported
+}
+
+fn current_work_next_owner(
+    state: OpenSpecCurrentWorkState,
+    blockers: &[OpenSpecCurrentWorkBlocker],
+) -> OpenSpecCurrentWorkOwner {
+    if let Some(blocker) = blockers.first() {
+        return blocker.owner;
+    }
+    match state {
+        OpenSpecCurrentWorkState::Imported => OpenSpecCurrentWorkOwner::Executor,
+        OpenSpecCurrentWorkState::Claimed => OpenSpecCurrentWorkOwner::Executor,
+        OpenSpecCurrentWorkState::Reviewing => OpenSpecCurrentWorkOwner::Reviewer,
+        OpenSpecCurrentWorkState::Applying => OpenSpecCurrentWorkOwner::ApplyGate,
+        OpenSpecCurrentWorkState::Archived => OpenSpecCurrentWorkOwner::Operator,
+        OpenSpecCurrentWorkState::Blocked => OpenSpecCurrentWorkOwner::Operator,
+    }
+}
+
+fn current_work_blockers(
+    openspec_change_id: &OpenSpecChangeId,
+    subtasks: &[SubtaskView],
+    open_archive_blockers: &[OpenSpecArchiveStatus],
+) -> Vec<OpenSpecCurrentWorkBlocker> {
+    if subtasks.is_empty() {
+        return vec![OpenSpecCurrentWorkBlocker::missing_import(
+            openspec_change_id,
+        )];
+    }
+    let mut blockers = open_archive_blockers
+        .iter()
+        .map(OpenSpecCurrentWorkBlocker::applied_but_unarchived)
+        .collect::<Vec<_>>();
+    blockers.extend(subtasks.iter().filter_map(|subtask| {
+        matches!(
+            subtask.state(),
+            SubtaskState::Blocked | SubtaskState::ChangesRequested | SubtaskState::Abandoned
+        )
+        .then(|| OpenSpecCurrentWorkBlocker::subtask_blocked(subtask))
+    }));
+    blockers
+}
+
+fn current_work_artifact_digests(
+    subtasks: &[SubtaskView],
+    queue_items: &[ReadyQueueItem],
+    archive_statuses: &[OpenSpecArchiveStatus],
+) -> Vec<ArtifactDigest> {
+    let mut digests = subtasks
+        .iter()
+        .filter_map(|subtask| subtask.artifact_digest().cloned())
+        .chain(queue_items.iter().map(|item| {
+            ArtifactDigest::parse(item.artifact_digest().to_owned())
+                .expect("loaded artifact digest is valid")
+        }))
+        .chain(
+            archive_statuses
+                .iter()
+                .map(|status| status.artifact_digest.clone()),
+        )
+        .collect::<Vec<_>>();
+    digests.sort_unstable();
+    digests.dedup();
+    digests
 }
 
 /// Observability row for a subtask that has not moved recently enough to merit attention.
