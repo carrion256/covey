@@ -9,15 +9,17 @@ use derive_new::new;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
-    AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
+    AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId, ApplyGateBlockerKind,
+    ApplyGateBlockerReason, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
     CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid,
     LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, OpenSpecArchiveBlockedReason,
-    OpenSpecArchiveStatusState, OpenSpecChangeId, PermissiveLandingReceiptDigest, PromptText,
+    OpenSpecArchiveStatusState, OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId,
+    OperatorBlockerReason, OperatorBlockerTargetKind, PermissiveLandingReceiptDigest, PromptText,
     ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId,
     ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass,
-    SessionRole, SessionToken, SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle,
-    TimestampMs, VerifierId,
+    SessionRole, SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason,
+    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -285,7 +287,7 @@ struct RawRecordRuntimeAttestationReq {
 }
 
 impl RecordRuntimeAttestationReq {
-    /// Builds a runtime attestation request from the legacy flat identity shape.
+    /// Builds a runtime attestation request from the retained flat identity shape.
     ///
     /// # Errors
     ///
@@ -1072,6 +1074,95 @@ impl RecordApplyVerificationReq {
     }
 }
 
+/// Request to record native apply-gate blocker evidence for the current attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordApplyGateBlockerReq {
+    pub session_token: SessionToken,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub claim_fence_seq: FenceSeq,
+    pub verifier: VerifierId,
+    pub blocker_kind: ApplyGateBlockerKind,
+    pub reason: ApplyGateBlockerReason,
+    pub evidence_id: ApplyGateBlockerEvidenceId,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordApplyGateBlockerReq {
+    /// Builds an apply-gate blocker evidence request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, queue id, artifact digest, fence,
+    /// verifier, blocker reason, evidence id, or idempotency key is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        queue_id: impl Into<String>,
+        artifact_digest: impl Into<String>,
+        claim_fence_seq: impl Into<i64>,
+        verifier: impl Into<String>,
+        blocker_kind: ApplyGateBlockerKind,
+        reason: impl Into<String>,
+        evidence_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            queue_id: QueueId::parse(queue_id.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
+            verifier: VerifierId::parse(verifier.into())?,
+            blocker_kind,
+            reason: ApplyGateBlockerReason::parse(reason.into())?,
+            evidence_id: ApplyGateBlockerEvidenceId::parse(evidence_id.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record Authority settlement reconcile evidence for one queue item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordSettlementReconcileBlockerReq {
+    pub session_token: SessionToken,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub claim_fence_seq: FenceSeq,
+    pub reconcile_reason: SettlementReconcileReason,
+    pub authority_evidence_id: SettlementReconcileEvidenceId,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordSettlementReconcileBlockerReq {
+    /// Builds a settlement reconcile blocker request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, queue id, artifact digest, fence,
+    /// Authority evidence id, or idempotency key is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        queue_id: impl Into<String>,
+        artifact_digest: impl Into<String>,
+        claim_fence_seq: impl Into<i64>,
+        reconcile_reason: SettlementReconcileReason,
+        authority_evidence_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            queue_id: QueueId::parse(queue_id.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
+            reconcile_reason,
+            authority_evidence_id: SettlementReconcileEvidenceId::parse(
+                authority_evidence_id.into(),
+            )?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
 /// Request to record final landed commit receipt for an applied artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordLandingReceiptReq {
@@ -1303,6 +1394,108 @@ impl RecordOpenSpecArchiveStatusReq {
             state,
             blocked_reason,
             archive_proof_digest,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record an explicit operator blocker for one OpenSpec current-work target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordOperatorBlockerReq {
+    pub session_token: SessionToken,
+    pub blocker_id: OperatorBlockerId,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub target_kind: OperatorBlockerTargetKind,
+    pub subtask_id: SubtaskId,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub reason: OperatorBlockerReason,
+    pub source_evidence_id: Option<OperatorBlockerEvidenceId>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordOperatorBlockerReq {
+    /// Builds an operator blocker request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identifiers are invalid or when target-specific
+    /// evidence fields are missing or contradictory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        blocker_id: impl Into<String>,
+        openspec_change_id: impl Into<String>,
+        target_kind: OperatorBlockerTargetKind,
+        subtask_id: impl Into<String>,
+        queue_id: Option<String>,
+        artifact_digest: Option<String>,
+        reason: impl Into<String>,
+        source_evidence_id: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        let queue_id = queue_id.map(QueueId::parse).transpose()?;
+        let artifact_digest = artifact_digest.map(ArtifactDigest::parse).transpose()?;
+        match target_kind {
+            OperatorBlockerTargetKind::Subtask => {
+                if queue_id.is_some() || artifact_digest.is_some() {
+                    return Err(CoveyTypeValidationError::new(
+                        "operator_blocker",
+                        "subtask blocker must not include queue or artifact",
+                    ));
+                }
+            }
+            OperatorBlockerTargetKind::ReadyQueue => {
+                if queue_id.is_none() || artifact_digest.is_none() {
+                    return Err(CoveyTypeValidationError::new(
+                        "operator_blocker",
+                        "ready queue blocker requires queue and artifact",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            blocker_id: OperatorBlockerId::parse(blocker_id.into())?,
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())?,
+            target_kind,
+            subtask_id: SubtaskId::parse(subtask_id.into())?,
+            queue_id,
+            artifact_digest,
+            reason: OperatorBlockerReason::parse(reason.into())?,
+            source_evidence_id: source_evidence_id
+                .map(OperatorBlockerEvidenceId::parse)
+                .transpose()?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to resolve a durable operator blocker after an operator repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveOperatorBlockerReq {
+    pub session_token: SessionToken,
+    pub blocker_id: OperatorBlockerId,
+    pub resolved_reason: OperatorBlockerReason,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ResolveOperatorBlockerReq {
+    /// Builds an operator blocker resolution request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identifiers or the resolution reason are invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        blocker_id: impl Into<String>,
+        resolved_reason: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            blocker_id: OperatorBlockerId::parse(blocker_id.into())?,
+            resolved_reason: OperatorBlockerReason::parse(resolved_reason.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }

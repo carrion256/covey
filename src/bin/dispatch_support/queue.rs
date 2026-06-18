@@ -99,6 +99,56 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
                 format!("queue apply verification recorded {}", args.queue_id),
             ))
         }
+        QueueCommand::RecordApplyGateBlocker(args) => {
+            let req = RecordApplyGateBlockerReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id.clone(),
+                args.artifact_digest,
+                args.claim_fence_seq,
+                args.verifier,
+                args.blocker_kind.into(),
+                args.reason,
+                args.evidence_id.clone(),
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("record-apply-gate-blocker")),
+            )?;
+            store.record_apply_gate_blocker(req)?;
+            Ok(Rendered::summary(
+                QueueClaimAck {
+                    operation: "record_apply_gate_blocker",
+                    queue_id: args.queue_id.clone(),
+                    claim_fence_seq: args.claim_fence_seq,
+                },
+                format!(
+                    "queue apply-gate blocker recorded {} {}",
+                    args.queue_id, args.evidence_id
+                ),
+            ))
+        }
+        QueueCommand::RecordSettlementReconcileBlocker(args) => {
+            let req = RecordSettlementReconcileBlockerReq::try_from_raw_parts(
+                args.session_token,
+                args.queue_id.clone(),
+                args.artifact_digest,
+                args.claim_fence_seq,
+                args.reconcile_reason.into(),
+                args.authority_evidence_id.clone(),
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("record-settlement-reconcile-blocker")),
+            )?;
+            store.record_settlement_reconcile_blocker(req)?;
+            Ok(Rendered::summary(
+                QueueClaimAck {
+                    operation: "record_settlement_reconcile_blocker",
+                    queue_id: args.queue_id.clone(),
+                    claim_fence_seq: args.claim_fence_seq,
+                },
+                format!(
+                    "queue settlement reconcile blocker recorded {} {}",
+                    args.queue_id, args.authority_evidence_id
+                ),
+            ))
+        }
         QueueCommand::VerifyLandingAuthorization(args) => {
             let status = store.verify_landing_authorization(
                 VerifyLandingAuthorizationReq::try_from_raw_parts(

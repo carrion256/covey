@@ -3,21 +3,26 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 
 use super::{
-    AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ArtifactDigest, ArtifactKind,
+    AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId,
+    ApplyGateBlockerKind, ApplyGateBlockerReason, ArtifactDigest, ArtifactKind,
     ArtifactManifestPath, BaseRev, CancelMetaTaskReq, ChangedPathsDigest, ClaimId, ClaimResult,
     ClaimState, CommandTranscriptDigest, ConflictId, ConflictKind, ConflictResolutionState,
     CoveyTypeValidationError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
     EventObjectId, EventSeq, EventType, ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq,
     ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId, MetaTaskState, ModelId,
     ObjectType, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
-    PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq, QueueId,
-    ReadyQueueClaim, ReadyQueueState, RecordApplyVerificationReq, RecordOpenSpecArchiveStatusReq,
-    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq, ReleaseClaimReq,
-    RequestReservationReq, RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
-    ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass,
-    SessionHandle, SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementTarget,
-    StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskPriority, SubtaskState,
-    SubtaskTitle, SupersedeQueueItemReq, TimestampMs, VerifierId,
+    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerState,
+    OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
+    PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyGateBlockerReq,
+    RecordApplyVerificationReq, RecordOpenSpecArchiveStatusReq, RecordOperatorBlockerReq,
+    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
+    RecordSettlementReconcileBlockerReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
+    ReservationId, ReservationState, ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId,
+    ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
+    SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
+    SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
+    VerifierId,
 };
 
 /// Persisted session row.
@@ -374,13 +379,13 @@ impl RuntimeAttestation {
         })
     }
 
-    /// Returns the observed provider run id when this row is not a legacy placeholder.
+    /// Returns the observed provider run id when this row is not a retained placeholder.
     #[must_use]
     pub fn provider_run_id(&self) -> Option<&str> {
         self.provider_run_identity.provider_run_id()
     }
 
-    /// Returns the observed provider run issuer when this row is not a legacy placeholder.
+    /// Returns the observed provider run issuer when this row is not a retained placeholder.
     #[must_use]
     pub fn provider_run_id_issuer(&self) -> Option<&str> {
         self.provider_run_identity.provider_run_id_issuer()
@@ -895,7 +900,7 @@ mod runtime_attestation_tests {
             TimestampMs::parse(11).expect("valid ended_at"),
             TimestampMs::parse(12).expect("valid recorded_at"),
         )
-        .expect("legacy provider run placeholders remain explicit");
+        .expect("retained provider run placeholders remain explicit");
 
         assert!(attestation.provider_run_identity_missing());
         assert_eq!(attestation.provider_run_ref(), None);
@@ -3792,6 +3797,228 @@ impl<'de> Deserialize<'de> for OpenSpecArchiveStatus {
     }
 }
 
+/// Durable explicit operator blocker for one OpenSpec current-work target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorBlocker {
+    pub blocker_id: OperatorBlockerId,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub target_kind: OperatorBlockerTargetKind,
+    pub subtask_id: SubtaskId,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub reason: OperatorBlockerReason,
+    pub source_evidence_id: Option<OperatorBlockerEvidenceId>,
+    pub state: OperatorBlockerState,
+    pub recorded_by_session: SessionToken,
+    pub resolved_reason: Option<OperatorBlockerReason>,
+    pub resolved_by_session: Option<SessionToken>,
+    pub resolved_at: Option<TimestampMs>,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawOperatorBlocker {
+    blocker_id: String,
+    openspec_change_id: String,
+    target_kind: OperatorBlockerTargetKind,
+    subtask_id: String,
+    queue_id: Option<String>,
+    artifact_digest: Option<String>,
+    reason: String,
+    source_evidence_id: Option<String>,
+    state: OperatorBlockerState,
+    recorded_by_session: String,
+    resolved_reason: Option<String>,
+    resolved_by_session: Option<String>,
+    resolved_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl OperatorBlocker {
+    /// Builds an operator blocker row, rejecting contradictory target shapes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when timestamps are not monotonic or target-specific
+    /// fields are missing or contradictory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_parts(
+        blocker_id: OperatorBlockerId,
+        openspec_change_id: OpenSpecChangeId,
+        target_kind: OperatorBlockerTargetKind,
+        subtask_id: SubtaskId,
+        queue_id: Option<QueueId>,
+        artifact_digest: Option<ArtifactDigest>,
+        reason: OperatorBlockerReason,
+        source_evidence_id: Option<OperatorBlockerEvidenceId>,
+        state: OperatorBlockerState,
+        recorded_by_session: SessionToken,
+        resolved_reason: Option<OperatorBlockerReason>,
+        resolved_by_session: Option<SessionToken>,
+        resolved_at: Option<TimestampMs>,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        if updated_at < created_at {
+            return Err(
+                "operator blocker updated_at must be greater than or equal to created_at"
+                    .to_owned(),
+            );
+        }
+        match target_kind {
+            OperatorBlockerTargetKind::Subtask => {
+                if queue_id.is_some() || artifact_digest.is_some() {
+                    return Err(
+                        "subtask operator blocker must not include queue or artifact".to_owned(),
+                    );
+                }
+            }
+            OperatorBlockerTargetKind::ReadyQueue => {
+                if queue_id.is_none() || artifact_digest.is_none() {
+                    return Err(
+                        "ready-queue operator blocker requires queue and artifact".to_owned()
+                    );
+                }
+            }
+        }
+        match state {
+            OperatorBlockerState::Open => {
+                if resolved_reason.is_some()
+                    || resolved_by_session.is_some()
+                    || resolved_at.is_some()
+                {
+                    return Err(
+                        "open operator blocker must not include resolution metadata".to_owned()
+                    );
+                }
+            }
+            OperatorBlockerState::Resolved => {
+                if resolved_reason.is_none()
+                    || resolved_by_session.is_none()
+                    || resolved_at.is_none()
+                {
+                    return Err("resolved operator blocker requires resolution metadata".to_owned());
+                }
+            }
+        }
+        Ok(Self {
+            blocker_id,
+            openspec_change_id,
+            target_kind,
+            subtask_id,
+            queue_id,
+            artifact_digest,
+            reason,
+            source_evidence_id,
+            state,
+            recorded_by_session,
+            resolved_reason,
+            resolved_by_session,
+            resolved_at,
+            created_at,
+            updated_at,
+        })
+    }
+}
+
+impl TryFrom<RawOperatorBlocker> for OperatorBlocker {
+    type Error = String;
+
+    fn try_from(raw: RawOperatorBlocker) -> Result<Self, Self::Error> {
+        Self::try_from_parts(
+            OperatorBlockerId::parse(raw.blocker_id).map_err(|err| err.to_string())?,
+            OpenSpecChangeId::parse(raw.openspec_change_id).map_err(|err| err.to_string())?,
+            raw.target_kind,
+            SubtaskId::parse(raw.subtask_id).map_err(|err| err.to_string())?,
+            raw.queue_id
+                .map(QueueId::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            raw.artifact_digest
+                .map(ArtifactDigest::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            OperatorBlockerReason::parse(raw.reason).map_err(|err| err.to_string())?,
+            raw.source_evidence_id
+                .map(OperatorBlockerEvidenceId::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            raw.state,
+            SessionToken::parse(raw.recorded_by_session).map_err(|err| err.to_string())?,
+            raw.resolved_reason
+                .map(OperatorBlockerReason::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            raw.resolved_by_session
+                .map(SessionToken::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            raw.resolved_at
+                .map(TimestampMs::parse)
+                .transpose()
+                .map_err(|err| err.to_string())?,
+            TimestampMs::parse(raw.created_at).map_err(|err| err.to_string())?,
+            TimestampMs::parse(raw.updated_at).map_err(|err| err.to_string())?,
+        )
+    }
+}
+
+impl From<&OperatorBlocker> for RawOperatorBlocker {
+    fn from(blocker: &OperatorBlocker) -> Self {
+        Self {
+            blocker_id: blocker.blocker_id.as_str().to_owned(),
+            openspec_change_id: blocker.openspec_change_id.as_str().to_owned(),
+            target_kind: blocker.target_kind,
+            subtask_id: blocker.subtask_id.as_str().to_owned(),
+            queue_id: blocker.queue_id.as_ref().map(|id| id.as_str().to_owned()),
+            artifact_digest: blocker
+                .artifact_digest
+                .as_ref()
+                .map(|digest| digest.as_str().to_owned()),
+            reason: blocker.reason.as_str().to_owned(),
+            source_evidence_id: blocker
+                .source_evidence_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+            state: blocker.state,
+            recorded_by_session: blocker.recorded_by_session.as_str().to_owned(),
+            resolved_reason: blocker
+                .resolved_reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_owned()),
+            resolved_by_session: blocker
+                .resolved_by_session
+                .as_ref()
+                .map(|session| session.as_str().to_owned()),
+            resolved_at: blocker.resolved_at.map(TimestampMs::get),
+            created_at: blocker.created_at.get(),
+            updated_at: blocker.updated_at.get(),
+        }
+    }
+}
+
+impl Serialize for OperatorBlocker {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawOperatorBlocker::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OperatorBlocker {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawOperatorBlocker::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Accepted verifier evidence bound to one apply attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyVerification {
@@ -3803,6 +4030,36 @@ pub struct ApplyVerification {
     pub verifier: VerifierId,
     pub verdict_digest: ArtifactDigest,
     pub seal_digest: ArtifactDigest,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+}
+
+/// Native blocker evidence emitted by the apply gate for one current attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyGateBlocker {
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub review_id: ReviewId,
+    pub findings_digest: FindingsDigest,
+    pub claim_fence_seq: FenceSeq,
+    pub verifier: VerifierId,
+    pub blocker_kind: ApplyGateBlockerKind,
+    pub reason: ApplyGateBlockerReason,
+    pub evidence_id: ApplyGateBlockerEvidenceId,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+}
+
+/// Native Authority reconcile evidence retained for one settlement attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementReconcileBlocker {
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub review_id: ReviewId,
+    pub findings_digest: FindingsDigest,
+    pub claim_fence_seq: FenceSeq,
+    pub reconcile_reason: SettlementReconcileReason,
+    pub authority_evidence_id: SettlementReconcileEvidenceId,
     pub recorded_by_session: SessionToken,
     pub created_at: TimestampMs,
 }
@@ -3986,7 +4243,7 @@ impl Event {
     ///
     /// Events built through mutation APIs validate this against `event_type`,
     /// while persisted event-log reads preserve historical rows so operators can
-    /// inspect legacy payloads that no longer pass current typed validation.
+    /// inspect historical payloads that no longer pass current typed validation.
     #[must_use]
     pub fn payload_json(&self) -> &str {
         self.payload_json.as_str()
@@ -4213,8 +4470,12 @@ pub enum EventPayload {
     ReadyQueueEnqueued(EnqueueForApplyReq),
     ReadyQueueInFlight(ReadyQueueClaim),
     ApplyVerificationRecorded(RecordApplyVerificationReq),
+    ApplyGateBlockerRecorded(RecordApplyGateBlockerReq),
+    SettlementReconcileBlockerRecorded(RecordSettlementReconcileBlockerReq),
     ReadyQueueApplied(MarkAppliedReq),
     OpenSpecArchiveStatusRecorded(RecordOpenSpecArchiveStatusReq),
+    OperatorBlockerRecorded(RecordOperatorBlockerReq),
+    OperatorBlockerResolved(ResolveOperatorBlockerReq),
     ReadyQueueSuperseded(SupersedeQueueItemReq),
     ReservationRequested(RequestReservationReq),
     ReservationReleased(Reservation),
@@ -4250,8 +4511,14 @@ impl EventPayload {
             Self::ReadyQueueEnqueued(_) => EventType::ReadyQueueEnqueued,
             Self::ReadyQueueInFlight(_) => EventType::ReadyQueueInFlight,
             Self::ApplyVerificationRecorded(_) => EventType::ApplyVerificationRecorded,
+            Self::ApplyGateBlockerRecorded(_) => EventType::ApplyGateBlockerRecorded,
+            Self::SettlementReconcileBlockerRecorded(_) => {
+                EventType::SettlementReconcileBlockerRecorded
+            }
             Self::ReadyQueueApplied(_) => EventType::ReadyQueueApplied,
             Self::OpenSpecArchiveStatusRecorded(_) => EventType::OpenSpecArchiveStatusRecorded,
+            Self::OperatorBlockerRecorded(_) => EventType::OperatorBlockerRecorded,
+            Self::OperatorBlockerResolved(_) => EventType::OperatorBlockerResolved,
             Self::ReadyQueueSuperseded(_) => EventType::ReadyQueueSuperseded,
             Self::ReservationRequested(_) => EventType::ReservationRequested,
             Self::ReservationReleased(_) => EventType::ReservationReleased,
@@ -4288,9 +4555,14 @@ impl EventPayload {
             Self::ReadyQueueEnqueued(_)
             | Self::ReadyQueueInFlight(_)
             | Self::ApplyVerificationRecorded(_)
+            | Self::ApplyGateBlockerRecorded(_)
+            | Self::SettlementReconcileBlockerRecorded(_)
             | Self::ReadyQueueApplied(_)
             | Self::OpenSpecArchiveStatusRecorded(_)
             | Self::ReadyQueueSuperseded(_) => ObjectType::ReadyQueue,
+            Self::OperatorBlockerRecorded(_) | Self::OperatorBlockerResolved(_) => {
+                ObjectType::OperatorBlocker
+            }
             Self::ReservationRequested(_)
             | Self::ReservationReleased(_)
             | Self::ReservationRenewed(_)

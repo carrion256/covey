@@ -15,14 +15,15 @@ use crate::{
         OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility,
         OpenSpecArchiveStatus, OpenSpecArchiveStatusState, OpenSpecChangeId, QueueId,
         ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-        ReconcileApplyQueueReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
-        RecordOpenSpecArchiveStatusReq, ReleaseClaimReq, ReviewId, ReviewState, ReviewVerdict,
+        ReconcileApplyQueueReq, RecordApplyGateBlockerReq, RecordApplyVerificationReq,
+        RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
+        RecordSettlementReconcileBlockerReq, ReleaseClaimReq, ReviewId, ReviewState, ReviewVerdict,
         RuntimeAttestation, ScopeClass, Session, SessionRole, SessionToken, SettlementTarget,
         SubtaskKind, SubtaskState, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
-        VerifyLandingAuthorizationReq, claim_state_name, meta_task_state_name,
-        openspec_archive_status_state_name, ready_queue_state_name, reservation_state_name,
-        review_state_name, review_verdict_name, scope_class_name, subtask_kind_name,
-        subtask_state_name,
+        VerifyLandingAuthorizationReq, apply_gate_blocker_kind_name, claim_state_name,
+        meta_task_state_name, openspec_archive_status_state_name, ready_queue_state_name,
+        reservation_state_name, review_state_name, review_verdict_name, scope_class_name,
+        settlement_reconcile_reason_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -460,6 +461,180 @@ impl Covey {
         });
         self.log_operation(
             "record_apply_verification",
+            &req.session_token,
+            started_at,
+            &result,
+            |_| vec![format!("queue:{}", req.queue_id)],
+        );
+        result
+    }
+
+    /// Records native apply-gate blocker evidence for the current apply attempt.
+    pub fn record_apply_gate_blocker(&self, req: RecordApplyGateBlockerReq) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_apply_gate_blocker",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
+                    require_runtime_attestation(tx, &session)?;
+                    ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+                    ensure_length("verifier", &req.verifier, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("reason", &req.reason, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("evidence_id", &req.evidence_id, MAX_OBJECT_ID_LEN)?;
+
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
+                    let queue_id = QueueId::parse(item.queue_id())?;
+                    if item.state() != ReadyQueueState::InFlight
+                        || item.artifact_digest() != req.artifact_digest.as_str()
+                        || item.claim_fence_seq() != Some(req.claim_fence_seq.get())
+                    {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id,
+                            reason:
+                                "apply-gate blocker must target the current in-flight queue fence"
+                                    .to_owned(),
+                        });
+                    }
+                    let live_evidence = require_live_apply_gate_evidence(tx, &item, &session)?;
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO apply_gate_blockers (
+                            queue_id, artifact_digest, review_id, findings_digest,
+                            claim_fence_seq, verifier, blocker_kind, reason, evidence_id,
+                            recorded_by_session, created_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        "#,
+                        params![
+                            req.queue_id.as_str(),
+                            req.artifact_digest.as_str(),
+                            live_evidence.review_id.as_str(),
+                            live_evidence.findings_digest.as_str(),
+                            req.claim_fence_seq,
+                            req.verifier.as_str(),
+                            apply_gate_blocker_kind_name(req.blocker_kind),
+                            req.reason.as_str(),
+                            req.evidence_id.as_str(),
+                            req.session_token.as_str(),
+                            now,
+                        ],
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::ApplyGateBlockerRecorded,
+                        ObjectType::ApplyGateBlocker,
+                        req.evidence_id.as_str(),
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    Ok(())
+                },
+            )
+        });
+        self.log_operation(
+            "record_apply_gate_blocker",
+            &req.session_token,
+            started_at,
+            &result,
+            |_| vec![format!("queue:{}", req.queue_id)],
+        );
+        result
+    }
+
+    /// Records Authority settlement reconcile evidence without changing queue state.
+    pub fn record_settlement_reconcile_blocker(
+        &self,
+        req: RecordSettlementReconcileBlockerReq,
+    ) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_settlement_reconcile_blocker",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(
+                        tx,
+                        &req.session_token,
+                        &[SessionRole::ApplyGate, SessionRole::Orchestrator],
+                    )?;
+                    ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+                    ensure_length(
+                        "authority_evidence_id",
+                        &req.authority_evidence_id,
+                        MAX_OBJECT_ID_LEN,
+                    )?;
+
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
+                    let queue_id = QueueId::parse(item.queue_id())?;
+                    if !matches!(
+                        item.state(),
+                        ReadyQueueState::InFlight | ReadyQueueState::Applied
+                    ) {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id,
+                            reason: "settlement reconcile evidence must target an in-flight or applied queue item".to_owned(),
+                        });
+                    }
+                    if item.artifact_digest() != req.artifact_digest.as_str()
+                        || item.claim_fence_seq() != Some(req.claim_fence_seq.get())
+                    {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id,
+                            reason:
+                                "settlement reconcile evidence does not match queue artifact or fence"
+                                    .to_owned(),
+                        });
+                    }
+                    let review_evidence = load_approved_review_evidence_tx(tx, &item)?;
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO settlement_reconcile_blockers (
+                            queue_id, artifact_digest, review_id, findings_digest,
+                            claim_fence_seq, reconcile_reason, authority_evidence_id,
+                            recorded_by_session, created_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                        "#,
+                        params![
+                            req.queue_id.as_str(),
+                            req.artifact_digest.as_str(),
+                            review_evidence.review_id.as_str(),
+                            review_evidence.findings_digest.as_str(),
+                            req.claim_fence_seq,
+                            settlement_reconcile_reason_name(req.reconcile_reason),
+                            req.authority_evidence_id.as_str(),
+                            req.session_token.as_str(),
+                            now,
+                        ],
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::SettlementReconcileBlockerRecorded,
+                        ObjectType::SettlementReconcileBlocker,
+                        req.authority_evidence_id.as_str(),
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    Ok(())
+                },
+            )
+        });
+        self.log_operation(
+            "record_settlement_reconcile_blocker",
             &req.session_token,
             started_at,
             &result,
@@ -2198,6 +2373,53 @@ struct LiveApplyGateEvidence {
     reviewer_session_token: SessionToken,
     producer_principal_id: String,
     reviewer_principal_id: String,
+}
+
+struct ApprovedReviewEvidence {
+    review_id: ReviewId,
+    findings_digest: FindingsDigest,
+}
+
+fn load_approved_review_evidence_tx(
+    tx: &Transaction<'_>,
+    item: &ReadyQueueItem,
+) -> Result<ApprovedReviewEvidence> {
+    let queue_id = QueueId::parse(item.queue_id())?;
+    let (review_id, findings_digest) = tx
+        .query_row(
+            r#"
+            SELECT review.review_id,
+                   review.findings_digest
+            FROM reviews review
+            JOIN artifacts artifact
+              ON artifact.artifact_digest = review.artifact_digest
+             AND artifact.produced_by_subtask_id = review.subtask_id
+            WHERE review.subtask_id = ?1
+              AND review.artifact_digest = ?2
+              AND review.state = ?3
+              AND review.verdict = ?4
+              AND review.findings_digest IS NOT NULL
+              AND TRIM(review.findings_digest) != ''
+            ORDER BY review.updated_at DESC
+            LIMIT 1
+            "#,
+            params![
+                item.subtask_id(),
+                item.artifact_digest(),
+                review_state_name(ReviewState::Decided),
+                review_verdict_name(ReviewVerdict::Approve)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+            queue_id: queue_id.clone(),
+            reason: "approved review with findings digest not found for queued artifact".to_owned(),
+        })?;
+    Ok(ApprovedReviewEvidence {
+        review_id: parse_landing_value(&queue_id, review_id)?,
+        findings_digest: parse_landing_value(&queue_id, findings_digest)?,
+    })
 }
 
 fn require_live_apply_gate_evidence(

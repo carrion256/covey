@@ -42,6 +42,8 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::ReadyQueueEnqueued => "ready_queue_enqueued",
         EventType::ReadyQueueInFlight => "ready_queue_in_flight",
         EventType::ApplyVerificationRecorded => "apply_verification_recorded",
+        EventType::ApplyGateBlockerRecorded => "apply_gate_blocker_recorded",
+        EventType::SettlementReconcileBlockerRecorded => "settlement_reconcile_blocker_recorded",
         EventType::ReadyQueueApplied => "ready_queue_applied",
         EventType::OpenSpecArchiveStatusRecorded => "open_spec_archive_status_recorded",
         EventType::ReadyQueueSuperseded => "ready_queue_superseded",
@@ -53,6 +55,8 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::ClaimsExpired => "claims_expired",
         EventType::ReservationsExpired => "reservations_expired",
         EventType::OpenSpecImported => "open_spec_imported",
+        EventType::OperatorBlockerRecorded => "operator_blocker_recorded",
+        EventType::OperatorBlockerResolved => "operator_blocker_resolved",
     }
 }
 

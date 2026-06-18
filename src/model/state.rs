@@ -16,6 +16,9 @@ pub enum ObjectType {
     RuntimeAttestation,
     Reservation,
     Conflict,
+    OperatorBlocker,
+    ApplyGateBlocker,
+    SettlementReconcileBlocker,
 }
 
 pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
@@ -30,6 +33,9 @@ pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
         ObjectType::RuntimeAttestation => "runtime_attestation",
         ObjectType::Reservation => "reservation",
         ObjectType::Conflict => "conflict",
+        ObjectType::OperatorBlocker => "operator_blocker",
+        ObjectType::ApplyGateBlocker => "apply_gate_blocker",
+        ObjectType::SettlementReconcileBlocker => "settlement_reconcile_blocker",
     }
 }
 
@@ -175,6 +181,8 @@ pub enum EventType {
     ReadyQueueEnqueued,
     ReadyQueueInFlight,
     ApplyVerificationRecorded,
+    ApplyGateBlockerRecorded,
+    SettlementReconcileBlockerRecorded,
     ReadyQueueApplied,
     OpenSpecArchiveStatusRecorded,
     ReadyQueueSuperseded,
@@ -186,6 +194,70 @@ pub enum EventType {
     ClaimsExpired,
     ReservationsExpired,
     OpenSpecImported,
+    OperatorBlockerRecorded,
+    OperatorBlockerResolved,
+}
+
+/// Current-work target kind for explicit operator blockers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OperatorBlockerTargetKind {
+    Subtask,
+    ReadyQueue,
+}
+
+/// Native apply-gate blocker evidence class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ApplyGateBlockerKind {
+    AuthorityHold,
+    GitApplyUncertainty,
+}
+
+pub(crate) const fn apply_gate_blocker_kind_name(kind: ApplyGateBlockerKind) -> &'static str {
+    match kind {
+        ApplyGateBlockerKind::AuthorityHold => "authority_hold",
+        ApplyGateBlockerKind::GitApplyUncertainty => "git_apply_uncertainty",
+    }
+}
+
+/// Authority settlement reconcile reason recorded against one queue item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum SettlementReconcileReason {
+    CommitUnknown,
+    AuthorityLost,
+    StaleFence,
+    PartialPrepare,
+    PartialFinalize,
+    FailedCanonicalApply,
+    DuplicateCompletion,
+}
+
+pub(crate) const fn settlement_reconcile_reason_name(
+    reason: SettlementReconcileReason,
+) -> &'static str {
+    match reason {
+        SettlementReconcileReason::CommitUnknown => "commit_unknown",
+        SettlementReconcileReason::AuthorityLost => "authority_lost",
+        SettlementReconcileReason::StaleFence => "stale_fence",
+        SettlementReconcileReason::PartialPrepare => "partial_prepare",
+        SettlementReconcileReason::PartialFinalize => "partial_finalize",
+        SettlementReconcileReason::FailedCanonicalApply => "failed_canonical_apply",
+        SettlementReconcileReason::DuplicateCompletion => "duplicate_completion",
+    }
+}
+
+/// Durable operator blocker lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OperatorBlockerState {
+    Open,
+    Resolved,
 }
 
 /// Actor classes that can append to the event log.

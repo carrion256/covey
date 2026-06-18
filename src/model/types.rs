@@ -642,6 +642,32 @@ string_newtype!(QueueId, "queue_id", validate_tokenish);
 string_newtype!(ReviewId, "review_id", validate_tokenish);
 string_newtype!(ReservationId, "reservation_id", validate_tokenish);
 string_newtype!(ConflictId, "conflict_id", validate_tokenish);
+string_newtype!(OperatorBlockerId, "operator_blocker_id", validate_tokenish);
+string_newtype!(
+    OperatorBlockerEvidenceId,
+    "operator_blocker_evidence_id",
+    validate_tokenish
+);
+string_newtype!(
+    OperatorBlockerReason,
+    "operator_blocker_reason",
+    validate_normalized_text
+);
+string_newtype!(
+    ApplyGateBlockerReason,
+    "apply_gate_blocker_reason",
+    validate_normalized_text
+);
+string_newtype!(
+    ApplyGateBlockerEvidenceId,
+    "apply_gate_blocker_evidence_id",
+    validate_tokenish
+);
+string_newtype!(
+    SettlementReconcileEvidenceId,
+    "settlement_reconcile_evidence_id",
+    validate_tokenish
+);
 string_newtype!(EventObjectId, "event_object_id", validate_tokenish);
 string_newtype!(ArtifactDigest, "artifact_digest", validate_digest);
 string_newtype!(

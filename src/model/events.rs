@@ -63,11 +63,23 @@ impl EventPayload {
             EventType::ApplyVerificationRecorded => {
                 Self::ApplyVerificationRecorded(serde_json::from_str(payload_json)?)
             }
+            EventType::ApplyGateBlockerRecorded => {
+                Self::ApplyGateBlockerRecorded(serde_json::from_str(payload_json)?)
+            }
+            EventType::SettlementReconcileBlockerRecorded => {
+                Self::SettlementReconcileBlockerRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::ReadyQueueApplied => {
                 Self::ReadyQueueApplied(serde_json::from_str(payload_json)?)
             }
             EventType::OpenSpecArchiveStatusRecorded => {
                 Self::OpenSpecArchiveStatusRecorded(serde_json::from_str(payload_json)?)
+            }
+            EventType::OperatorBlockerRecorded => {
+                Self::OperatorBlockerRecorded(serde_json::from_str(payload_json)?)
+            }
+            EventType::OperatorBlockerResolved => {
+                Self::OperatorBlockerResolved(serde_json::from_str(payload_json)?)
             }
             EventType::ReadyQueueSuperseded => {
                 Self::ReadyQueueSuperseded(serde_json::from_str(payload_json)?)

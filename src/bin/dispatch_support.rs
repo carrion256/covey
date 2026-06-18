@@ -12,12 +12,13 @@ use covey::{
     AbandonSubtaskReq, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, Covey,
     CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq, HeartbeatReq,
     ImportBdV1Req, ImportOpenSpecReq, MarkAppliedReq, MarkInFlightReq, OpenSpecArchiveStatusState,
-    OverlapQueryReq, PublishArtifactReq, ReconcileApplyQueueReq, RecordApplyVerificationReq,
-    RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq, RecordPermissiveLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RequestReservationReq, RequestReviewReq,
-    ResolveConflictReq, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskKind,
-    SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
+    OverlapQueryReq, PublishArtifactReq, ReconcileApplyQueueReq, RecordApplyGateBlockerReq,
+    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
+    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
+    RecordSettlementReconcileBlockerReq, RegisterSessionReq, ReleaseClaimReq,
+    ReleaseReservationReq, RenewClaimReq, RenewReservationReq, RequestReservationReq,
+    RequestReviewReq, ResolveConflictReq, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
+    SubtaskKind, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
 };
 use uuid::Uuid;
 

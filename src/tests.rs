@@ -5,10 +5,13 @@ use rusqlite::{Connection, params};
 use crate::{
     BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock, Covey,
     FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecCurrentWorkBlockerKind,
-    OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState, ReconcileChangesRequestedFollowupsReq,
-    RegisterSessionReq, Result, SessionRole, SubmitMetaTaskReq,
+    OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState, OperatorBlockerState,
+    OperatorBlockerTargetKind, ReconcileChangesRequestedFollowupsReq, RecordOperatorBlockerReq,
+    RegisterSessionReq, ResolveOperatorBlockerReq, Result, SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
+
+const TEST_WALL_NOW_MS: i64 = 1_700_000_000_000;
 
 impl Covey {
     /// Opens an in-memory Covey database with an injected clock for tests.
@@ -328,6 +331,17 @@ fn seed_archive_scoped_subtask(
         )
         .expect("insert applied queue item");
         conn.execute(
+            "INSERT INTO landing_receipts (queue_id, artifact_digest, claim_fence_seq, target_ref, landed_commit_oid, recorded_by_session, created_at)
+             VALUES (?1, ?2, 1, 'refs/heads/main', ?3, 'session-orch-archive', ?4)",
+            params![
+                queue_id,
+                artifact_digest,
+                "0123456789abcdef0123456789abcdef01234567",
+                created_at,
+            ],
+        )
+        .expect("insert landing receipt");
+        conn.execute(
             "INSERT INTO openspec_archive_status (queue_id, subtask_id, artifact_digest, openspec_change_id, state, blocked_reason, archive_proof_digest, recorded_by_session, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, 'blocked', 'applied_but_unarchived', NULL, 'session-orch-archive', ?5, ?5)",
             params![queue_id, subtask_id, artifact_digest, change_id, created_at],
@@ -396,6 +410,24 @@ fn seed_current_work_claimed_subtask(
     claim_id: &str,
     created_at: i64,
 ) {
+    seed_current_work_claimed_subtask_with_deadline(
+        covey,
+        change_id,
+        subtask_id,
+        claim_id,
+        TEST_WALL_NOW_MS + 60_000,
+        created_at,
+    );
+}
+
+fn seed_current_work_claimed_subtask_with_deadline(
+    covey: &Covey,
+    change_id: &str,
+    subtask_id: &str,
+    claim_id: &str,
+    lease_deadline_ms: i64,
+    created_at: i64,
+) {
     seed_current_work_scoped_subtask(covey, change_id, subtask_id, "available", None, created_at);
     let conn = covey.conn.lock().expect("covey connection mutex");
     conn.execute(
@@ -417,7 +449,7 @@ fn seed_current_work_claimed_subtask(
             claim_id,
             subtask_id,
             format!("session-{claim_id}"),
-            created_at + 60_000,
+            lease_deadline_ms,
             created_at,
         ],
     )
@@ -438,17 +470,161 @@ fn seed_current_work_queue(
     created_at: i64,
 ) {
     let conn = covey.conn.lock().expect("covey connection mutex");
-    let claim_fence_seq = if state == "applied" {
+    let claim_fence_seq = if matches!(state, "applied" | "in_flight") {
         Some(1_i64)
+    } else {
+        None
+    };
+    let claimed_by_session = if state == "in_flight" {
+        Some("session-orch-archive")
+    } else {
+        None
+    };
+    let claim_lease_deadline = if state == "in_flight" {
+        Some(TEST_WALL_NOW_MS + 60_000)
     } else {
         None
     };
     conn.execute(
         "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
-         VALUES (?1, ?2, ?3, 'canonical', ?4, NULL, ?5, NULL, ?6, ?6)",
-        params![queue_id, artifact_digest, subtask_id, state, claim_fence_seq, created_at],
+         VALUES (?1, ?2, ?3, 'canonical', ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![
+            queue_id,
+            artifact_digest,
+            subtask_id,
+            state,
+            claimed_by_session,
+            claim_fence_seq,
+            claim_lease_deadline,
+            created_at,
+        ],
     )
     .expect("insert current-work queue item");
+}
+
+fn seed_landing_receipt(covey: &Covey, queue_id: &str, artifact_digest: &str, created_at: i64) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT INTO landing_receipts (queue_id, artifact_digest, claim_fence_seq, target_ref, landed_commit_oid, recorded_by_session, created_at)
+         VALUES (?1, ?2, 1, 'refs/heads/main', ?3, 'session-orch-archive', ?4)",
+        params![
+            queue_id,
+            artifact_digest,
+            "0123456789abcdef0123456789abcdef01234567",
+            created_at,
+        ],
+    )
+    .expect("insert landing receipt");
+}
+
+fn seed_apply_gate_blocker(
+    covey: &Covey,
+    queue_id: &str,
+    artifact_digest: &str,
+    blocker_kind: &str,
+    reason: &str,
+    evidence_id: &str,
+    created_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT OR IGNORE INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+         SELECT ?1, subtask.meta_task_id, ?2, 'review', queue.subtask_id, queue.artifact_digest, 'decided', NULL, NULL, 1, ?3, ?3
+         FROM ready_queue queue
+         JOIN subtasks subtask ON subtask.subtask_id = queue.subtask_id
+         WHERE queue.queue_id = ?4",
+        params![
+            format!("review-subtask-{queue_id}"),
+            format!("review {queue_id}"),
+            created_at,
+            queue_id,
+        ],
+    )
+    .expect("insert review subtask for apply-gate blocker");
+    conn.execute(
+        "INSERT OR IGNORE INTO reviews (review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id, verdict, findings_digest, state, created_at, updated_at)
+         SELECT ?1, subtask_id, artifact_digest, 'session-orch-archive', ?2, 'approve', ?3, 'decided', ?4, ?4
+         FROM ready_queue WHERE queue_id = ?5",
+        params![
+            format!("review-{queue_id}"),
+            format!("review-subtask-{queue_id}"),
+            format!("blake3:findings-{queue_id}"),
+            created_at,
+            queue_id,
+        ],
+    )
+    .expect("insert review for apply-gate blocker");
+    conn.execute(
+        "INSERT INTO apply_gate_blockers (
+            queue_id, artifact_digest, review_id, findings_digest, claim_fence_seq,
+            verifier, blocker_kind, reason, evidence_id, recorded_by_session, created_at
+         ) VALUES (?1, ?2, ?3, ?4, 1, 'mutai-rs:settlement-apply-gate', ?5, ?6, ?7, 'session-orch-archive', ?8)",
+        params![
+            queue_id,
+            artifact_digest,
+            format!("review-{queue_id}"),
+            format!("blake3:findings-{queue_id}"),
+            blocker_kind,
+            reason,
+            evidence_id,
+            created_at,
+        ],
+    )
+    .expect("insert apply-gate blocker");
+}
+
+fn seed_settlement_reconcile_blocker(
+    covey: &Covey,
+    queue_id: &str,
+    artifact_digest: &str,
+    reconcile_reason: &str,
+    authority_evidence_id: &str,
+    created_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT OR IGNORE INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+         SELECT ?1, subtask.meta_task_id, ?2, 'review', queue.subtask_id, queue.artifact_digest, 'decided', NULL, NULL, 1, ?3, ?3
+         FROM ready_queue queue
+         JOIN subtasks subtask ON subtask.subtask_id = queue.subtask_id
+         WHERE queue.queue_id = ?4",
+        params![
+            format!("review-subtask-reconcile-{queue_id}"),
+            format!("review reconcile {queue_id}"),
+            created_at,
+            queue_id,
+        ],
+    )
+    .expect("insert review subtask for settlement reconcile blocker");
+    conn.execute(
+        "INSERT OR IGNORE INTO reviews (review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id, verdict, findings_digest, state, created_at, updated_at)
+         SELECT ?1, subtask_id, artifact_digest, 'session-orch-archive', ?2, 'approve', ?3, 'decided', ?4, ?4
+         FROM ready_queue WHERE queue_id = ?5",
+        params![
+            format!("review-reconcile-{queue_id}"),
+            format!("review-subtask-reconcile-{queue_id}"),
+            format!("blake3:findings-reconcile-{queue_id}"),
+            created_at,
+            queue_id,
+        ],
+    )
+    .expect("insert review for settlement reconcile blocker");
+    conn.execute(
+        "INSERT INTO settlement_reconcile_blockers (
+            queue_id, artifact_digest, review_id, findings_digest, claim_fence_seq,
+            reconcile_reason, authority_evidence_id, recorded_by_session, created_at
+         ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 'session-orch-archive', ?7)",
+        params![
+            queue_id,
+            artifact_digest,
+            format!("review-reconcile-{queue_id}"),
+            format!("blake3:findings-reconcile-{queue_id}"),
+            reconcile_reason,
+            authority_evidence_id,
+            created_at,
+        ],
+    )
+    .expect("insert settlement reconcile blocker");
 }
 
 #[test]
@@ -518,6 +694,12 @@ fn openspec_current_work_reports_each_covey_derived_state() {
         "queue-current-archived",
         "blake3:current-archived",
         "applied",
+        6,
+    );
+    seed_landing_receipt(
+        &covey,
+        "queue-current-archived",
+        "blake3:current-archived",
         6,
     );
     {
@@ -605,6 +787,449 @@ fn openspec_current_work_reports_missing_import_as_blocked() {
         current.blockers[0].evidence_id,
         "openspec_current_work:missing_import:missing-current-work"
     );
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec!["mutai-scheduler orchestrator run-openspec"]
+    );
+}
+
+#[test]
+fn openspec_current_work_reports_expired_claim_as_named_blocker() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-expired-claim");
+    seed_current_work_claimed_subtask_with_deadline(
+        &covey,
+        "current-expired-claim",
+        "current-expired-claim-work",
+        "claim-current-expired",
+        TEST_WALL_NOW_MS,
+        2,
+    );
+
+    let current = covey
+        .openspec_current_work("current-expired-claim")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Covey);
+    assert_eq!(
+        current
+            .claim_ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claim-current-expired"]
+    );
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::ExpiredClaim
+    );
+    assert_eq!(
+        current.blockers[0].blocker_id,
+        "blocker_openspec_current_work_expired_claim_claim-current-expired"
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:expired_claim:current-expired-claim-work:claim-current-expired"
+    );
+    assert_eq!(
+        current.blockers[0].claim_id.as_ref().map(|id| id.as_str()),
+        Some("claim-current-expired")
+    );
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator recover expired-claim",
+            "mutai-scheduler orchestrator recover redispatch"
+        ]
+    );
+}
+
+#[test]
+fn openspec_current_work_reports_stale_claim_when_threshold_is_explicit() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-stale-claim");
+    seed_current_work_claimed_subtask(
+        &covey,
+        "current-stale-claim",
+        "current-stale-claim-work",
+        "claim-current-stale",
+        2,
+    );
+
+    let default_current = covey
+        .openspec_current_work("current-stale-claim")
+        .expect("default current work");
+    assert_eq!(default_current.state, OpenSpecCurrentWorkState::Claimed);
+    assert!(default_current.blockers.is_empty());
+
+    let current = covey
+        .openspec_current_work_with_stale_claim_threshold("current-stale-claim", Some(60_000))
+        .expect("current work with stale threshold");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Covey);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::StaleClaim
+    );
+    assert_eq!(
+        current.blockers[0].blocker_id,
+        "blocker_openspec_current_work_stale_claim_claim-current-stale"
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:stale_claim:current-stale-claim-work:claim-current-stale:60000"
+    );
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator recover dead-claim",
+            "mutai-scheduler orchestrator recover operator-blocked"
+        ]
+    );
+}
+
+#[test]
+fn openspec_current_work_reports_operator_blocker() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-operator-blocked");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-operator-blocked",
+        "current-operator-blocked-work",
+        "available",
+        None,
+        2,
+    );
+
+    let blocker = covey
+        .record_operator_blocker(
+            RecordOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-current",
+                "current-operator-blocked",
+                OperatorBlockerTargetKind::Subtask,
+                "current-operator-blocked-work",
+                None,
+                None,
+                "hook_state_stale_claim",
+                Some("evidence_mutai_scheduler_run:hook_stale_claim:work:claim".to_owned()),
+                "record-current-operator-blocker",
+            )
+            .expect("operator blocker request"),
+        )
+        .expect("record operator blocker");
+
+    assert_eq!(blocker.reason.as_str(), "hook_state_stale_claim");
+
+    let current = covey
+        .openspec_current_work("current-operator-blocked")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Operator);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::HookStateStaleClaim
+    );
+    assert_eq!(
+        current.blockers[0].blocker_id,
+        "blocker_openspec_current_work_operator_blocked_operator-blocker-current"
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "evidence_mutai_scheduler_run:hook_stale_claim:work:claim"
+    );
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator current-work",
+            "mutai-scheduler orchestrator recover operator-blocked",
+            "mutai-scheduler orchestrator recover resolve-operator-blocker"
+        ]
+    );
+}
+
+#[test]
+fn resolving_operator_blocker_removes_it_from_current_work_but_keeps_audit_row() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-operator-resolved");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-operator-resolved",
+        "current-operator-resolved-work",
+        "available",
+        None,
+        2,
+    );
+
+    covey
+        .record_operator_blocker(
+            RecordOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-resolved",
+                "current-operator-resolved",
+                OperatorBlockerTargetKind::Subtask,
+                "current-operator-resolved-work",
+                None,
+                None,
+                "scheduler_state_loss",
+                Some("evidence_mutai_scheduler_run:scheduler_state_loss:work".to_owned()),
+                "record-current-operator-resolved",
+            )
+            .expect("operator blocker request"),
+        )
+        .expect("record operator blocker");
+
+    let blocked = covey
+        .openspec_current_work("current-operator-resolved")
+        .expect("current work before resolve");
+    assert_eq!(blocked.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(blocked.blockers.len(), 1);
+
+    let resolved = covey
+        .resolve_operator_blocker(
+            ResolveOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-resolved",
+                "repaired",
+                "resolve-current-operator-resolved",
+            )
+            .expect("resolve operator blocker request"),
+        )
+        .expect("resolve operator blocker");
+    assert_eq!(resolved.state, OperatorBlockerState::Resolved);
+    assert_eq!(
+        resolved
+            .resolved_reason
+            .as_ref()
+            .expect("resolved reason")
+            .as_str(),
+        "repaired"
+    );
+
+    let loaded = covey
+        .operator_blocker("operator-blocker-resolved")
+        .expect("load resolved operator blocker");
+    assert_eq!(loaded.state, OperatorBlockerState::Resolved);
+
+    let current = covey
+        .openspec_current_work("current-operator-resolved")
+        .expect("current work after resolve");
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Imported);
+    assert!(current.blockers.is_empty());
+}
+
+#[test]
+fn resolve_operator_blocker_rejects_different_resolution_after_resolved() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-operator-resolve-collision");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-operator-resolve-collision",
+        "current-operator-resolve-collision-work",
+        "available",
+        None,
+        2,
+    );
+
+    covey
+        .record_operator_blocker(
+            RecordOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-resolve-collision",
+                "current-operator-resolve-collision",
+                OperatorBlockerTargetKind::Subtask,
+                "current-operator-resolve-collision-work",
+                None,
+                None,
+                "scheduler_state_loss",
+                None,
+                "record-current-operator-resolve-collision",
+            )
+            .expect("operator blocker request"),
+        )
+        .expect("record operator blocker");
+
+    covey
+        .resolve_operator_blocker(
+            ResolveOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-resolve-collision",
+                "repaired",
+                "resolve-current-operator-collision-1",
+            )
+            .expect("first resolve request"),
+        )
+        .expect("resolve operator blocker");
+
+    let err = covey
+        .resolve_operator_blocker(
+            ResolveOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-resolve-collision",
+                "different_repair",
+                "resolve-current-operator-collision-2",
+            )
+            .expect("second resolve request"),
+        )
+        .expect_err("different resolve evidence is rejected");
+    assert!(
+        err.to_string()
+            .contains("operator blocker is already resolved with different evidence")
+    );
+}
+
+#[test]
+fn openspec_current_work_classifies_escalated_operator_blocker_reasons() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-typed-operator-blockers");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-typed-operator-blockers",
+        "current-typed-scheduler-loss-work",
+        "available",
+        None,
+        2,
+    );
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-typed-operator-blockers",
+        "current-typed-authority-hold-work",
+        "available",
+        None,
+        3,
+    );
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-typed-operator-blockers",
+        "current-typed-git-apply-work",
+        "available",
+        None,
+        4,
+    );
+
+    for (blocker_id, subtask_id, reason) in [
+        (
+            "operator-blocker-scheduler-state-loss",
+            "current-typed-scheduler-loss-work",
+            "scheduler_state_loss",
+        ),
+        (
+            "operator-blocker-authority-hold",
+            "current-typed-authority-hold-work",
+            "authority_hold",
+        ),
+        (
+            "operator-blocker-git-apply",
+            "current-typed-git-apply-work",
+            "git_apply_uncertainty",
+        ),
+    ] {
+        covey
+            .record_operator_blocker(
+                RecordOperatorBlockerReq::try_from_raw_parts(
+                    "session-orch-archive",
+                    blocker_id,
+                    "current-typed-operator-blockers",
+                    OperatorBlockerTargetKind::Subtask,
+                    subtask_id,
+                    None,
+                    None,
+                    reason,
+                    Some(format!(
+                        "evidence_mutai_scheduler_run:{reason}:{subtask_id}"
+                    )),
+                    format!("record-{blocker_id}"),
+                )
+                .expect("typed operator blocker request"),
+            )
+            .expect("record typed operator blocker");
+    }
+
+    let current = covey
+        .openspec_current_work("current-typed-operator-blockers")
+        .expect("current work");
+    let kinds = current
+        .blockers
+        .iter()
+        .map(|blocker| blocker.kind)
+        .collect::<Vec<_>>();
+
+    assert!(kinds.contains(&OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss));
+    assert!(kinds.contains(&OpenSpecCurrentWorkBlockerKind::AuthorityHold));
+    assert!(kinds.contains(&OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty));
+    assert!(current.blockers.iter().all(|blocker| {
+        blocker
+            .allowed_repairs
+            .contains(&"mutai-scheduler orchestrator current-work".to_owned())
+    }));
+}
+
+#[test]
+fn record_operator_blocker_rejects_id_reuse_with_different_shape() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-operator-collision");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-operator-collision",
+        "current-operator-collision-work",
+        "available",
+        None,
+        2,
+    );
+
+    covey
+        .record_operator_blocker(
+            RecordOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-collision",
+                "current-operator-collision",
+                OperatorBlockerTargetKind::Subtask,
+                "current-operator-collision-work",
+                None,
+                None,
+                "first_reason",
+                None,
+                "record-current-operator-collision-1",
+            )
+            .expect("first operator blocker request"),
+        )
+        .expect("record first operator blocker");
+
+    let err = covey
+        .record_operator_blocker(
+            RecordOperatorBlockerReq::try_from_raw_parts(
+                "session-orch-archive",
+                "operator-blocker-collision",
+                "current-operator-collision",
+                OperatorBlockerTargetKind::Subtask,
+                "current-operator-collision-work",
+                None,
+                None,
+                "second_reason",
+                None,
+                "record-current-operator-collision-2",
+            )
+            .expect("second operator blocker request"),
+        )
+        .expect_err("blocker id collision must reject different shape");
+
+    assert!(
+        err.to_string()
+            .contains("operator blocker id already exists")
+    );
 }
 
 #[test]
@@ -667,6 +1292,12 @@ fn openspec_current_work_does_not_archive_when_any_scoped_subtask_is_non_termina
         "queue-current-terminal",
         "blake3:current-terminal",
         "applied",
+        2,
+    );
+    seed_landing_receipt(
+        &covey,
+        "queue-current-terminal",
+        "blake3:current-terminal",
         2,
     );
     {
@@ -735,6 +1366,375 @@ fn openspec_current_work_applied_but_unarchived_is_named_blocker() {
         current.blockers[0].queue_id.as_ref().map(|id| id.as_str()),
         Some("queue-current-unarchived")
     );
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator archive-openspec",
+            "mutai-scheduler orchestrator recover open-spec-archive-status"
+        ]
+    );
+}
+
+#[test]
+fn openspec_current_work_synthesizes_unarchived_blocker_from_applied_queue() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-unarchived-no-status");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-unarchived-no-status",
+        "current-unarchived-no-status-work",
+        "applied",
+        Some("blake3:current-unarchived-no-status"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-unarchived-no-status-work",
+        "queue-current-unarchived-no-status",
+        "blake3:current-unarchived-no-status",
+        "applied",
+        2,
+    );
+    seed_landing_receipt(
+        &covey,
+        "queue-current-unarchived-no-status",
+        "blake3:current-unarchived-no-status",
+        2,
+    );
+
+    let current = covey
+        .openspec_current_work("current-unarchived-no-status")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(
+        current.next_owner,
+        OpenSpecCurrentWorkOwner::OpenSpecArchive
+    );
+    assert!(current.archive_blockers.is_empty());
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:applied_but_unarchived:queue-current-unarchived-no-status:blake3:current-unarchived-no-status"
+    );
+    assert_eq!(
+        current.blockers[0].queue_id.as_ref().map(|id| id.as_str()),
+        Some("queue-current-unarchived-no-status")
+    );
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator archive-openspec",
+            "mutai-scheduler orchestrator recover open-spec-archive-status"
+        ]
+    );
+}
+
+#[test]
+fn openspec_current_work_blocks_applied_queue_without_landing_receipt() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-missing-landing-receipt");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-missing-landing-receipt",
+        "current-missing-landing-receipt-work",
+        "applied",
+        Some("blake3:current-missing-landing-receipt"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-missing-landing-receipt-work",
+        "queue-current-missing-landing-receipt",
+        "blake3:current-missing-landing-receipt",
+        "applied",
+        2,
+    );
+
+    let current = covey
+        .openspec_current_work("current-missing-landing-receipt")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::ApplyGate);
+    assert!(current.archive_blockers.is_empty());
+    assert_eq!(current.blockers.len(), 2);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty
+    );
+    assert_eq!(
+        current.blockers[0].blocker_id,
+        "blocker_openspec_current_work_landing_receipt_missing_queue-current-missing-landing-receipt"
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "openspec_current_work:landing_receipt_missing:queue-current-missing-landing-receipt:blake3:current-missing-landing-receipt"
+    );
+    assert_eq!(current.blockers[0].reason, "landing_receipt_missing");
+    assert_eq!(
+        current.blockers[0].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator current-work",
+            "mutai-scheduler orchestrator recover operator-blocked"
+        ]
+    );
+    assert_eq!(
+        current.blockers[1].kind,
+        OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived
+    );
+}
+
+#[test]
+fn openspec_current_work_reports_native_apply_gate_authority_hold() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-authority-hold");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-authority-hold",
+        "current-authority-hold-work",
+        "approved",
+        Some("blake3:current-authority-hold"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-authority-hold-work",
+        "queue-current-authority-hold",
+        "blake3:current-authority-hold",
+        "in_flight",
+        2,
+    );
+    seed_apply_gate_blocker(
+        &covey,
+        "queue-current-authority-hold",
+        "blake3:current-authority-hold",
+        "authority_hold",
+        "authority_lost",
+        "evidence_authority_lost_queue_current_authority_hold",
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-authority-hold")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Authority);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::AuthorityHold
+    );
+    assert_eq!(
+        current.blockers[0].owner,
+        OpenSpecCurrentWorkOwner::Authority
+    );
+    assert_eq!(
+        current.blockers[0].queue_id.as_ref().map(|id| id.as_str()),
+        Some("queue-current-authority-hold")
+    );
+    assert_eq!(
+        current.blockers[0]
+            .subtask_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("current-authority-hold-work")
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "evidence_authority_lost_queue_current_authority_hold"
+    );
+    assert_eq!(current.blockers[0].reason, "authority_lost");
+}
+
+#[test]
+fn openspec_current_work_reports_native_apply_gate_commit_unknown() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-commit-unknown");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-commit-unknown",
+        "current-commit-unknown-work",
+        "approved",
+        Some("blake3:current-commit-unknown"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-commit-unknown-work",
+        "queue-current-commit-unknown",
+        "blake3:current-commit-unknown",
+        "in_flight",
+        2,
+    );
+    seed_apply_gate_blocker(
+        &covey,
+        "queue-current-commit-unknown",
+        "blake3:current-commit-unknown",
+        "git_apply_uncertainty",
+        "commit_unknown",
+        "evidence_commit_unknown_queue_current_commit_unknown",
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-commit-unknown")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::ApplyGate);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty
+    );
+    assert_eq!(
+        current.blockers[0].owner,
+        OpenSpecCurrentWorkOwner::ApplyGate
+    );
+    assert_eq!(
+        current.blockers[0].queue_id.as_ref().map(|id| id.as_str()),
+        Some("queue-current-commit-unknown")
+    );
+    assert_eq!(
+        current.blockers[0]
+            .subtask_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("current-commit-unknown-work")
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "evidence_commit_unknown_queue_current_commit_unknown"
+    );
+    assert_eq!(current.blockers[0].reason, "commit_unknown");
+}
+
+#[test]
+fn openspec_current_work_reports_native_settlement_reconcile_authority_lost() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-reconcile-authority-lost");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-reconcile-authority-lost",
+        "current-reconcile-authority-lost-work",
+        "approved",
+        Some("blake3:current-reconcile-authority-lost"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-reconcile-authority-lost-work",
+        "queue-current-reconcile-authority-lost",
+        "blake3:current-reconcile-authority-lost",
+        "in_flight",
+        2,
+    );
+    seed_settlement_reconcile_blocker(
+        &covey,
+        "queue-current-reconcile-authority-lost",
+        "blake3:current-reconcile-authority-lost",
+        "authority_lost",
+        "evidence_reconcile_authority_lost_queue_current",
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-reconcile-authority-lost")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Authority);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::AuthorityHold
+    );
+    assert_eq!(
+        current.blockers[0].owner,
+        OpenSpecCurrentWorkOwner::Authority
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "evidence_reconcile_authority_lost_queue_current"
+    );
+    assert_eq!(
+        current.blockers[0]
+            .subtask_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("current-reconcile-authority-lost-work")
+    );
+    assert_eq!(current.blockers[0].reason, "authority_lost");
+}
+
+#[test]
+fn openspec_current_work_reports_native_settlement_reconcile_failed_apply() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-reconcile-failed-apply");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-reconcile-failed-apply",
+        "current-reconcile-failed-apply-work",
+        "approved",
+        Some("blake3:current-reconcile-failed-apply"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-reconcile-failed-apply-work",
+        "queue-current-reconcile-failed-apply",
+        "blake3:current-reconcile-failed-apply",
+        "in_flight",
+        2,
+    );
+    seed_settlement_reconcile_blocker(
+        &covey,
+        "queue-current-reconcile-failed-apply",
+        "blake3:current-reconcile-failed-apply",
+        "failed_canonical_apply",
+        "evidence_reconcile_failed_apply_queue_current",
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-reconcile-failed-apply")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::ApplyGate);
+    assert_eq!(current.blockers.len(), 1);
+    assert_eq!(
+        current.blockers[0].kind,
+        OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty
+    );
+    assert_eq!(
+        current.blockers[0].owner,
+        OpenSpecCurrentWorkOwner::ApplyGate
+    );
+    assert_eq!(
+        current.blockers[0].evidence_id,
+        "evidence_reconcile_failed_apply_queue_current"
+    );
+    assert_eq!(
+        current.blockers[0]
+            .subtask_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("current-reconcile-failed-apply-work")
+    );
+    assert_eq!(current.blockers[0].reason, "failed_canonical_apply");
 }
 
 #[test]
@@ -785,6 +1785,13 @@ fn openspec_current_work_applied_but_unarchived_precedes_subtask_blockers() {
     assert_eq!(
         current.blockers[1].evidence_id,
         "openspec_current_work:subtask_blocked:current-precedence-blocked:changes_requested"
+    );
+    assert_eq!(
+        current.blockers[1].allowed_repairs,
+        vec![
+            "mutai-scheduler orchestrator recover subtask",
+            "mutai-scheduler orchestrator recover redispatch"
+        ]
     );
 }
 

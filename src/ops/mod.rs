@@ -2,6 +2,7 @@ mod current_work;
 mod import;
 mod maintenance;
 mod meta_task;
+mod operator_blocker;
 mod queue;
 mod repoops;
 mod reservation;
