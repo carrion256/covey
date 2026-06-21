@@ -1461,7 +1461,7 @@ impl Covey {
         let started_at = Instant::now();
         let session_token_for_log = req.session_token.clone();
         let result = self.with_read_tx(|tx| {
-            require_role(
+            let session = require_role(
                 tx,
                 &req.session_token,
                 &[SessionRole::ApplyGate, SessionRole::Orchestrator],
@@ -1476,10 +1476,14 @@ impl Covey {
 
             let item = load_queue_item_tx(tx, &req.queue_id)?;
             let queue_id = QueueId::parse(item.queue_id())?;
-            if item.state() != ReadyQueueState::Applied {
+            if !matches!(
+                item.state(),
+                ReadyQueueState::InFlight | ReadyQueueState::Applied
+            ) {
                 return Err(CoveyError::ApplyGateEvidenceMissing {
                     queue_id,
-                    reason: "landing authorization queue item is not applied".to_owned(),
+                    reason: "landing authorization queue item is not in flight or applied"
+                        .to_owned(),
                 });
             }
             if item.artifact_digest() != req.artifact_digest {
@@ -1495,6 +1499,30 @@ impl Covey {
                     reason: "landing authorization claim fence does not match queue item"
                         .to_owned(),
                 });
+            }
+            if item.state() == ReadyQueueState::InFlight {
+                let queue_owner = item
+                    .claimed_by_session_token()
+                    .map(crate::model::SessionToken::parse)
+                    .transpose()?
+                    .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+                        queue_id: queue_id.clone(),
+                        reason: "landing authorization in-flight queue item has no owner"
+                            .to_owned(),
+                    })?;
+                if queue_owner != session.session_token {
+                    return Err(CoveyError::NotQueueClaimOwner {
+                        session_token: session.session_token,
+                        queue_owner,
+                    });
+                }
+                let live_evidence = require_live_apply_gate_evidence(tx, &item, &session)?;
+                require_recorded_apply_verification(
+                    tx,
+                    &item,
+                    &live_evidence,
+                    req.claim_fence_seq,
+                )?;
             }
 
             let recorded_by_session: SessionToken = tx
@@ -1559,22 +1587,26 @@ impl Covey {
         result
     }
 
-    /// Records the final commit oid as a settlement receipt after landing.
+    /// Records the final commit oid as a settlement receipt for the fenced landing attempt.
     pub fn record_landing_receipt(&self, req: RecordLandingReceiptReq) -> Result<()> {
         let started_at = Instant::now();
         let session_token_for_log = req.session_token.clone();
         let result = self.with_write_tx(|tx, now| {
-            require_role(
+            let session = require_role(
                 tx,
                 &req.session_token,
                 &[SessionRole::ApplyGate, SessionRole::Orchestrator],
             )?;
             let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
             let queue_id = QueueId::parse(item.queue_id())?;
-            if item.state() != ReadyQueueState::Applied {
+            if !matches!(
+                item.state(),
+                ReadyQueueState::InFlight | ReadyQueueState::Applied
+            ) {
                 return Err(CoveyError::ApplyGateEvidenceMissing {
                     queue_id,
-                    reason: "landing receipt requires an applied queue item".to_owned(),
+                    reason: "landing receipt requires an in-flight or applied queue item"
+                        .to_owned(),
                 });
             }
             if item.artifact_digest() != req.artifact_digest {
@@ -1588,6 +1620,29 @@ impl Covey {
                     queue_id,
                     reason: "landing receipt claim fence does not match queue item".to_owned(),
                 });
+            }
+            if item.state() == ReadyQueueState::InFlight {
+                let queue_owner = item
+                    .claimed_by_session_token()
+                    .map(crate::model::SessionToken::parse)
+                    .transpose()?
+                    .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+                        queue_id: queue_id.clone(),
+                        reason: "landing receipt in-flight queue item has no owner".to_owned(),
+                    })?;
+                if queue_owner != session.session_token {
+                    return Err(CoveyError::NotQueueClaimOwner {
+                        session_token: session.session_token,
+                        queue_owner,
+                    });
+                }
+                let live_evidence = require_live_apply_gate_evidence(tx, &item, &session)?;
+                require_recorded_apply_verification(
+                    tx,
+                    &item,
+                    &live_evidence,
+                    req.claim_fence_seq,
+                )?;
             }
             let existing_receipt = tx
                 .query_row(

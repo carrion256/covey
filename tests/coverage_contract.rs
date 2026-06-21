@@ -1201,6 +1201,90 @@ fn landing_authorization_verification_rechecks_live_apply_evidence(rig: Rig) {
 }
 
 #[rstest]
+fn landing_receipt_records_landed_commit_before_apply_complete(rig: Rig) {
+    let subtask_id = "queue_landing_receipt_in_flight";
+    let digest = "blake3:queue_landing_receipt_in_flight";
+    let (_orch, queue_id) = enqueue_ready_item(&rig, subtask_id, digest);
+    let gate = register(
+        &rig.covey,
+        "gate-landing-receipt-in-flight",
+        SessionRole::ApplyGate,
+    );
+    let claim = rig
+        .covey
+        .mark_in_flight(mark_in_flight_req(
+            gate.clone(),
+            queue_id.clone(),
+            30_000,
+            id_key("mark-in-flight"),
+        ))
+        .expect("claim queue item");
+    record_apply_verification(
+        &rig.covey,
+        &gate,
+        &queue_id,
+        subtask_id,
+        digest,
+        &format!("{digest}-findings"),
+        claim.claim_fence_seq,
+    );
+
+    let status = rig
+        .covey
+        .verify_landing_authorization(
+            VerifyLandingAuthorizationReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id.clone(),
+                digest,
+                format!("review_{subtask_id}"),
+                format!("{digest}-findings"),
+                claim.claim_fence_seq,
+                "mutai-rs",
+                format!("{digest}-verdict"),
+                format!("{digest}-seal"),
+            )
+            .expect("valid landing authorization request"),
+        )
+        .expect("in-flight landing authorization should verify after apply evidence");
+    assert!(status.accepted_flag());
+
+    rig.covey
+        .record_landing_receipt(
+            RecordLandingReceiptReq::try_from_raw_parts(
+                gate.clone(),
+                queue_id.clone(),
+                digest,
+                claim.claim_fence_seq,
+                "origin/main",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("valid landing receipt request"),
+        )
+        .expect("record in-flight landing receipt");
+
+    rig.covey
+        .mark_applied(mark_applied_req(
+            gate,
+            queue_id.clone(),
+            claim.claim_fence_seq,
+            id_key("mark-applied"),
+        ))
+        .expect("mark applied");
+
+    let conn = Connection::open(&rig.db_path).expect("open db");
+    let receipt: (String, String, String) = conn
+        .query_row(
+            "SELECT artifact_digest, target_ref, landed_commit_oid FROM landing_receipts WHERE queue_id = ?1",
+            params![queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("landing receipt row");
+    assert_eq!(receipt.0, digest);
+    assert_eq!(receipt.1, "origin/main");
+    assert_eq!(receipt.2, "0123456789abcdef0123456789abcdef01234567");
+}
+
+#[rstest]
 fn landing_receipt_records_landed_commit_after_apply(rig: Rig) {
     let subtask_id = "queue_landing_receipt";
     let digest = "blake3:queue_landing_receipt";
