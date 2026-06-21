@@ -86,8 +86,6 @@ impl Covey {
                         if existing.artifact_kind != req.artifact_kind
                             || existing.base_rev != req.base_rev
                             || existing.produced_by_subtask_id != subtask.subtask_id
-                            || existing.produced_by_session != req.session_token
-                            || existing.manifest_path != req.manifest_path
                             || existing.changed_paths_digest != req.changed_paths_digest
                         {
                             return Err(CoveyError::ArtifactDigestCollision {

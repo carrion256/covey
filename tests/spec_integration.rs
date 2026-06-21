@@ -911,6 +911,22 @@ fn failed_mutations_do_not_append_event_rows_and_artifact_digests_are_unique() {
             .expect("valid idempotent artifact publication retry"),
         )
         .expect("same artifact publication retry is idempotent");
+    covey
+        .publish_artifact(
+            PublishArtifactReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                "blake3:artifact_a".into(),
+                ArtifactKind::PatchBundle,
+                "deadbeef".into(),
+                "artifacts/a-retry.json".into(),
+                "blake3:paths_a".into(),
+                id_key("publish-artifact-retry-new-manifest"),
+            )
+            .expect("valid idempotent artifact publication retry with new manifest"),
+        )
+        .expect("same artifact retry with a new manifest path is idempotent");
 
     let before_events = covey.fetch_events(0, 100).expect("events").len();
     let collision = covey.publish_artifact(
