@@ -11,7 +11,7 @@ use crate::{
         SessionRole, SessionState, SubtaskState, TimestampMs, claim_state_name, session_state_name,
         subtask_state_name,
     },
-    queries::{load_session_tx, load_subtask_tx},
+    queries::{load_runtime_attestation_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
     store::{append_session_event, reset_in_progress_review_for_expired_claim},
     validators::{
@@ -187,6 +187,20 @@ impl Covey {
         self.log_operation(
             "record_runtime_attestation",
             &req.session_token,
+            started_at,
+            &result,
+            |attestation| vec![format!("session:{}", attestation.session_token)],
+        );
+        result
+    }
+
+    /// Loads runtime identity evidence for a session.
+    pub fn runtime_attestation(&self, session_token: &str) -> Result<RuntimeAttestation> {
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| load_runtime_attestation_tx(tx, session_token));
+        self.log_operation(
+            "runtime_attestation",
+            session_token,
             started_at,
             &result,
             |attestation| vec![format!("session:{}", attestation.session_token)],
