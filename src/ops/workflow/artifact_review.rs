@@ -76,6 +76,54 @@ impl Covey {
                     if subtask.kind() != SubtaskKind::Work {
                         return Err(CoveyError::ReviewKindMismatch);
                     }
+                    if let Some(existing) = load_artifact_tx(tx, req.artifact_digest.as_str())
+                        .map(Some)
+                        .or_else(|error| match error {
+                            CoveyError::ArtifactNotFound => Ok(None),
+                            other => Err(other),
+                        })?
+                    {
+                        if existing.artifact_kind != req.artifact_kind
+                            || existing.base_rev != req.base_rev
+                            || existing.produced_by_subtask_id != subtask.subtask_id
+                            || existing.produced_by_session != req.session_token
+                            || existing.manifest_path != req.manifest_path
+                            || existing.changed_paths_digest != req.changed_paths_digest
+                        {
+                            return Err(CoveyError::ArtifactDigestCollision {
+                                digest: req.artifact_digest.to_string(),
+                            });
+                        }
+                        if subtask
+                            .artifact_digest()
+                            .is_some_and(|digest| digest == &req.artifact_digest)
+                            && subtask.state() == SubtaskState::ArtifactPublished
+                        {
+                            return Ok(());
+                        }
+                        ensure_subtask_transition(
+                            subtask.kind(),
+                            subtask.state(),
+                            SubtaskState::ArtifactPublished,
+                        )?;
+                        tx.execute(
+                            r#"
+                            UPDATE subtasks
+                            SET artifact_digest = ?2,
+                                state = ?3,
+                                updated_at = ?4
+                            WHERE subtask_id = ?1 AND state = ?5
+                            "#,
+                            params![
+                                subtask.subtask_id,
+                                req.artifact_digest,
+                                subtask_state_name(SubtaskState::ArtifactPublished),
+                                now,
+                                subtask_state_name(subtask.state())
+                            ],
+                        )?;
+                        return Ok(());
+                    }
                     ensure_subtask_transition(
                         subtask.kind(),
                         subtask.state(),
