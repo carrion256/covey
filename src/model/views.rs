@@ -1651,6 +1651,7 @@ impl OpenSpecCurrentWork {
         settlement_reconcile_blockers: Vec<SettlementReconcileBlocker>,
         operator_blockers: Vec<OperatorBlocker>,
         active_claims: Vec<Claim>,
+        repaired_source_subtask_ids: Vec<SubtaskId>,
         stale_claims: Vec<OpenSpecCurrentWorkStaleClaim>,
         lease_now_ms: i64,
     ) -> Self {
@@ -1670,6 +1671,7 @@ impl OpenSpecCurrentWork {
             &settlement_reconcile_blockers,
             &operator_blockers,
             &active_claims,
+            &repaired_source_subtask_ids,
             &stale_claims,
             lease_now_ms,
         );
@@ -1811,6 +1813,7 @@ fn current_work_blockers(
     settlement_reconcile_blockers: &[SettlementReconcileBlocker],
     operator_blockers: &[OperatorBlocker],
     active_claims: &[Claim],
+    repaired_source_subtask_ids: &[SubtaskId],
     stale_claims: &[OpenSpecCurrentWorkStaleClaim],
     lease_now_ms: i64,
 ) -> Vec<OpenSpecCurrentWorkBlocker> {
@@ -1858,10 +1861,12 @@ fn current_work_blockers(
             .map(OpenSpecCurrentWorkBlocker::applied_queue_unarchived),
     );
     blockers.extend(subtasks.iter().filter_map(|subtask| {
-        matches!(
+        (matches!(
             subtask.state(),
             SubtaskState::Blocked | SubtaskState::ChangesRequested | SubtaskState::Abandoned
-        )
+        ) && !repaired_source_subtask_ids
+            .iter()
+            .any(|repaired| repaired == &subtask.subtask_id))
         .then(|| OpenSpecCurrentWorkBlocker::subtask_blocked(subtask))
     }));
     blockers.extend(

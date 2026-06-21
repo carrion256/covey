@@ -6,8 +6,9 @@ use crate::{
     BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock, Covey,
     FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecCurrentWorkBlockerKind,
     OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState, OperatorBlockerState,
-    OperatorBlockerTargetKind, ReconcileChangesRequestedFollowupsReq, RecordOperatorBlockerReq,
-    RegisterSessionReq, ResolveOperatorBlockerReq, Result, SessionRole, SubmitMetaTaskReq,
+    OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
+    ReconcileChangesRequestedFollowupsReq, RecordOperatorBlockerReq, RegisterSessionReq,
+    ResolveOperatorBlockerReq, Result, SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -242,6 +243,95 @@ fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
     );
     assert_eq!(queue_candidates.len(), 1);
     assert_eq!(queue_candidates[0].queue_id.as_str(), "queue-candidate");
+}
+
+#[test]
+fn reconcile_apply_queue_requeues_expired_in_flight_claims() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open covey");
+    let orchestrator = covey
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "reconcile-queue-orchestrator",
+                "reconcile-queue-orchestrator-1",
+                SessionRole::Orchestrator,
+                "register-reconcile-queue-orchestrator",
+            )
+            .expect("valid orchestrator registration"),
+        )
+        .expect("register orchestrator");
+    let apply_gate = covey
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "reconcile-queue-apply",
+                "reconcile-queue-apply-1",
+                SessionRole::ApplyGate,
+                "register-reconcile-queue-apply",
+            )
+            .expect("valid apply registration"),
+        )
+        .expect("register apply gate");
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-reconcile-queue', 'reconcile queue', 'active', ?1, 1, 1)",
+            params![orchestrator.session_token],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('work-reconcile-queue', 'meta-reconcile-queue', 'work reconcile queue', 'work', NULL, NULL, 'available', NULL, NULL, 1, 2, 2)",
+            [],
+        )
+        .expect("insert subtask");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES ('blake3:reconcile_queue_artifact', 'patch_bundle', 'base', 'work-reconcile-queue', ?1, 'artifact.json', 'blake3:reconcile_queue_paths', 3)",
+            params![apply_gate.session_token],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "UPDATE subtasks SET state = 'approved', artifact_digest = 'blake3:reconcile_queue_artifact', updated_at = 3 WHERE subtask_id = 'work-reconcile-queue'",
+            [],
+        )
+        .expect("approve subtask");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('review-reconcile-queue-subtask', 'meta-reconcile-queue', 'review reconcile queue', 'review', 'work-reconcile-queue', 'blake3:reconcile_queue_artifact', 'decided', NULL, NULL, 1, 4, 4)",
+            [],
+        )
+        .expect("insert review subtask");
+        conn.execute(
+            "INSERT INTO reviews (review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id, verdict, findings_digest, state, created_at, updated_at)
+             VALUES ('review-reconcile-queue', 'work-reconcile-queue', 'blake3:reconcile_queue_artifact', ?1, 'review-reconcile-queue-subtask', 'approve', 'blake3:reconcile_queue_findings', 'decided', 4, 4)",
+            params![orchestrator.session_token],
+        )
+        .expect("insert approved review");
+        conn.execute(
+            "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
+             VALUES ('queue-reconcile-expired', 'blake3:reconcile_queue_artifact', 'work-reconcile-queue', 'canonical', 'in_flight', ?1, 1, ?2, 5, 5)",
+            params![apply_gate.session_token, TEST_WALL_NOW_MS - 1],
+        )
+        .expect("insert expired in-flight queue item");
+    }
+
+    let _reconcile = covey
+        .reconcile_apply_queue(
+            ReconcileApplyQueueReq::try_from_raw_parts(
+                orchestrator.session_token,
+                "reconcile-expired-ready-queue",
+            )
+            .expect("valid reconcile request"),
+        )
+        .expect("reconcile apply queue");
+
+    let item = covey
+        .ready_queue_item("queue-reconcile-expired")
+        .expect("queue item");
+    assert_eq!(item.state(), ReadyQueueState::Queued);
+    assert_eq!(item.claimed_by_session_token(), None);
+    assert_eq!(item.claim_lease_deadline(), None);
 }
 
 fn seed_archive_session_and_meta(covey: &Covey, change_id: &str) {
@@ -500,6 +590,93 @@ fn seed_current_work_queue(
         ],
     )
     .expect("insert current-work queue item");
+}
+
+fn seed_current_work_repair_followup(
+    covey: &Covey,
+    change_id: &str,
+    source_subtask_id: &str,
+    source_artifact_digest: &str,
+    followup_subtask_id: &str,
+    followup_artifact_digest: &str,
+    created_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    let review_subtask_id = format!("review-{source_subtask_id}");
+    let review_id = format!("review-{source_subtask_id}");
+    let findings_digest = format!("blake3:findings-{source_subtask_id}");
+    conn.execute(
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'review', ?4, ?5, 'decided', NULL, NULL, 1, ?6, ?6)",
+        params![
+            review_subtask_id,
+            format!("openspec:{change_id}"),
+            format!("review {source_subtask_id}"),
+            source_subtask_id,
+            source_artifact_digest,
+            created_at,
+        ],
+    )
+    .expect("insert current-work repair review subtask");
+    conn.execute(
+        "INSERT INTO reviews (review_id, subtask_id, artifact_digest, reviewer_session, review_subtask_id, verdict, findings_digest, state, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'session-orch-archive', ?4, 'changes_requested', ?5, 'decided', ?6, ?6)",
+        params![
+            review_id,
+            source_subtask_id,
+            source_artifact_digest,
+            review_subtask_id,
+            findings_digest,
+            created_at,
+        ],
+    )
+    .expect("insert current-work repair review");
+    conn.execute(
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'work', NULL, NULL, 'available', NULL, NULL, 1, ?4, ?4)",
+        params![
+            followup_subtask_id,
+            format!("openspec:{change_id}"),
+            format!("repair {source_subtask_id}"),
+            created_at + 1,
+        ],
+    )
+    .expect("insert current-work repair followup");
+    conn.execute(
+        "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+         VALUES (?1, 'patch_bundle', 'base', ?2, 'session-exec-archive', ?3, ?4, ?5)",
+        params![
+            followup_artifact_digest,
+            followup_subtask_id,
+            format!("{followup_subtask_id}.json"),
+            format!("blake3:paths-{followup_subtask_id}"),
+            created_at + 1,
+        ],
+    )
+    .expect("insert current-work repair artifact");
+    conn.execute(
+        "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = ?2, updated_at = ?3 WHERE subtask_id = ?1",
+        params![followup_subtask_id, followup_artifact_digest, created_at + 1],
+    )
+    .expect("mark current-work repair ready for apply");
+    conn.execute(
+        "INSERT INTO review_followup_subtasks (
+            review_id, source_subtask_id, source_artifact_digest, findings_digest,
+            followup_subtask_id, created_by_session, created_at,
+            repair_source_path, repair_task_ref, repair_scenario_refs_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'session-orch-archive', ?6, ?7, ?8, '[]')",
+        params![
+            review_id,
+            source_subtask_id,
+            source_artifact_digest,
+            findings_digest,
+            followup_subtask_id,
+            created_at + 1,
+            format!("openspec/changes/{change_id}/tasks.md"),
+            format!("{change_id}:task-{source_subtask_id}"),
+        ],
+    )
+    .expect("insert current-work repair followup link");
 }
 
 fn seed_landing_receipt(covey: &Covey, queue_id: &str, artifact_digest: &str, created_at: i64) {
@@ -1271,6 +1448,73 @@ fn openspec_current_work_is_scoped_to_one_change() {
     assert_eq!(current.subtask_ids.len(), 1);
     assert_eq!(current.subtask_ids[0].as_str(), "scope-claimed-work");
     assert!(current.queue_ids.is_empty());
+}
+
+#[test]
+fn openspec_current_work_tracks_repair_followup_ready_queue() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let change_id = "current-repair-followup";
+    let source_subtask_id = "current-repair-source";
+    let followup_subtask_id = "current-repair-followup-work";
+
+    seed_archive_session_and_meta(&covey, change_id);
+    seed_current_work_scoped_subtask(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "changes_requested",
+        Some("blake3:current-repair-source"),
+        2,
+    );
+    seed_current_work_repair_followup(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "blake3:current-repair-source",
+        followup_subtask_id,
+        "blake3:current-repair-followup",
+        3,
+    );
+    seed_current_work_queue(
+        &covey,
+        followup_subtask_id,
+        "queue-current-repair-followup",
+        "blake3:current-repair-followup",
+        "queued",
+        4,
+    );
+
+    let current = covey
+        .openspec_current_work(change_id)
+        .expect("current work includes repair followup");
+    let followup_scope = covey
+        .openspec_change_id_for_subtask(followup_subtask_id)
+        .expect("followup scope lookup")
+        .expect("followup maps to source OpenSpec change");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Applying);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::ApplyGate);
+    assert_eq!(followup_scope.as_str(), change_id);
+    assert!(
+        current
+            .subtask_ids
+            .iter()
+            .any(|subtask_id| subtask_id.as_str() == source_subtask_id)
+    );
+    assert!(
+        current
+            .subtask_ids
+            .iter()
+            .any(|subtask_id| subtask_id.as_str() == followup_subtask_id)
+    );
+    assert!(
+        current
+            .queue_ids
+            .iter()
+            .any(|queue_id| queue_id.as_str() == "queue-current-repair-followup")
+    );
+    assert!(current.blockers.is_empty());
 }
 
 #[test]
@@ -2389,6 +2633,90 @@ fn stuck_subtasks_exclude_failed_work_superseded_by_followup_chain() {
         .collect::<Vec<_>>();
     assert!(!stuck_ids.contains(&"source-work"));
     assert!(stuck_ids.contains(&"unresolved-leaf"));
+}
+
+#[test]
+fn observability_queries_skip_invalid_claim_session_attachments() {
+    let now = 1_700_000_000_000;
+    let clock = Arc::new(ManualClock::new(now));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-orch', 'orch-observe', 'orch-observe-1', 'orchestrator', 'active', NULL, ?1, ?1, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert orchestrator session");
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES ('meta-observe', 'observe invalid rows', 'active', 'session-orch', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert meta task");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-bad', 'worker-bad', 'worker-bad-1', 'executor', 'active', NULL, ?1, ?1, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert invalid worker session");
+        conn.execute(
+            "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+             VALUES ('session-good', 'worker-good', 'worker-good-1', 'executor', 'active', NULL, ?1, ?1, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert valid worker session");
+        for (subtask_id, claim_id, session_token) in [
+            ("work-bad", "claim-bad", "session-bad"),
+            ("work-good", "claim-good", "session-good"),
+        ] {
+            conn.execute(
+                "INSERT INTO subtasks (
+                    subtask_id, meta_task_id, title, kind, review_target_subtask_id,
+                    review_target_artifact_digest, state, current_claim_id, artifact_digest,
+                    priority, created_at, updated_at
+                ) VALUES (?1, 'meta-observe', ?1, 'work', NULL, NULL, 'in_progress', NULL, NULL, 1, ?2, ?2)",
+                params![subtask_id, now - 10_000],
+            )
+            .expect("insert subtask");
+            conn.execute(
+                "INSERT INTO claims (
+                    claim_id, subtask_id, owner_session_token, fence_seq, lease_deadline,
+                    state, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 1, ?4, 'held', ?5, ?5)",
+                params![
+                    claim_id,
+                    subtask_id,
+                    session_token,
+                    now + 5_000,
+                    now - 10_000
+                ],
+            )
+            .expect("insert claim");
+            conn.execute(
+                "UPDATE subtasks SET current_claim_id = ?2 WHERE subtask_id = ?1",
+                params![subtask_id, claim_id],
+            )
+            .expect("attach current claim");
+        }
+        conn.execute(
+            "UPDATE sessions SET active_subtask_id = 'work-good' WHERE session_token = 'session-good'",
+            [],
+        )
+        .expect("attach valid worker session to subtask");
+    }
+
+    let stuck = covey
+        .list_stuck_subtasks(1_000, 10)
+        .expect("stuck query skips invalid attachment");
+    assert_eq!(stuck.len(), 1);
+    assert_eq!(stuck[0].subtask().subtask_id, "work-good");
+
+    let expiring = covey
+        .list_expiring_claims(30_000, 10)
+        .expect("expiring query skips invalid attachment");
+    assert_eq!(expiring.len(), 1);
+    assert_eq!(expiring[0].claim().claim_id, "claim-good");
 }
 
 #[test]

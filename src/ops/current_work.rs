@@ -15,6 +15,19 @@ use crate::{
     queries::{collect_rows, deserialize_row},
 };
 
+const CURRENT_WORK_SCOPE_CTE: &str = r#"
+        WITH RECURSIVE current_scope(subtask_id) AS (
+            SELECT subtask_id
+            FROM openspec_subtask_scope
+            WHERE openspec_change_id = ?1
+            UNION
+            SELECT followup.followup_subtask_id
+            FROM review_followup_subtasks followup
+            JOIN current_scope scope
+              ON followup.source_subtask_id = scope.subtask_id
+        )
+"#;
+
 impl Covey {
     /// Returns the Covey-derived current-work projection for one OpenSpec change.
     pub fn openspec_current_work(&self, change_id: &str) -> Result<OpenSpecCurrentWork> {
@@ -46,6 +59,8 @@ impl Covey {
                 load_current_work_settlement_reconcile_blockers_tx(tx, &change_id)?;
             let operator_blockers = load_current_work_operator_blockers_tx(tx, &change_id)?;
             let active_claims = load_current_work_active_claims_tx(tx, &change_id)?;
+            let repaired_source_subtask_ids =
+                load_current_work_repaired_source_subtask_ids_tx(tx, &change_id)?;
             let lease_now_ms = current_lease_now_ms_tx(tx, self.clock.wall_now_ms())?;
             let stale_claims = stale_claim_older_than_ms
                 .map(|threshold| {
@@ -64,6 +79,7 @@ impl Covey {
                 settlement_reconcile_blockers,
                 operator_blockers,
                 active_claims,
+                repaired_source_subtask_ids,
                 stale_claims,
                 lease_now_ms,
             ))
@@ -116,21 +132,24 @@ fn load_current_work_stale_claims_tx(
     let threshold_ms = older_than_ms.max(0);
     let cutoff = lease_now_ms.saturating_sub(threshold_ms);
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq,
                c.lease_deadline, c.state, c.created_at, c.updated_at,
                s.updated_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id
         JOIN claims c ON c.claim_id = s.current_claim_id
-        WHERE scope.openspec_change_id = ?1
-          AND c.state = ?2
+        WHERE c.state = ?2
           AND c.lease_deadline > ?3
           AND s.state IN ('claimed', 'in_progress')
           AND s.artifact_digest IS NULL
           AND s.updated_at <= ?4
         ORDER BY s.updated_at ASC, c.claim_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(
         params![
@@ -171,7 +190,22 @@ pub(crate) fn openspec_change_id_for_subtask_tx(
     subtask_id: &SubtaskId,
 ) -> Result<Option<OpenSpecChangeId>> {
     tx.query_row(
-        "SELECT openspec_change_id FROM openspec_subtask_scope WHERE subtask_id = ?1",
+        r#"
+        WITH RECURSIVE source_chain(subtask_id, depth) AS (
+            SELECT ?1, 0
+            UNION
+            SELECT followup.source_subtask_id, chain.depth + 1
+            FROM review_followup_subtasks followup
+            JOIN source_chain chain
+              ON followup.followup_subtask_id = chain.subtask_id
+        )
+        SELECT scope.openspec_change_id
+        FROM source_chain chain
+        JOIN openspec_subtask_scope scope
+          ON scope.subtask_id = chain.subtask_id
+        ORDER BY chain.depth ASC
+        LIMIT 1
+        "#,
         params![subtask_id.as_str()],
         |row| row.get::<_, String>(0),
     )
@@ -186,16 +220,19 @@ fn load_current_work_subtasks_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<SubtaskView>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT s.subtask_id, s.meta_task_id, s.title, s.kind,
                s.review_target_subtask_id, s.review_target_artifact_digest,
                s.state, s.current_claim_id, s.artifact_digest, s.priority,
                s.created_at, s.updated_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id
-        WHERE scope.openspec_change_id = ?1
         ORDER BY s.created_at ASC, s.subtask_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(params![change_id.as_str()], |row| {
         let subtask = deserialize_row::<SubtaskRow>(row)?;
@@ -209,15 +246,18 @@ fn load_current_work_reviews_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<Review>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT r.review_id, r.subtask_id, r.artifact_digest, r.reviewer_session,
                r.review_subtask_id, r.verdict, r.findings_digest, r.state,
                r.created_at, r.updated_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN reviews r ON r.subtask_id = scope.subtask_id
-        WHERE scope.openspec_change_id = ?1
         ORDER BY r.created_at ASC, r.review_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(params![change_id.as_str()], deserialize_row::<Review>)?;
     collect_rows(rows)
@@ -228,15 +268,18 @@ fn load_current_work_queue_items_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<ReadyQueueItem>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT q.queue_id, q.artifact_digest, q.subtask_id, q.settlement_target,
                q.state, q.claimed_by_session_token, q.claim_fence_seq,
                q.claim_lease_deadline, q.enqueued_at, q.updated_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN ready_queue q ON q.subtask_id = scope.subtask_id
-        WHERE scope.openspec_change_id = ?1
         ORDER BY q.enqueued_at ASC, q.queue_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(
         params![change_id.as_str()],
@@ -271,16 +314,19 @@ fn load_current_work_landing_receipt_queue_ids_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<crate::model::QueueId>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT receipt.queue_id
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN ready_queue q ON q.subtask_id = scope.subtask_id
         JOIN landing_receipts receipt
           ON receipt.queue_id = q.queue_id
          AND receipt.artifact_digest = q.artifact_digest
-        WHERE scope.openspec_change_id = ?1
         ORDER BY receipt.created_at ASC, receipt.queue_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(params![change_id.as_str()], |row| {
         row.get::<_, String>(0).and_then(|raw| {
@@ -296,21 +342,24 @@ fn load_current_work_apply_gate_blockers_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<ApplyGateBlocker>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT blocker.queue_id, blocker.artifact_digest, blocker.review_id,
                blocker.findings_digest, blocker.claim_fence_seq, blocker.verifier,
                blocker.blocker_kind, blocker.reason, blocker.evidence_id,
                blocker.recorded_by_session, blocker.created_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN ready_queue queue ON queue.subtask_id = scope.subtask_id
         JOIN apply_gate_blockers blocker
           ON blocker.queue_id = queue.queue_id
          AND blocker.artifact_digest = queue.artifact_digest
          AND blocker.claim_fence_seq = queue.claim_fence_seq
-        WHERE scope.openspec_change_id = ?1
-          AND queue.state IN ('queued', 'in_flight')
+        WHERE queue.state IN ('queued', 'in_flight')
         ORDER BY blocker.created_at ASC, blocker.evidence_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(params![change_id.as_str()], |row| {
         let raw_kind = row.get::<_, String>(6)?;
@@ -339,21 +388,24 @@ fn load_current_work_settlement_reconcile_blockers_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<SettlementReconcileBlocker>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT blocker.queue_id, blocker.artifact_digest, blocker.review_id,
                blocker.findings_digest, blocker.claim_fence_seq,
                blocker.reconcile_reason, blocker.authority_evidence_id,
                blocker.recorded_by_session, blocker.created_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN ready_queue queue ON queue.subtask_id = scope.subtask_id
         JOIN settlement_reconcile_blockers blocker
           ON blocker.queue_id = queue.queue_id
          AND blocker.artifact_digest = queue.artifact_digest
          AND blocker.claim_fence_seq = queue.claim_fence_seq
-        WHERE scope.openspec_change_id = ?1
-          AND queue.state IN ('queued', 'in_flight', 'applied')
+        WHERE queue.state IN ('queued', 'in_flight', 'applied')
         ORDER BY blocker.created_at ASC, blocker.authority_evidence_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(params![change_id.as_str()], |row| {
         let raw_reason = row.get::<_, String>(5)?;
@@ -397,21 +449,50 @@ fn load_current_work_active_claims_tx(
     change_id: &OpenSpecChangeId,
 ) -> Result<Vec<Claim>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
         SELECT c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq,
                c.lease_deadline, c.state, c.created_at, c.updated_at
-        FROM openspec_subtask_scope scope
+        FROM current_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id
         JOIN claims c ON c.claim_id = s.current_claim_id
-        WHERE scope.openspec_change_id = ?1
-          AND c.state = ?2
+        WHERE c.state = ?2
         ORDER BY c.lease_deadline ASC, c.claim_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(
         params![change_id.as_str(), ClaimState::Held.to_string()],
         deserialize_row::<Claim>,
     )?;
+    collect_rows(rows)
+}
+
+fn load_current_work_repaired_source_subtask_ids_tx(
+    tx: &Transaction<'_>,
+    change_id: &OpenSpecChangeId,
+) -> Result<Vec<SubtaskId>> {
+    let mut stmt = tx.prepare(
+        format!(
+            r#"
+        {CURRENT_WORK_SCOPE_CTE}
+        SELECT DISTINCT followup.source_subtask_id
+        FROM current_scope scope
+        JOIN review_followup_subtasks followup
+          ON followup.source_subtask_id = scope.subtask_id
+        ORDER BY followup.source_subtask_id ASC
+        "#
+        )
+        .as_str(),
+    )?;
+    let rows = stmt.query_map(params![change_id.as_str()], |row| {
+        row.get::<_, String>(0).and_then(|raw| {
+            SubtaskId::parse(raw)
+                .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, err.into()))
+        })
+    })?;
     collect_rows(rows)
 }
 

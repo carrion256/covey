@@ -130,6 +130,7 @@ impl Covey {
     ) -> Result<ApplyQueueReconcileResult> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
+            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 &req.session_token,
@@ -143,6 +144,7 @@ impl Covey {
                         &req.session_token,
                         &[SessionRole::Orchestrator, SessionRole::ApplyGate],
                     )?;
+                    requeue_stale_ready_queue_claims(tx, lease_now, now)?;
                     let approved_queue_ids =
                         enqueue_approved_apply_candidates_tx(tx, &req.session_token, now)?;
                     let ready_queue_ids =

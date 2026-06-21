@@ -12,7 +12,7 @@ use crate::{
         subtask_state_name,
     },
     queries::{
-        collect_rows, load_artifact_tx, load_claim_tx, load_queue_items_for_subtask_tx,
+        load_artifact_tx, load_claim_tx, load_queue_items_for_subtask_tx,
         load_reviews_for_subtask_tx, load_subtask_tx,
     },
 };
@@ -168,7 +168,11 @@ impl Covey {
             let mut rows = stmt.query(params![cutoff, limit as i64])?;
             let mut stuck = Vec::new();
             while let Some(row) = rows.next()? {
-                stuck.push(stuck_subtask_from_joined_row(row, now)?);
+                match stuck_subtask_from_joined_row(row, now) {
+                    Ok(item) => stuck.push(item),
+                    Err(CoveyError::InvalidObservabilityRow { .. }) => continue,
+                    Err(error) => return Err(error),
+                }
             }
             Ok(stuck)
         });
@@ -221,15 +225,20 @@ impl Covey {
                 LIMIT ?3
                 "#,
             )?;
-            let rows = stmt.query_map(
-                params![
-                    claim_state_name(ClaimState::Held),
-                    lease_cutoff,
-                    limit as i64
-                ],
-                |row| expiring_claim_from_joined_row(row, lease_now),
-            )?;
-            collect_rows(rows)
+            let mut rows = stmt.query(params![
+                claim_state_name(ClaimState::Held),
+                lease_cutoff,
+                limit as i64
+            ])?;
+            let mut claims = Vec::new();
+            while let Some(row) = rows.next()? {
+                match expiring_claim_from_joined_row(row, lease_now) {
+                    Ok(item) => claims.push(item),
+                    Err(CoveyError::InvalidObservabilityRow { .. }) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(claims)
         });
         self.log_operation(
             "list_expiring_claims",
@@ -678,10 +687,7 @@ fn stuck_subtask_from_joined_row(row: &Row<'_>, now: i64) -> Result<StuckSubtask
         .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
 }
 
-fn expiring_claim_from_joined_row(
-    row: &Row<'_>,
-    lease_now: i64,
-) -> rusqlite::Result<ExpiringClaim> {
+fn expiring_claim_from_joined_row(row: &Row<'_>, lease_now: i64) -> Result<ExpiringClaim> {
     let claim = Claim::try_from_parts(
         row.get(0)?,
         row.get(1)?,
@@ -692,7 +698,7 @@ fn expiring_claim_from_joined_row(
         row.get(6)?,
         row.get(7)?,
     )
-    .map_err(to_sql_err)?;
+    .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })?;
     let subtask = SubtaskRow::try_from_parts(
         row.get(8)?,
         row.get(9)?,
@@ -719,7 +725,7 @@ fn expiring_claim_from_joined_row(
         row.get(28)?,
         row.get(29)?,
     )
-    .map_err(to_sql_err)?;
+    .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })?;
     let expires_in_ms = (claim.lease_deadline.get() - lease_now).max(0);
     ExpiringClaim::new(
         claim,
@@ -727,7 +733,7 @@ fn expiring_claim_from_joined_row(
         session,
         expires_in_ms,
     )
-    .map_err(to_sql_err)
+    .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
 }
 
 fn parse_enum<T>(raw: String) -> rusqlite::Result<T>
