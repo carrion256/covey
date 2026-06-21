@@ -1697,6 +1697,49 @@ impl Covey {
         );
         result
     }
+
+    /// Returns whether the fenced landing receipt has been recorded for a queue artifact.
+    pub fn landing_receipt_exists(
+        &self,
+        queue_id: &str,
+        artifact_digest: &str,
+        claim_fence_seq: i64,
+    ) -> Result<bool> {
+        let started_at = Instant::now();
+        let result = self.with_read_conn(|conn| {
+            let queue_id = QueueId::parse(queue_id.to_owned())?;
+            let artifact_digest = crate::model::ArtifactDigest::parse(artifact_digest.to_owned())?;
+            let claim_fence_seq = FenceSeq::parse(claim_fence_seq)?;
+            let exists = conn
+                .query_row(
+                    r#"
+                    SELECT 1
+                    FROM landing_receipts
+                    WHERE queue_id = ?1
+                      AND artifact_digest = ?2
+                      AND claim_fence_seq = ?3
+                    LIMIT 1
+                    "#,
+                    params![
+                        queue_id.as_str(),
+                        artifact_digest.as_str(),
+                        claim_fence_seq.get()
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            Ok(exists)
+        });
+        self.log_operation(
+            "landing_receipt_exists",
+            "system",
+            started_at,
+            &result,
+            |_| vec![format!("queue:{queue_id}")],
+        );
+        result
+    }
 }
 
 fn parse_landing_value<T, V>(queue_id: &QueueId, value: V) -> Result<T>
