@@ -4,11 +4,12 @@ use rusqlite::{Connection, params};
 
 use crate::{
     BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock, Covey,
-    FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecCurrentWorkBlockerKind,
-    OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState, OperatorBlockerState,
-    OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
-    ReconcileChangesRequestedFollowupsReq, RecordOperatorBlockerReq, RegisterSessionReq,
-    ResolveOperatorBlockerReq, Result, SessionRole, SubmitMetaTaskReq,
+    FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecArchiveStatusState,
+    OpenSpecCurrentWorkBlockerKind, OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState,
+    OperatorBlockerState, OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
+    ReconcileChangesRequestedFollowupsReq, RecordOpenSpecArchiveStatusReq,
+    RecordOperatorBlockerReq, RegisterSessionReq, ResolveOperatorBlockerReq, Result, SessionRole,
+    SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -2040,6 +2041,76 @@ fn openspec_current_work_applied_but_unarchived_precedes_subtask_blockers() {
 }
 
 #[test]
+fn openspec_current_work_archived_ignores_repaired_source_subtasks() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let change_id = "current-archived-repair";
+    let source_subtask_id = "current-archived-repair-source";
+    let followup_subtask_id = "current-archived-repair-followup";
+    let queue_id = "queue-current-archived-repair";
+    let artifact_digest = "blake3:current-archived-repair";
+
+    seed_archive_session_and_meta(&covey, change_id);
+    seed_current_work_scoped_subtask(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "changes_requested",
+        Some("blake3:current-archived-repair-source"),
+        2,
+    );
+    seed_current_work_repair_followup(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "blake3:current-archived-repair-source",
+        followup_subtask_id,
+        artifact_digest,
+        3,
+    );
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "UPDATE subtasks SET state = 'applied', updated_at = 4 WHERE subtask_id = ?1",
+            params![followup_subtask_id],
+        )
+        .expect("mark repair followup applied");
+    }
+    seed_current_work_queue(
+        &covey,
+        followup_subtask_id,
+        queue_id,
+        artifact_digest,
+        "applied",
+        4,
+    );
+    seed_landing_receipt(&covey, queue_id, artifact_digest, 4);
+    covey
+        .record_openspec_archive_status(
+            RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+                "session-orch-archive",
+                queue_id,
+                artifact_digest,
+                change_id,
+                OpenSpecArchiveStatusState::Archived,
+                None,
+                Some("blake3:archive-current-archived-repair".to_owned()),
+                "record-archived-repair-followup",
+            )
+            .expect("valid archived status"),
+        )
+        .expect("record archived repair followup status");
+
+    let current = covey
+        .openspec_current_work(change_id)
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Archived);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Operator);
+    assert!(current.blockers.is_empty());
+}
+
+#[test]
 fn openspec_archive_eligibility_blocks_until_all_scoped_subtasks_are_terminal() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -2075,6 +2146,85 @@ fn openspec_archive_eligibility_blocks_until_all_scoped_subtasks_are_terminal() 
         "work-pending"
     );
     assert_eq!(eligibility.open_archive_blockers.len(), 1);
+}
+
+#[test]
+fn openspec_archive_eligibility_includes_applied_repair_followups() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let change_id = "change-repair-archive";
+    let source_subtask_id = "work-repair-archive-source";
+    let followup_subtask_id = "work-repair-archive-followup";
+    let queue_id = "queue-repair-archive-followup";
+    let artifact_digest = "blake3:repair-archive-followup";
+
+    seed_archive_session_and_meta(&covey, change_id);
+    seed_current_work_scoped_subtask(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "changes_requested",
+        Some("blake3:repair-archive-source"),
+        2,
+    );
+    seed_current_work_repair_followup(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "blake3:repair-archive-source",
+        followup_subtask_id,
+        artifact_digest,
+        3,
+    );
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "UPDATE subtasks SET state = 'applied', updated_at = 4 WHERE subtask_id = ?1",
+            params![followup_subtask_id],
+        )
+        .expect("mark repair followup applied");
+    }
+    seed_current_work_queue(
+        &covey,
+        followup_subtask_id,
+        queue_id,
+        artifact_digest,
+        "applied",
+        4,
+    );
+    covey
+        .record_openspec_archive_status(
+            RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+                "session-orch-archive",
+                queue_id,
+                artifact_digest,
+                change_id,
+                OpenSpecArchiveStatusState::Blocked,
+                Some("applied_but_unarchived".to_owned()),
+                None,
+                "record-repair-followup-archive-blocker",
+            )
+            .expect("valid archive blocker"),
+        )
+        .expect("record repair followup archive blocker");
+
+    let eligibility = covey
+        .openspec_archive_eligibility(change_id)
+        .expect("archive eligibility");
+
+    assert!(eligibility.safe_to_archive);
+    assert!(
+        eligibility
+            .scoped_subtasks
+            .iter()
+            .any(|subtask| subtask.subtask_id.as_str() == followup_subtask_id)
+    );
+    assert_eq!(eligibility.pending_subtasks.len(), 0);
+    assert_eq!(eligibility.open_archive_blockers.len(), 1);
+    assert_eq!(
+        eligibility.open_archive_blockers[0].queue_id.as_str(),
+        queue_id
+    );
 }
 
 #[test]

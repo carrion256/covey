@@ -48,6 +48,19 @@ const fn settlement_target_name(target: SettlementTarget) -> &'static str {
     }
 }
 
+const OPENSPEC_SCOPE_WITH_FOLLOWUPS_CTE: &str = r#"
+        WITH RECURSIVE openspec_scope(subtask_id) AS (
+            SELECT subtask_id
+            FROM openspec_subtask_scope
+            WHERE openspec_change_id = ?1
+            UNION
+            SELECT followup.followup_subtask_id
+            FROM review_followup_subtasks followup
+            JOIN openspec_scope scope
+              ON followup.source_subtask_id = scope.subtask_id
+        )
+"#;
+
 impl Covey {
     /// Enqueues an approved artifact for apply.
     pub fn enqueue_for_apply(&self, req: EnqueueForApplyReq) -> Result<String> {
@@ -962,25 +975,7 @@ impl Covey {
         let started_at = Instant::now();
         let result = self.with_read_tx(|tx| {
             let change_id = OpenSpecChangeId::parse(openspec_change_id.to_owned())?;
-            let scoped_subtasks = load_openspec_scoped_subtasks_tx(tx, &change_id)?;
-            let open_archive_blockers =
-                load_open_openspec_archive_blockers_for_change_tx(tx, &change_id)?;
-            let pending_subtasks = scoped_subtasks
-                .iter()
-                .filter(|subtask| {
-                    !matches!(
-                        subtask.state(),
-                        SubtaskState::Applied | SubtaskState::Abandoned
-                    )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            Ok(OpenSpecArchiveEligibility::new(
-                change_id,
-                scoped_subtasks,
-                open_archive_blockers,
-                pending_subtasks,
-            ))
+            archive_eligibility_for_change_tx(tx, &change_id)
         });
         self.log_operation(
             "openspec_archive_eligibility",
@@ -1667,13 +1662,17 @@ fn archive_eligibility_for_change_tx(
     let scoped_subtasks = load_openspec_scoped_subtasks_tx(tx, openspec_change_id)?;
     let open_archive_blockers =
         load_open_openspec_archive_blockers_for_change_tx(tx, openspec_change_id)?;
+    let repaired_source_subtask_ids =
+        load_openspec_repaired_source_subtask_ids_tx(tx, openspec_change_id)?;
     let pending_subtasks = scoped_subtasks
         .iter()
         .filter(|subtask| {
             !matches!(
                 subtask.state(),
                 SubtaskState::Applied | SubtaskState::Abandoned
-            )
+            ) && !repaired_source_subtask_ids
+                .iter()
+                .any(|repaired| repaired == &subtask.subtask_id)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1690,20 +1689,54 @@ fn load_openspec_scoped_subtasks_tx(
     openspec_change_id: &OpenSpecChangeId,
 ) -> Result<Vec<SubtaskView>> {
     let mut stmt = tx.prepare(
-        r#"
+        format!(
+            r#"
+        {OPENSPEC_SCOPE_WITH_FOLLOWUPS_CTE}
         SELECT s.subtask_id, s.meta_task_id, s.title, s.kind,
                s.review_target_subtask_id, s.review_target_artifact_digest,
                s.state, s.current_claim_id, s.artifact_digest, s.priority,
                s.created_at, s.updated_at
-        FROM openspec_subtask_scope scope
+        FROM openspec_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id
-        WHERE scope.openspec_change_id = ?1
         ORDER BY s.created_at ASC, s.subtask_id ASC
-        "#,
+        "#
+        )
+        .as_str(),
     )?;
     let rows = stmt.query_map(params![openspec_change_id.as_str()], |row| {
         let subtask = deserialize_row::<crate::model::SubtaskRow>(row)?;
         SubtaskView::try_from(subtask)
+    })?;
+    collect_rows(rows)
+}
+
+fn load_openspec_repaired_source_subtask_ids_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+) -> Result<Vec<crate::model::SubtaskId>> {
+    let mut stmt = tx.prepare(
+        format!(
+            r#"
+        {OPENSPEC_SCOPE_WITH_FOLLOWUPS_CTE}
+        SELECT DISTINCT followup.source_subtask_id
+        FROM openspec_scope scope
+        JOIN review_followup_subtasks followup
+          ON followup.source_subtask_id = scope.subtask_id
+        ORDER BY followup.source_subtask_id ASC
+        "#
+        )
+        .as_str(),
+    )?;
+    let rows = stmt.query_map(params![openspec_change_id.as_str()], |row| {
+        row.get::<_, String>(0).and_then(|raw| {
+            crate::model::SubtaskId::parse(raw).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    err.into(),
+                )
+            })
+        })
     })?;
     collect_rows(rows)
 }
@@ -2174,7 +2207,22 @@ fn openspec_change_id_for_subtask_tx(
     subtask_id: &str,
 ) -> Result<Option<crate::model::OpenSpecChangeId>> {
     tx.query_row(
-        "SELECT openspec_change_id FROM openspec_subtask_scope WHERE subtask_id = ?1",
+        r#"
+        WITH RECURSIVE source_chain(subtask_id, depth) AS (
+            SELECT ?1, 0
+            UNION
+            SELECT followup.source_subtask_id, chain.depth + 1
+            FROM review_followup_subtasks followup
+            JOIN source_chain chain
+              ON followup.followup_subtask_id = chain.subtask_id
+        )
+        SELECT scope.openspec_change_id
+        FROM source_chain chain
+        JOIN openspec_subtask_scope scope
+          ON scope.subtask_id = chain.subtask_id
+        ORDER BY chain.depth ASC
+        LIMIT 1
+        "#,
         params![subtask_id],
         |row| row.get::<_, String>(0),
     )

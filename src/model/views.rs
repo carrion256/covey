@@ -1680,6 +1680,7 @@ impl OpenSpecCurrentWork {
             &reviews,
             &queue_items,
             &archive_statuses,
+            &repaired_source_subtask_ids,
             &blockers,
         );
         let next_owner = current_work_next_owner(state, &blockers);
@@ -1724,15 +1725,19 @@ fn current_work_state(
     reviews: &[Review],
     queue_items: &[ReadyQueueItem],
     archive_statuses: &[OpenSpecArchiveStatus],
+    repaired_source_subtask_ids: &[SubtaskId],
     blockers: &[OpenSpecCurrentWorkBlocker],
 ) -> OpenSpecCurrentWorkState {
     if !blockers.is_empty() {
         return OpenSpecCurrentWorkState::Blocked;
     }
     if !subtasks.is_empty()
-        && subtasks
-            .iter()
-            .all(|subtask| subtask.state() == SubtaskState::Applied)
+        && subtasks.iter().all(|subtask| {
+            subtask.state() == SubtaskState::Applied
+                || repaired_source_subtask_ids
+                    .iter()
+                    .any(|repaired| repaired == &subtask.subtask_id)
+        })
         && archive_statuses
             .iter()
             .any(|status| status.state == super::OpenSpecArchiveStatusState::Archived)
