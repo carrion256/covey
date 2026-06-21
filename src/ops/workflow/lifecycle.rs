@@ -9,9 +9,10 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         AbandonSubtaskReq, ClaimNextReq, ClaimResult, ClaimState, ClaimSubtaskReq,
-        CreateSubtaskRequest, EventType, ObjectType, ReviewState, Session, SessionRole,
-        SessionState, StartSubtaskReq, SubtaskId, SubtaskKind, SubtaskState, claim_state_name,
-        review_state_name, session_state_name, subtask_kind_name, subtask_state_name,
+        CreateSubtaskRequest, EventType, ObjectType, ReservationState, ReviewState, Session,
+        SessionRole, SessionState, StartSubtaskReq, SubtaskId, SubtaskKind, SubtaskState,
+        claim_state_name, reservation_state_name, review_state_name, session_state_name,
+        subtask_kind_name, subtask_state_name,
     },
     queries::load_subtask_tx,
     schema::advance_lease_clock,
@@ -403,6 +404,15 @@ impl Covey {
                     let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
                     require_session_can_claim_kind(&session, subtask.kind())?;
                     close_claim_and_detach(tx, &claim, ClaimState::Released, now)?;
+                    tx.execute(
+                        "UPDATE reservations SET state = ?2, updated_at = ?3 WHERE owner_subtask_id = ?1 AND state = ?4",
+                        params![
+                            claim.subtask_id.as_str(),
+                            reservation_state_name(ReservationState::Released),
+                            now,
+                            reservation_state_name(ReservationState::Active),
+                        ],
+                    )?;
                     let next_state = match subtask.state() {
                         SubtaskState::Claimed | SubtaskState::InProgress => SubtaskState::Available,
                         other => other,

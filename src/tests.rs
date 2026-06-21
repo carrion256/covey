@@ -8,8 +8,8 @@ use crate::{
     OpenSpecCurrentWorkBlockerKind, OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState,
     OperatorBlockerState, OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
     ReconcileChangesRequestedFollowupsReq, RecordOpenSpecArchiveStatusReq,
-    RecordOperatorBlockerReq, RegisterSessionReq, ResolveOperatorBlockerReq, Result, SessionRole,
-    SubmitMetaTaskReq,
+    RecordOperatorBlockerReq, RegisterSessionReq, ReleaseClaimReq, ResolveOperatorBlockerReq,
+    Result, SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -1519,6 +1519,63 @@ fn openspec_current_work_tracks_repair_followup_ready_queue() {
 }
 
 #[test]
+fn reconcile_changes_requested_revives_abandoned_artifactless_followup() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let change_id = "current-abandoned-repair";
+    let source_subtask_id = "current-abandoned-repair-source";
+    let followup_subtask_id = "current-abandoned-repair-followup";
+
+    seed_archive_session_and_meta(&covey, change_id);
+    seed_current_work_scoped_subtask(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "changes_requested",
+        Some("blake3:current-abandoned-repair-source"),
+        2,
+    );
+    seed_current_work_repair_followup(
+        &covey,
+        change_id,
+        source_subtask_id,
+        "blake3:current-abandoned-repair-source",
+        followup_subtask_id,
+        "blake3:current-abandoned-repair-followup",
+        3,
+    );
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "UPDATE subtasks SET state = 'abandoned', artifact_digest = NULL, updated_at = 4 WHERE subtask_id = ?1",
+            params![followup_subtask_id],
+        )
+        .expect("mark repair followup abandoned without artifact");
+    }
+
+    let reconcile = covey
+        .reconcile_changes_requested_followups(
+            ReconcileChangesRequestedFollowupsReq::try_from_raw_parts(
+                "session-orch-archive",
+                "revive-abandoned-followup",
+            )
+            .expect("valid reconcile request"),
+        )
+        .expect("reconcile followups");
+
+    assert_eq!(reconcile.created_count, 1);
+    assert_eq!(
+        reconcile.followup_subtask_ids,
+        vec![followup_subtask_id.to_owned()]
+    );
+    let status = covey
+        .subtask_status(followup_subtask_id)
+        .expect("subtask status");
+    assert_eq!(status.subtask().state().to_string(), "available");
+    assert!(status.subtask().artifact_digest().is_none());
+}
+
+#[test]
 fn openspec_current_work_does_not_archive_when_any_scoped_subtask_is_non_terminal() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -2218,6 +2275,43 @@ fn openspec_archive_eligibility_blocks_until_all_scoped_subtasks_are_terminal() 
 }
 
 #[test]
+fn openspec_archive_eligibility_blocks_abandoned_scoped_subtasks() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-abandoned");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-abandoned",
+        "work-applied-before-abandoned",
+        Some("queue-applied-before-abandoned"),
+        "blake3:archive-applied-before-abandoned",
+        "applied",
+        2,
+    );
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-abandoned",
+        "work-abandoned",
+        None,
+        "blake3:archive-abandoned",
+        "abandoned",
+        3,
+    );
+
+    let eligibility = covey
+        .openspec_archive_eligibility("change-abandoned")
+        .expect("archive eligibility");
+
+    assert!(!eligibility.safe_to_archive);
+    assert_eq!(eligibility.pending_subtasks.len(), 1);
+    assert_eq!(
+        eligibility.pending_subtasks[0].subtask_id.as_str(),
+        "work-abandoned"
+    );
+    assert_eq!(eligibility.open_archive_blockers.len(), 1);
+}
+
+#[test]
 fn openspec_archive_eligibility_includes_applied_repair_followups() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -2385,6 +2479,164 @@ fn openspec_archive_cleanup_claim_is_orchestrator_only_idempotent_and_non_dispat
 }
 
 #[test]
+fn openspec_archive_cleanup_can_retry_after_released_failed_claim() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-cleanup-retry");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-cleanup-retry",
+        "work-cleanup-retry",
+        Some("queue-cleanup-retry"),
+        "blake3:archive-cleanup-retry",
+        "applied",
+        2,
+    );
+    let paths = vec![
+        "openspec/changes/change-cleanup-retry".to_owned(),
+        "openspec/archive".to_owned(),
+        "openspec/specs".to_owned(),
+    ];
+    let first = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup-retry",
+                paths.clone(),
+                "begin-cleanup-retry-first",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin first cleanup");
+
+    covey
+        .release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                "session-orch-archive",
+                first.cleanup_claim_id.to_string(),
+                first.fence_seq.get(),
+                "release-cleanup-retry-first",
+            )
+            .expect("valid release"),
+        )
+        .expect("release failed cleanup claim");
+
+    let second = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup-retry",
+                paths,
+                "begin-cleanup-retry-second",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin retry cleanup");
+
+    assert_eq!(first.cleanup_subtask_id, second.cleanup_subtask_id);
+    assert_eq!(first.cleanup_claim_id, second.cleanup_claim_id);
+    assert_ne!(first.fence_seq, second.fence_seq);
+    assert_eq!(second.open_archive_blockers.len(), 1);
+}
+
+#[test]
+fn openspec_archive_cleanup_can_retry_after_expired_cleanup_claim() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock.clone()).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-cleanup-expired");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-cleanup-expired",
+        "work-cleanup-expired",
+        Some("queue-cleanup-expired"),
+        "blake3:archive-cleanup-expired",
+        "applied",
+        2,
+    );
+    let paths = vec![
+        "openspec/changes/change-cleanup-expired".to_owned(),
+        "openspec/archive".to_owned(),
+        "openspec/specs".to_owned(),
+    ];
+    let first = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup-expired",
+                paths.clone(),
+                "begin-cleanup-expired-first",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin first cleanup");
+
+    clock.advance(700_000);
+
+    let second = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup-expired",
+                paths,
+                "begin-cleanup-expired-second",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin retry cleanup after expiry");
+
+    assert_eq!(first.cleanup_subtask_id, second.cleanup_subtask_id);
+    assert_eq!(first.cleanup_claim_id, second.cleanup_claim_id);
+    assert_ne!(first.fence_seq, second.fence_seq);
+    assert_eq!(second.open_archive_blockers.len(), 1);
+}
+
+#[test]
+fn openspec_archive_cleanup_can_start_after_meta_task_completed() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-cleanup-completed");
+    seed_archive_scoped_subtask(
+        &covey,
+        "change-cleanup-completed",
+        "work-cleanup-completed",
+        Some("queue-cleanup-completed"),
+        "blake3:archive-cleanup-completed",
+        "applied",
+        2,
+    );
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "UPDATE meta_tasks SET state = 'completed' WHERE meta_task_id = 'openspec:change-cleanup-completed'",
+            [],
+        )
+        .expect("complete OpenSpec meta task");
+    }
+
+    let cleanup = covey
+        .begin_openspec_archive_cleanup(
+            BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                "session-orch-archive",
+                "change-cleanup-completed",
+                vec![
+                    "openspec/changes/change-cleanup-completed".to_owned(),
+                    "openspec/archive".to_owned(),
+                    "openspec/specs".to_owned(),
+                ],
+                "begin-cleanup-completed",
+            )
+            .expect("valid cleanup begin"),
+        )
+        .expect("begin cleanup for completed OpenSpec meta task");
+
+    assert_eq!(
+        cleanup.cleanup_subtask_id.as_str(),
+        "openspec:change-cleanup-completed:cleanup:archive"
+    );
+    assert_eq!(cleanup.open_archive_blockers.len(), 1);
+}
+
+#[test]
 fn finish_openspec_archive_cleanup_resolves_all_open_blockers_for_one_change() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -2468,6 +2720,16 @@ fn finish_openspec_archive_cleanup_resolves_all_open_blockers_for_one_change() {
         .expect("count archived rows")
     };
     assert_eq!(archived_rows, 2);
+    let active_reservations: i64 = {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.query_row(
+            "SELECT COUNT(*) FROM reservations WHERE owner_subtask_id = ?1 AND state = 'active'",
+            params![finish.cleanup_subtask_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("count active cleanup reservations")
+    };
+    assert_eq!(active_reservations, 0);
 }
 
 #[test]

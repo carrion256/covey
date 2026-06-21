@@ -17,13 +17,13 @@ use crate::{
         ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
         ReconcileApplyQueueReq, RecordApplyGateBlockerReq, RecordApplyVerificationReq,
         RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
-        RecordSettlementReconcileBlockerReq, ReleaseClaimReq, ReviewId, ReviewState, ReviewVerdict,
-        RuntimeAttestation, ScopeClass, Session, SessionRole, SessionToken, SettlementTarget,
-        SubtaskKind, SubtaskState, SubtaskTitle, SubtaskView, SupersedeQueueItemReq,
-        VerifyLandingAuthorizationReq, apply_gate_blocker_kind_name, claim_state_name,
-        meta_task_state_name, openspec_archive_status_state_name, ready_queue_state_name,
-        reservation_state_name, review_state_name, review_verdict_name, scope_class_name,
-        settlement_reconcile_reason_name, subtask_kind_name, subtask_state_name,
+        RecordSettlementReconcileBlockerReq, ReleaseClaimReq, ReservationState, ReviewId,
+        ReviewState, ReviewVerdict, RuntimeAttestation, ScopeClass, Session, SessionRole,
+        SessionToken, SettlementTarget, SubtaskKind, SubtaskState, SubtaskTitle, SubtaskView,
+        SupersedeQueueItemReq, VerifyLandingAuthorizationReq, apply_gate_blocker_kind_name,
+        claim_state_name, meta_task_state_name, openspec_archive_status_state_name,
+        ready_queue_state_name, reservation_state_name, review_state_name, review_verdict_name,
+        scope_class_name, settlement_reconcile_reason_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -35,10 +35,11 @@ use crate::{
         refresh_meta_task_state, requeue_stale_ready_queue_claims,
     },
     validators::{
-        MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, ensure_length, ensure_meta_task_is_schedulable,
-        ensure_positive_lease_duration, ensure_ready_queue_transition, ensure_subtask_transition,
-        issue_fence_seq, require_active_session, require_current_claim, require_role,
-        require_runtime_attestation, require_session_can_enqueue,
+        MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, ensure_length, ensure_meta_task_exists,
+        ensure_meta_task_is_schedulable, ensure_positive_lease_duration,
+        ensure_ready_queue_transition, ensure_subtask_transition, issue_fence_seq,
+        require_active_session, require_current_claim, require_role, require_runtime_attestation,
+        require_session_can_enqueue,
     },
 };
 
@@ -1023,12 +1024,19 @@ impl Covey {
                         tx,
                         &req.openspec_change_id,
                         eligibility.open_archive_blockers.clone(),
+                        lease_now,
                     )? {
                         return Ok(existing);
                     }
+                    retire_stale_cleanup_claim_for_change_tx(
+                        tx,
+                        &req.openspec_change_id,
+                        lease_now,
+                        now,
+                    )?;
 
                     let meta_task_id = format!("openspec:{}", req.openspec_change_id);
-                    ensure_meta_task_is_schedulable(tx, &meta_task_id)?;
+                    ensure_meta_task_exists(tx, &meta_task_id)?;
                     let cleanup_subtask_id =
                         format!("openspec:{}:cleanup:archive", req.openspec_change_id);
                     let title = SubtaskTitle::parse(format!(
@@ -1054,8 +1062,29 @@ impl Covey {
                             now,
                         ],
                     )?;
+                    tx.execute(
+                        r#"
+                        UPDATE subtasks
+                        SET state = ?2, current_claim_id = NULL, updated_at = ?3
+                        WHERE subtask_id = ?1
+                          AND kind = ?4
+                          AND state = ?5
+                        "#,
+                        params![
+                            cleanup_subtask_id,
+                            subtask_state_name(SubtaskState::Available),
+                            now,
+                            subtask_kind_name(SubtaskKind::Cleanup),
+                            subtask_state_name(SubtaskState::Abandoned),
+                        ],
+                    )?;
                     let fence_seq = issue_fence_seq(tx, &cleanup_subtask_id)?;
-                    let claim_id = crate::model::make_id("claim");
+                    let claim_id = reusable_cleanup_claim_id_tx(
+                        tx,
+                        &req.openspec_change_id,
+                        &cleanup_subtask_id,
+                    )?
+                    .unwrap_or_else(|| crate::model::make_id("claim"));
                     let lease_deadline =
                         LeaseDeadlineMs::parse(lease_now + CLEANUP_LEASE_MS)?;
                     tx.execute(
@@ -1064,6 +1093,12 @@ impl Covey {
                             claim_id, subtask_id, owner_session_token, fence_seq,
                             lease_deadline, state, created_at, updated_at
                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                        ON CONFLICT(claim_id) DO UPDATE SET
+                            owner_session_token = excluded.owner_session_token,
+                            fence_seq = excluded.fence_seq,
+                            lease_deadline = excluded.lease_deadline,
+                            state = excluded.state,
+                            updated_at = excluded.updated_at
                         "#,
                         params![
                             claim_id,
@@ -1150,6 +1185,13 @@ impl Covey {
                             archive_paths_json, archive_proof_digest, recorded_by_session,
                             created_at, updated_at
                         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?6)
+                        ON CONFLICT(openspec_change_id) DO UPDATE SET
+                            cleanup_subtask_id = excluded.cleanup_subtask_id,
+                            cleanup_claim_id = excluded.cleanup_claim_id,
+                            archive_paths_json = excluded.archive_paths_json,
+                            archive_proof_digest = NULL,
+                            recorded_by_session = excluded.recorded_by_session,
+                            updated_at = excluded.updated_at
                         "#,
                         params![
                             req.openspec_change_id.as_str(),
@@ -1229,7 +1271,7 @@ impl Covey {
                         &req.openspec_change_id,
                     )?;
                     if open_blockers.is_empty() {
-                        return archived_cleanup_finish_tx(tx, &req);
+                        return archived_cleanup_finish_tx(tx, &req, now);
                     }
                     for blocker in &open_blockers {
                         let status_req = RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
@@ -1290,6 +1332,11 @@ impl Covey {
                             now,
                             claim_state_name(ClaimState::Held),
                         ],
+                    )?;
+                    release_active_reservations_for_subtask_tx(
+                        tx,
+                        cleanup_subtask_id.as_str(),
+                        now,
                     )?;
                     tx.execute(
                         r#"
@@ -1765,12 +1812,10 @@ fn archive_eligibility_for_change_tx(
     let pending_subtasks = scoped_subtasks
         .iter()
         .filter(|subtask| {
-            !matches!(
-                subtask.state(),
-                SubtaskState::Applied | SubtaskState::Abandoned
-            ) && !repaired_source_subtask_ids
-                .iter()
-                .any(|repaired| repaired == &subtask.subtask_id)
+            subtask.state() != SubtaskState::Applied
+                && !repaired_source_subtask_ids
+                    .iter()
+                    .any(|repaired| repaired == &subtask.subtask_id)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1868,6 +1913,7 @@ fn load_cleanup_claim_for_change_tx(
     tx: &Transaction<'_>,
     openspec_change_id: &OpenSpecChangeId,
     open_archive_blockers: Vec<OpenSpecArchiveStatus>,
+    lease_now: i64,
 ) -> Result<Option<OpenSpecArchiveCleanupClaim>> {
     let row = tx
         .query_row(
@@ -1890,11 +1936,20 @@ fn load_cleanup_claim_for_change_tx(
     let Some((cleanup_subtask_id, cleanup_claim_id, archive_paths_json)) = row else {
         return Ok(None);
     };
-    let claim = tx.query_row(
-        "SELECT fence_seq FROM claims WHERE claim_id = ?1 AND state = ?2",
-        params![cleanup_claim_id, claim_state_name(ClaimState::Held)],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let claim = tx
+        .query_row(
+            "SELECT fence_seq FROM claims WHERE claim_id = ?1 AND state = ?2 AND lease_deadline > ?3",
+            params![
+                cleanup_claim_id,
+                claim_state_name(ClaimState::Held),
+                lease_now,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
     let archive_paths = serde_json::from_str::<Vec<String>>(&archive_paths_json)?
         .into_iter()
         .map(crate::model::RepoopsPath::parse)
@@ -1907,6 +1962,121 @@ fn load_cleanup_claim_for_change_tx(
         archive_paths,
         open_archive_blockers,
     )))
+}
+
+fn retire_stale_cleanup_claim_for_change_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+    lease_now: i64,
+    now: i64,
+) -> Result<()> {
+    let row = tx
+        .query_row(
+            r#"
+            SELECT cleanup_subtask_id, cleanup_claim_id
+            FROM openspec_archive_cleanup_claims oc
+            LEFT JOIN claims c ON c.claim_id = oc.cleanup_claim_id
+            WHERE oc.openspec_change_id = ?1
+              AND oc.archive_proof_digest IS NULL
+              AND (
+                  c.claim_id IS NULL
+                  OR c.state != ?2
+                  OR c.lease_deadline <= ?3
+              )
+            "#,
+            params![
+                openspec_change_id.as_str(),
+                claim_state_name(ClaimState::Held),
+                lease_now,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((cleanup_subtask_id, cleanup_claim_id)) = row else {
+        return Ok(());
+    };
+    tx.execute(
+        r#"
+        UPDATE claims
+        SET state = ?2, updated_at = ?3
+        WHERE claim_id = ?1
+          AND state = ?4
+        "#,
+        params![
+            cleanup_claim_id,
+            claim_state_name(ClaimState::Expired),
+            now,
+            claim_state_name(ClaimState::Held),
+        ],
+    )?;
+    tx.execute(
+        r#"
+        UPDATE subtasks
+        SET state = ?2, current_claim_id = NULL, updated_at = ?3
+        WHERE subtask_id = ?1
+          AND current_claim_id = ?4
+        "#,
+        params![
+            cleanup_subtask_id,
+            subtask_state_name(SubtaskState::Available),
+            now,
+            cleanup_claim_id,
+        ],
+    )?;
+    release_active_reservations_for_subtask_tx(tx, &cleanup_subtask_id, now)?;
+    Ok(())
+}
+
+fn reusable_cleanup_claim_id_tx(
+    tx: &Transaction<'_>,
+    openspec_change_id: &OpenSpecChangeId,
+    cleanup_subtask_id: &str,
+) -> Result<Option<String>> {
+    let current_claim_id = tx
+        .query_row(
+            r#"
+            SELECT s.current_claim_id
+            FROM subtasks s
+            JOIN claims c ON c.claim_id = s.current_claim_id
+            WHERE s.subtask_id = ?1
+              AND c.state = ?2
+            "#,
+            params![cleanup_subtask_id, claim_state_name(ClaimState::Held)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if current_claim_id.is_some() {
+        return Ok(current_claim_id);
+    }
+
+    let claim_id = tx
+        .query_row(
+            r#"
+            SELECT cleanup_claim_id
+            FROM openspec_archive_cleanup_claims
+            WHERE openspec_change_id = ?1
+            "#,
+            params![openspec_change_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if claim_id.is_some() {
+        return Ok(claim_id);
+    }
+
+    tx.query_row(
+        r#"
+        SELECT claim_id
+        FROM claims
+        WHERE subtask_id = ?1
+        ORDER BY updated_at DESC, created_at DESC, claim_id DESC
+        LIMIT 1
+        "#,
+        params![cleanup_subtask_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn cleanup_subtask_id_for_change_tx(
@@ -1930,6 +2100,7 @@ fn cleanup_subtask_id_for_change_tx(
 fn archived_cleanup_finish_tx(
     tx: &Transaction<'_>,
     req: &FinishOpenSpecArchiveCleanupReq,
+    now: i64,
 ) -> Result<OpenSpecArchiveCleanupFinish> {
     let (cleanup_subtask_id, proof): (String, Option<String>) = tx.query_row(
         r#"
@@ -1973,6 +2144,7 @@ fn archived_cleanup_finish_tx(
         .into_iter()
         .map(QueueId::parse)
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    release_active_reservations_for_subtask_tx(tx, &cleanup_subtask_id, now)?;
     Ok(OpenSpecArchiveCleanupFinish {
         openspec_change_id: req.openspec_change_id.clone(),
         archive_proof_digest: req.archive_proof_digest.clone(),
@@ -1980,6 +2152,28 @@ fn archived_cleanup_finish_tx(
         cleanup_subtask_id: crate::model::SubtaskId::parse(cleanup_subtask_id)?,
         cleanup_claim_id: req.cleanup_claim_id.clone(),
     })
+}
+
+fn release_active_reservations_for_subtask_tx(
+    tx: &Transaction<'_>,
+    owner_subtask_id: &str,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        r#"
+        UPDATE reservations
+        SET state = ?2, updated_at = ?3
+        WHERE owner_subtask_id = ?1
+          AND state = ?4
+        "#,
+        params![
+            owner_subtask_id,
+            reservation_state_name(ReservationState::Released),
+            now,
+            reservation_state_name(ReservationState::Active),
+        ],
+    )?;
+    Ok(())
 }
 
 fn enqueue_orphaned_ready_for_apply_items_tx(

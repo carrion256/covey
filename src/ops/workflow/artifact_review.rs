@@ -958,6 +958,7 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
     created_by_session: &str,
     now: i64,
 ) -> Result<Vec<String>> {
+    let mut revived_followup_subtask_ids = revive_abandoned_review_followups_tx(tx, now)?;
     let mut stmt = tx.prepare(
         r#"
         SELECT r.review_id
@@ -1010,6 +1011,62 @@ pub(crate) fn ensure_changes_requested_followup_blocks_tx(
             now,
         )?;
         followup_subtask_ids.push(followup_subtask_id.to_string());
+    }
+    revived_followup_subtask_ids.extend(followup_subtask_ids);
+    Ok(revived_followup_subtask_ids)
+}
+
+fn revive_abandoned_review_followups_tx(tx: &Transaction<'_>, now: i64) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT f.followup_subtask_id
+        FROM reviews r
+        JOIN subtasks source ON source.subtask_id = r.subtask_id
+        JOIN review_followup_subtasks f ON f.review_id = r.review_id
+        JOIN subtasks followup ON followup.subtask_id = f.followup_subtask_id
+        WHERE r.state = ?1
+          AND r.verdict IN (?2, ?3)
+          AND source.kind = ?4
+          AND source.state IN (?5, ?6)
+          AND followup.kind = ?4
+          AND followup.state = ?7
+          AND followup.current_claim_id IS NULL
+          AND followup.artifact_digest IS NULL
+        ORDER BY followup.updated_at ASC, followup.subtask_id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            review_state_name(ReviewState::Decided),
+            review_verdict_name(ReviewVerdict::ChangesRequested),
+            review_verdict_name(ReviewVerdict::Blocked),
+            subtask_kind_name(SubtaskKind::Work),
+            subtask_state_name(SubtaskState::ChangesRequested),
+            subtask_state_name(SubtaskState::Blocked),
+            subtask_state_name(SubtaskState::Abandoned),
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let followup_subtask_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for followup_subtask_id in &followup_subtask_ids {
+        tx.execute(
+            r#"
+            UPDATE subtasks
+            SET state = ?2, updated_at = ?3
+            WHERE subtask_id = ?1
+              AND state = ?4
+              AND current_claim_id IS NULL
+              AND artifact_digest IS NULL
+            "#,
+            params![
+                followup_subtask_id,
+                subtask_state_name(SubtaskState::Available),
+                now,
+                subtask_state_name(SubtaskState::Abandoned),
+            ],
+        )?;
     }
     Ok(followup_subtask_ids)
 }

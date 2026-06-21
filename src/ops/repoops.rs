@@ -2,15 +2,17 @@
 
 use std::{borrow::Cow, collections::HashMap, time::Instant};
 
+use rusqlite::{OptionalExtension, params};
+
 use crate::{
     Covey,
     error::Result,
     model::{
-        Claim, RepoopsAuthorityClaimFact, RepoopsAuthorityClaimStatus,
+        Claim, ClaimState, RepoopsAuthorityClaimFact, RepoopsAuthorityClaimStatus,
         RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact, RepoopsAuthorityPolicyFact,
         RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshot, RepoopsAuthoritySnapshotCommon,
         RepoopsAuthoritySnapshotReq, RepoopsClaimRef, Reservation, ScopeClass, Session,
-        SubtaskState,
+        SubtaskKind, SubtaskState, claim_state_name, subtask_kind_name,
     },
     queries::{load_repoops_relevant_reservations_tx, load_subtask_tx},
     validators::require_current_claim,
@@ -36,8 +38,9 @@ impl Covey {
             let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
             let session = crate::queries::load_session_tx(tx, &req.session_token)?;
             let paths = normalize_requested_paths(req.paths());
-            let reservations =
+            let mut reservations =
                 load_repoops_relevant_reservations_tx(tx, now, &claim.subtask_id, &paths)?;
+            retain_live_reservations_tx(tx, &mut reservations, &claim.subtask_id)?;
             let prepared_reservations = prepare_reservations(&reservations);
             let scope_in = scope_patterns_for_subtask(&prepared_reservations, &claim.subtask_id);
             let scope = RepoopsAuthorityScopeFact::new(scope_in.clone(), Vec::new())
@@ -103,6 +106,49 @@ impl Covey {
         );
         result
     }
+}
+
+fn retain_live_reservations_tx(
+    tx: &rusqlite::Transaction<'_>,
+    reservations: &mut Vec<Reservation>,
+    current_subtask_id: &str,
+) -> Result<()> {
+    let mut live_reservations = Vec::with_capacity(reservations.len());
+    for reservation in reservations.drain(..) {
+        if reservation.owner_subtask_id == current_subtask_id
+            || !reservation_owner_is_stale_cleanup_tx(tx, &reservation.owner_subtask_id)?
+        {
+            live_reservations.push(reservation);
+        }
+    }
+    *reservations = live_reservations;
+    Ok(())
+}
+
+fn reservation_owner_is_stale_cleanup_tx(
+    tx: &rusqlite::Transaction<'_>,
+    owner_subtask_id: &str,
+) -> Result<bool> {
+    let stale_cleanup = tx
+        .query_row(
+            r#"
+            SELECT 1
+            FROM subtasks s
+            LEFT JOIN claims c ON c.claim_id = s.current_claim_id
+            WHERE s.subtask_id = ?1
+              AND s.kind = ?2
+              AND (s.current_claim_id IS NULL OR c.state != ?3)
+            "#,
+            params![
+                owner_subtask_id,
+                subtask_kind_name(SubtaskKind::Cleanup),
+                claim_state_name(ClaimState::Held),
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(stale_cleanup)
 }
 
 fn repoops_claim_status_for_subtask(state: SubtaskState) -> RepoopsAuthorityClaimStatus {

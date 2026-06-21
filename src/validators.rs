@@ -183,7 +183,7 @@ pub(crate) fn require_session_can_claim_kind(session: &Session, kind: SubtaskKin
     let allowed = match kind {
         SubtaskKind::Work => session.role == SessionRole::Executor,
         SubtaskKind::Review => session.role == SessionRole::Reviewer,
-        SubtaskKind::Cleanup => false,
+        SubtaskKind::Cleanup => session.role == SessionRole::Orchestrator,
     };
     if allowed {
         Ok(())
