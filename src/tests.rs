@@ -1760,7 +1760,7 @@ fn openspec_current_work_blocks_applied_queue_without_landing_receipt() {
         current.blockers[0].allowed_repairs,
         vec![
             "mutai-scheduler orchestrator current-work",
-            "mutai-scheduler orchestrator recover operator-blocked"
+            "mutai-scheduler orchestrator recover landing-receipt"
         ]
     );
     assert_eq!(

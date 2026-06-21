@@ -1309,7 +1309,7 @@ impl OpenSpecCurrentWorkBlocker {
             owner: OpenSpecCurrentWorkOwner::ApplyGate,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator current-work",
-                "mutai-scheduler orchestrator recover operator-blocked",
+                "mutai-scheduler orchestrator recover landing-receipt",
             ]),
             subtask_id: Some(
                 SubtaskId::parse(queue_item.subtask_id().to_owned())
