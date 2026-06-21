@@ -1571,6 +1571,39 @@ fn openspec_current_work_does_not_archive_when_any_scoped_subtask_is_non_termina
 }
 
 #[test]
+fn openspec_current_work_defers_archive_blocker_until_all_scoped_subtasks_terminal() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-unarchived-pending-sibling");
+    seed_archive_scoped_subtask(
+        &covey,
+        "current-unarchived-pending-sibling",
+        "current-unarchived-pending-applied",
+        Some("queue-current-unarchived-pending"),
+        "blake3:current-unarchived-pending",
+        "applied",
+        2,
+    );
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-unarchived-pending-sibling",
+        "current-unarchived-pending-open",
+        "available",
+        None,
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-unarchived-pending-sibling")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Imported);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Executor);
+    assert_eq!(current.archive_blockers.len(), 1);
+    assert!(current.blockers.is_empty());
+}
+
+#[test]
 fn openspec_current_work_applied_but_unarchived_is_named_blocker() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -1983,7 +2016,7 @@ fn openspec_current_work_reports_native_settlement_reconcile_failed_apply() {
 }
 
 #[test]
-fn openspec_current_work_applied_but_unarchived_precedes_subtask_blockers() {
+fn openspec_current_work_subtask_blockers_precede_archive_until_all_scoped_subtasks_terminal() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
     seed_archive_session_and_meta(&covey, "current-precedence");
@@ -2010,34 +2043,24 @@ fn openspec_current_work_applied_but_unarchived_precedes_subtask_blockers() {
         .expect("current work");
 
     assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
-    assert_eq!(
-        current.next_owner,
-        OpenSpecCurrentWorkOwner::OpenSpecArchive
-    );
-    assert_eq!(current.blockers.len(), 2);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Executor);
+    assert_eq!(current.blockers.len(), 1);
     assert_eq!(
         current.blockers[0].kind,
-        OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived
-    );
-    assert_eq!(
-        current.blockers[0].evidence_id,
-        "openspec_current_work:applied_but_unarchived:queue-current-precedence:blake3:current-precedence-applied"
-    );
-    assert_eq!(
-        current.blockers[1].kind,
         OpenSpecCurrentWorkBlockerKind::SubtaskBlocked
     );
     assert_eq!(
-        current.blockers[1].evidence_id,
+        current.blockers[0].evidence_id,
         "openspec_current_work:subtask_blocked:current-precedence-blocked:changes_requested"
     );
     assert_eq!(
-        current.blockers[1].allowed_repairs,
+        current.blockers[0].allowed_repairs,
         vec![
             "mutai-scheduler orchestrator recover subtask",
             "mutai-scheduler orchestrator recover redispatch"
         ]
     );
+    assert_eq!(current.archive_blockers.len(), 1);
 }
 
 #[test]

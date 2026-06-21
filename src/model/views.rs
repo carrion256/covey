@@ -1827,6 +1827,12 @@ fn current_work_blockers(
             openspec_change_id,
         )];
     }
+    let all_scoped_subtasks_terminal = subtasks.iter().all(|subtask| {
+        subtask.state() == SubtaskState::Applied
+            || repaired_source_subtask_ids
+                .iter()
+                .any(|repaired| repaired == &subtask.subtask_id)
+    });
     let mut blockers = queue_items
         .iter()
         .filter(|item| item.state() == ReadyQueueState::Applied)
@@ -1837,11 +1843,13 @@ fn current_work_blockers(
         })
         .map(OpenSpecCurrentWorkBlocker::applied_without_landing_receipt)
         .collect::<Vec<_>>();
-    blockers.extend(
-        open_archive_blockers
-            .iter()
-            .map(OpenSpecCurrentWorkBlocker::applied_but_unarchived),
-    );
+    if all_scoped_subtasks_terminal {
+        blockers.extend(
+            open_archive_blockers
+                .iter()
+                .map(OpenSpecCurrentWorkBlocker::applied_but_unarchived),
+        );
+    }
     blockers.extend(apply_gate_blockers.iter().map(|blocker| {
         OpenSpecCurrentWorkBlocker::apply_gate_blocked(
             blocker,
