@@ -1604,6 +1604,52 @@ fn openspec_current_work_defers_archive_blocker_until_all_scoped_subtasks_termin
 }
 
 #[test]
+fn openspec_current_work_defers_missing_landing_receipt_until_all_scoped_subtasks_terminal() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-receipt-pending-sibling");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-receipt-pending-sibling",
+        "current-receipt-pending-applied",
+        "applied",
+        Some("blake3:current-receipt-pending"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-receipt-pending-applied",
+        "queue-current-receipt-pending",
+        "blake3:current-receipt-pending",
+        "applied",
+        2,
+    );
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-receipt-pending-sibling",
+        "current-receipt-pending-open",
+        "available",
+        None,
+        3,
+    );
+
+    let current = covey
+        .openspec_current_work("current-receipt-pending-sibling")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Imported);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Executor);
+    assert!(
+        current
+            .blockers
+            .iter()
+            .all(|blocker| blocker.reason != "landing_receipt_missing"),
+        "landing receipt cleanup must not hide open sibling work: {:?}",
+        current.blockers
+    );
+}
+
+#[test]
 fn openspec_current_work_applied_but_unarchived_is_named_blocker() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");

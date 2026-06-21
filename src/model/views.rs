@@ -1833,17 +1833,19 @@ fn current_work_blockers(
                 .iter()
                 .any(|repaired| repaired == &subtask.subtask_id)
     });
-    let mut blockers = queue_items
-        .iter()
-        .filter(|item| item.state() == ReadyQueueState::Applied)
-        .filter(|item| {
-            !landing_receipt_queue_ids
-                .iter()
-                .any(|queue_id| queue_id.as_str() == item.queue_id())
-        })
-        .map(OpenSpecCurrentWorkBlocker::applied_without_landing_receipt)
-        .collect::<Vec<_>>();
+    let mut blockers = Vec::new();
     if all_scoped_subtasks_terminal {
+        blockers.extend(
+            queue_items
+                .iter()
+                .filter(|item| item.state() == ReadyQueueState::Applied)
+                .filter(|item| {
+                    !landing_receipt_queue_ids
+                        .iter()
+                        .any(|queue_id| queue_id.as_str() == item.queue_id())
+                })
+                .map(OpenSpecCurrentWorkBlocker::applied_without_landing_receipt),
+        );
         blockers.extend(
             open_archive_blockers
                 .iter()
@@ -1862,17 +1864,19 @@ fn current_work_blockers(
             queue_item_by_id(queue_items, &blocker.queue_id),
         )
     }));
-    blockers.extend(
-        queue_items
-            .iter()
-            .filter(|item| item.state() == ReadyQueueState::Applied)
-            .filter(|item| {
-                !archive_statuses
-                    .iter()
-                    .any(|status| status.queue_id.as_str() == item.queue_id())
-            })
-            .map(OpenSpecCurrentWorkBlocker::applied_queue_unarchived),
-    );
+    if all_scoped_subtasks_terminal {
+        blockers.extend(
+            queue_items
+                .iter()
+                .filter(|item| item.state() == ReadyQueueState::Applied)
+                .filter(|item| {
+                    !archive_statuses
+                        .iter()
+                        .any(|status| status.queue_id.as_str() == item.queue_id())
+                })
+                .map(OpenSpecCurrentWorkBlocker::applied_queue_unarchived),
+        );
+    }
     blockers.extend(subtasks.iter().filter_map(|subtask| {
         (matches!(
             subtask.state(),
