@@ -4,12 +4,12 @@ use rusqlite::{OptionalExtension, Transaction, params, types::Type};
 
 use crate::{
     Covey,
-    error::Result,
+    error::{CoveyError, Result},
     model::{
         ApplyGateBlocker, ApplyGateBlockerKind, Claim, ClaimState, OpenSpecArchiveStatus,
-        OpenSpecChangeId, OpenSpecCurrentWork, OpenSpecCurrentWorkStaleClaim, OperatorBlocker,
-        ReadyQueueItem, Review, SettlementReconcileBlocker, SettlementReconcileReason, SubtaskId,
-        SubtaskRow, SubtaskView,
+        OpenSpecChangeId, OpenSpecCurrentWork, OpenSpecCurrentWorkBlockerResolution,
+        OpenSpecCurrentWorkStaleClaim, OperatorBlocker, ReadyQueueItem, Review,
+        SettlementReconcileBlocker, SettlementReconcileReason, SubtaskId, SubtaskRow, SubtaskView,
     },
     ops::operator_blocker::operator_blocker_select_sql,
     queries::{collect_rows, deserialize_row},
@@ -121,6 +121,115 @@ impl Covey {
         );
         result
     }
+
+    /// Resolves one live current-work blocker by stable blocker id.
+    ///
+    /// Synthetic missing-import blocker ids are resolved from their embedded
+    /// OpenSpec change id. Durable operator blockers are resolved through the
+    /// authoritative operator-blocker row. Other ids are matched against known
+    /// OpenSpec current-work projections. Unknown, stale, or ambiguous ids fail
+    /// without mutation.
+    pub fn resolve_openspec_current_work_blocker(
+        &self,
+        blocker_id: &str,
+        stale_claim_older_than_ms: Option<i64>,
+    ) -> Result<OpenSpecCurrentWorkBlockerResolution> {
+        if !blocker_id.starts_with("blocker_") {
+            return Err(CoveyError::CurrentWorkBlockerNotFound {
+                blocker_id: blocker_id.to_owned(),
+            });
+        }
+        if let Some(change_id) = blocker_id
+            .strip_prefix("blocker_openspec_current_work_missing_import_")
+            .filter(|value| !value.is_empty())
+        {
+            return self.resolve_current_work_blocker_for_change(
+                change_id,
+                blocker_id,
+                stale_claim_older_than_ms,
+            );
+        }
+        if let Some(operator_blocker_id) = blocker_id
+            .strip_prefix("blocker_openspec_current_work_operator_blocked_")
+            .filter(|value| !value.is_empty())
+        {
+            let operator_blocker = self.operator_blocker(operator_blocker_id)?;
+            return self.resolve_current_work_blocker_for_change(
+                operator_blocker.openspec_change_id.as_str(),
+                blocker_id,
+                stale_claim_older_than_ms,
+            );
+        }
+
+        let change_ids = self.with_read_tx(load_current_work_change_ids_tx)?;
+        let mut matches = Vec::new();
+        for change_id in change_ids {
+            if let Ok(resolution) = self.resolve_current_work_blocker_for_change(
+                change_id.as_str(),
+                blocker_id,
+                stale_claim_older_than_ms,
+            ) {
+                matches.push(resolution);
+            }
+        }
+        match matches.len() {
+            0 => Err(CoveyError::CurrentWorkBlockerNotFound {
+                blocker_id: blocker_id.to_owned(),
+            }),
+            1 => Ok(matches.remove(0)),
+            _ => Err(CoveyError::AmbiguousCurrentWorkBlocker {
+                blocker_id: blocker_id.to_owned(),
+            }),
+        }
+    }
+
+    fn resolve_current_work_blocker_for_change(
+        &self,
+        change_id: &str,
+        blocker_id: &str,
+        stale_claim_older_than_ms: Option<i64>,
+    ) -> Result<OpenSpecCurrentWorkBlockerResolution> {
+        let current_work = self.openspec_current_work_with_stale_claim_threshold(
+            change_id,
+            stale_claim_older_than_ms,
+        )?;
+        let blocker = current_work
+            .blockers
+            .iter()
+            .find(|blocker| blocker.blocker_id == blocker_id)
+            .cloned()
+            .ok_or_else(|| CoveyError::CurrentWorkBlockerNotFound {
+                blocker_id: blocker_id.to_owned(),
+            })?;
+        Ok(OpenSpecCurrentWorkBlockerResolution {
+            openspec_change_id: current_work.openspec_change_id.clone(),
+            current_work,
+            blocker,
+        })
+    }
+}
+
+fn load_current_work_change_ids_tx(tx: &Transaction<'_>) -> Result<Vec<OpenSpecChangeId>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT openspec_change_id
+        FROM openspec_subtask_scope
+        UNION
+        SELECT openspec_change_id
+        FROM openspec_archive_status
+        UNION
+        SELECT openspec_change_id
+        FROM operator_blockers
+        ORDER BY openspec_change_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        row.get::<_, String>(0).and_then(|raw| {
+            OpenSpecChangeId::parse(raw)
+                .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, err.into()))
+        })
+    })?;
+    collect_rows(rows)
 }
 
 fn load_current_work_stale_claims_tx(

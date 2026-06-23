@@ -19,6 +19,7 @@ pub enum ObjectType {
     OperatorBlocker,
     ApplyGateBlocker,
     SettlementReconcileBlocker,
+    ApplyWorktree,
 }
 
 pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
@@ -36,6 +37,7 @@ pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
         ObjectType::OperatorBlocker => "operator_blocker",
         ObjectType::ApplyGateBlocker => "apply_gate_blocker",
         ObjectType::SettlementReconcileBlocker => "settlement_reconcile_blocker",
+        ObjectType::ApplyWorktree => "apply_worktree",
     }
 }
 
@@ -196,6 +198,30 @@ pub enum EventType {
     OpenSpecImported,
     OperatorBlockerRecorded,
     OperatorBlockerResolved,
+    ApplyWorktreeRecorded,
+    ApplyWorktreeStateRecorded,
+}
+
+/// Covey-owned lifecycle state for apply worktrees retained as evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ApplyWorktreeState {
+    Active,
+    Applied,
+    Archived,
+    RetainedEvidence,
+    CleanupAllowed,
+}
+
+pub(crate) const fn apply_worktree_state_name(state: ApplyWorktreeState) -> &'static str {
+    match state {
+        ApplyWorktreeState::Active => "active",
+        ApplyWorktreeState::Applied => "applied",
+        ApplyWorktreeState::Archived => "archived",
+        ApplyWorktreeState::RetainedEvidence => "retained_evidence",
+        ApplyWorktreeState::CleanupAllowed => "cleanup_allowed",
+    }
 }
 
 /// Current-work target kind for explicit operator blockers.
@@ -521,4 +547,6 @@ pub enum StateValue {
     OpenSpecArchiveStatus(OpenSpecArchiveStatusState),
     #[display("{_0}")]
     ConflictResolution(ConflictResolutionState),
+    #[display("{_0}")]
+    ApplyWorktree(ApplyWorktreeState),
 }

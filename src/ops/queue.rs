@@ -8,22 +8,24 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ApplyQueueReconcileResult, ArtifactKind, BeginOpenSpecArchiveCleanupReq, ClaimId,
-        ClaimReadyQueueReq, ClaimResult, ClaimState, EnqueueForApplyReq, EventType, FenceSeq,
-        FindingsDigest, FinishOpenSpecArchiveCleanupReq, LandingAuthorizationStatus,
-        LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
-        OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility,
-        OpenSpecArchiveStatus, OpenSpecArchiveStatusState, OpenSpecChangeId, QueueId,
-        ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
+        ApplyQueueReconcileResult, ApplyWorktree, ApplyWorktreeState, ArtifactKind,
+        BeginOpenSpecArchiveCleanupReq, ClaimId, ClaimReadyQueueReq, ClaimResult, ClaimState,
+        EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest, FinishOpenSpecArchiveCleanupReq,
+        LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkApplyWorktreeStateReq,
+        MarkInFlightReq, MetaTaskState, ObjectType, OpenSpecArchiveCleanupClaim,
+        OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility, OpenSpecArchiveStatus,
+        OpenSpecArchiveStatusState, OpenSpecChangeId, QueueId, ReadyQueueCandidate,
+        ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
         ReconcileApplyQueueReq, RecordApplyGateBlockerReq, RecordApplyVerificationReq,
-        RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
+        RecordApplyWorktreeReq, RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
         RecordSettlementReconcileBlockerReq, ReleaseClaimReq, ReservationState, ReviewId,
         ReviewState, ReviewVerdict, RuntimeAttestation, ScopeClass, Session, SessionRole,
         SessionToken, SettlementTarget, SubtaskKind, SubtaskState, SubtaskTitle, SubtaskView,
         SupersedeQueueItemReq, VerifyLandingAuthorizationReq, apply_gate_blocker_kind_name,
-        claim_state_name, meta_task_state_name, openspec_archive_status_state_name,
-        ready_queue_state_name, reservation_state_name, review_state_name, review_verdict_name,
-        scope_class_name, settlement_reconcile_reason_name, subtask_kind_name, subtask_state_name,
+        apply_worktree_state_name, claim_state_name, meta_task_state_name,
+        openspec_archive_status_state_name, ready_queue_state_name, reservation_state_name,
+        review_state_name, review_verdict_name, scope_class_name, settlement_reconcile_reason_name,
+        subtask_kind_name, subtask_state_name,
     },
     queries::{
         collect_rows, deserialize_row, load_artifact_tx, load_queue_item_tx, load_session_tx,
@@ -485,6 +487,168 @@ impl Covey {
         result
     }
 
+    /// Records an apply-gate worktree in the Covey-owned evidence registry.
+    pub fn record_apply_worktree(&self, req: RecordApplyWorktreeReq) -> Result<ApplyWorktree> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "record_apply_worktree",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    let session = require_role(tx, &req.session_token, &[SessionRole::ApplyGate])?;
+                    require_runtime_attestation(tx, &session)?;
+                    ensure_length("queue_id", &req.queue_id, MAX_OBJECT_ID_LEN)?;
+                    ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
+
+                    let item = load_queue_item_tx(tx, req.queue_id.as_str())?;
+                    let queue_id = QueueId::parse(item.queue_id())?;
+                    if item.state() != ReadyQueueState::InFlight
+                        || item.artifact_digest() != req.artifact_digest.as_str()
+                    {
+                        return Err(CoveyError::ApplyGateEvidenceMissing {
+                            queue_id,
+                            reason:
+                                "apply worktree must target the current in-flight queue artifact"
+                                    .to_owned(),
+                        });
+                    }
+                    let queue_owner = item
+                        .claimed_by_session_token()
+                        .map(SessionToken::parse)
+                        .transpose()?
+                        .ok_or_else(|| CoveyError::ApplyGateEvidenceMissing {
+                            queue_id: req.queue_id.clone(),
+                            reason: "apply worktree requires an owned in-flight queue claim"
+                                .to_owned(),
+                        })?;
+                    if queue_owner != req.session_token {
+                        return Err(CoveyError::NotQueueClaimOwner {
+                            session_token: req.session_token.clone(),
+                            queue_owner,
+                        });
+                    }
+
+                    tx.execute(
+                        r#"
+                        INSERT INTO apply_worktrees (
+                            path, queue_id, artifact_digest, state, recorded_by_session,
+                            created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                        "#,
+                        params![
+                            req.path.as_str(),
+                            req.queue_id.as_str(),
+                            req.artifact_digest.as_str(),
+                            apply_worktree_state_name(ApplyWorktreeState::Active),
+                            req.session_token.as_str(),
+                            now,
+                        ],
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::ApplyWorktreeRecorded,
+                        ObjectType::ApplyWorktree,
+                        req.path.as_str(),
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    load_apply_worktree_tx(tx, req.path.as_str())
+                },
+            )
+        });
+        self.log_operation(
+            "record_apply_worktree",
+            &req.session_token,
+            started_at,
+            &result,
+            |worktree| vec![format!("worktree:{}", worktree.path)],
+        );
+        result
+    }
+
+    /// Advances a registered apply worktree lifecycle state.
+    pub fn mark_apply_worktree_state(
+        &self,
+        req: MarkApplyWorktreeStateReq,
+    ) -> Result<ApplyWorktree> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "mark_apply_worktree_state",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(
+                        tx,
+                        &req.session_token,
+                        &[SessionRole::ApplyGate, SessionRole::Orchestrator],
+                    )?;
+                    let existing = load_apply_worktree_tx(tx, req.path.as_str())?;
+                    ensure_apply_worktree_transition(existing.state, req.state)?;
+                    tx.execute(
+                        "UPDATE apply_worktrees SET state = ?2, updated_at = ?3 WHERE path = ?1",
+                        params![req.path.as_str(), apply_worktree_state_name(req.state), now],
+                    )?;
+                    append_session_event(
+                        tx,
+                        EventType::ApplyWorktreeStateRecorded,
+                        ObjectType::ApplyWorktree,
+                        req.path.as_str(),
+                        &req.session_token,
+                        &req,
+                        now,
+                    )?;
+                    load_apply_worktree_tx(tx, req.path.as_str())
+                },
+            )
+        });
+        self.log_operation(
+            "mark_apply_worktree_state",
+            &req.session_token,
+            started_at,
+            &result,
+            |worktree| vec![format!("worktree:{}", worktree.path)],
+        );
+        result
+    }
+
+    /// Returns cleanup-eligible registered apply worktrees created before the cutoff.
+    pub fn apply_worktree_cleanup_candidates(
+        &self,
+        older_than_created_at_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ApplyWorktree>> {
+        self.with_read_tx(|tx| {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT path, queue_id, artifact_digest, state, recorded_by_session,
+                       created_at, updated_at
+                FROM apply_worktrees
+                WHERE state = ?1 AND created_at <= ?2
+                ORDER BY created_at, path
+                LIMIT ?3
+                "#,
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    apply_worktree_state_name(ApplyWorktreeState::CleanupAllowed),
+                    older_than_created_at_ms.max(0),
+                    limit as i64,
+                ],
+                deserialize_row::<ApplyWorktree>,
+            )?;
+            collect_rows(rows)
+        })
+    }
+
     /// Records native apply-gate blocker evidence for the current apply attempt.
     pub fn record_apply_gate_blocker(&self, req: RecordApplyGateBlockerReq) -> Result<()> {
         let started_at = Instant::now();
@@ -784,6 +948,12 @@ impl Covey {
                         now,
                         req.idempotency_key.as_str(),
                     )?;
+                    mark_apply_worktrees_for_queue_tx(
+                        tx,
+                        item.queue_id(),
+                        ApplyWorktreeState::Applied,
+                        now,
+                    )?;
                     refresh_meta_task_state(tx, &subtask.meta_task_id, now)?;
                     append_session_event(
                         tx,
@@ -880,6 +1050,12 @@ impl Covey {
                             && req.state == OpenSpecArchiveStatusState::Archived
                         {
                             update_openspec_archive_status_tx(tx, &req, item.subtask_id(), now)?;
+                            mark_apply_worktrees_for_queue_tx(
+                                tx,
+                                req.queue_id.as_str(),
+                                ApplyWorktreeState::CleanupAllowed,
+                                now,
+                            )?;
                             append_session_event(
                                 tx,
                                 EventType::OpenSpecArchiveStatusRecorded,
@@ -899,6 +1075,14 @@ impl Covey {
                     }
 
                     insert_openspec_archive_status_tx(tx, &req, item.subtask_id(), now, now)?;
+                    if req.state == OpenSpecArchiveStatusState::Archived {
+                        mark_apply_worktrees_for_queue_tx(
+                            tx,
+                            req.queue_id.as_str(),
+                            ApplyWorktreeState::CleanupAllowed,
+                            now,
+                        )?;
+                    }
                     append_session_event(
                         tx,
                         EventType::OpenSpecArchiveStatusRecorded,
@@ -1292,6 +1476,12 @@ impl Covey {
                             tx,
                             &status_req,
                             blocker.subtask_id(),
+                            now,
+                        )?;
+                        mark_apply_worktrees_for_queue_tx(
+                            tx,
+                            blocker.queue_id(),
+                            ApplyWorktreeState::CleanupAllowed,
                             now,
                         )?;
                         append_session_event(
@@ -2922,6 +3112,85 @@ fn runtime_ref(attestation: &RuntimeAttestation) -> (Option<&str>, Option<&str>)
 
 fn provider_run_ref(attestation: &RuntimeAttestation) -> Option<(&str, &str)> {
     attestation.provider_run_ref()
+}
+
+fn load_apply_worktree_tx(tx: &Transaction<'_>, path: &str) -> Result<ApplyWorktree> {
+    tx.query_row(
+        r#"
+        SELECT path, queue_id, artifact_digest, state, recorded_by_session, created_at, updated_at
+        FROM apply_worktrees
+        WHERE path = ?1
+        "#,
+        params![path],
+        deserialize_row::<ApplyWorktree>,
+    )
+    .map_err(Into::into)
+}
+
+fn ensure_apply_worktree_transition(
+    from: ApplyWorktreeState,
+    to: ApplyWorktreeState,
+) -> Result<()> {
+    let allowed = matches!(
+        (from, to),
+        (ApplyWorktreeState::Active, ApplyWorktreeState::Applied)
+            | (
+                ApplyWorktreeState::Active,
+                ApplyWorktreeState::RetainedEvidence
+            )
+            | (
+                ApplyWorktreeState::Applied,
+                ApplyWorktreeState::CleanupAllowed
+            )
+            | (
+                ApplyWorktreeState::Applied,
+                ApplyWorktreeState::RetainedEvidence
+            )
+            | (
+                ApplyWorktreeState::CleanupAllowed,
+                ApplyWorktreeState::Archived | ApplyWorktreeState::RetainedEvidence
+            )
+    ) || from == to;
+    if allowed {
+        Ok(())
+    } else {
+        Err(CoveyError::IllegalTransition {
+            from: from.into(),
+            to: to.into(),
+            object: ObjectType::ApplyWorktree,
+        })
+    }
+}
+
+fn mark_apply_worktrees_for_queue_tx(
+    tx: &Transaction<'_>,
+    queue_id: &str,
+    state: ApplyWorktreeState,
+    now: i64,
+) -> Result<()> {
+    let from_states: &[ApplyWorktreeState] = match state {
+        ApplyWorktreeState::Applied => &[ApplyWorktreeState::Active],
+        ApplyWorktreeState::CleanupAllowed => {
+            &[ApplyWorktreeState::Active, ApplyWorktreeState::Applied]
+        }
+        _ => &[],
+    };
+    for from in from_states {
+        tx.execute(
+            r#"
+            UPDATE apply_worktrees
+            SET state = ?3, updated_at = ?4
+            WHERE queue_id = ?1 AND state = ?2
+            "#,
+            params![
+                queue_id,
+                apply_worktree_state_name(*from),
+                apply_worktree_state_name(state),
+                now,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

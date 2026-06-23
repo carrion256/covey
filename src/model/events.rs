@@ -72,6 +72,12 @@ impl EventPayload {
             EventType::ReadyQueueApplied => {
                 Self::ReadyQueueApplied(serde_json::from_str(payload_json)?)
             }
+            EventType::ApplyWorktreeRecorded => {
+                Self::ApplyWorktreeRecorded(serde_json::from_str(payload_json)?)
+            }
+            EventType::ApplyWorktreeStateRecorded => {
+                Self::ApplyWorktreeStateRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::OpenSpecArchiveStatusRecorded => {
                 Self::OpenSpecArchiveStatusRecorded(serde_json::from_str(payload_json)?)
             }

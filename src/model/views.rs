@@ -1170,6 +1170,63 @@ pub enum OpenSpecCurrentWorkBlockerKind {
     OperatorBlocked,
 }
 
+/// Bounded recovery selected for a current-work blocker.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenSpecCurrentWorkRepairAction {
+    RunOpenSpec,
+    RecoverSubtask,
+    RecoverExpiredClaim,
+    RecoverDeadClaim,
+    RecoverQueue,
+    ArchiveOpenSpec,
+    RecoverLandingReceipt,
+    ResolveOperatorBlocker,
+    FailClosed,
+}
+
+/// Whether a repair playbook can inspect only, or may mutate Covey/repo state.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenSpecCurrentWorkRepairSafety {
+    Safe,
+    Mutating,
+}
+
+/// Derived operator playbook for one current-work blocker.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSpecCurrentWorkRepairPlaybook {
+    pub repair_action: OpenSpecCurrentWorkRepairAction,
+    pub repair_safety: OpenSpecCurrentWorkRepairSafety,
+    pub required_evidence_id: String,
+    pub expected_postcondition: String,
+    pub rollback_retry_note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_command: Option<String>,
+}
+
+impl OpenSpecCurrentWorkRepairPlaybook {
+    fn new(
+        repair_action: OpenSpecCurrentWorkRepairAction,
+        repair_safety: OpenSpecCurrentWorkRepairSafety,
+        required_evidence_id: impl Into<String>,
+        expected_postcondition: impl Into<String>,
+        rollback_retry_note: impl Into<String>,
+    ) -> Self {
+        Self {
+            repair_action,
+            repair_safety,
+            required_evidence_id: required_evidence_id.into(),
+            expected_postcondition: expected_postcondition.into(),
+            rollback_retry_note: rollback_retry_note.into(),
+            repair_command: None,
+        }
+    }
+}
+
 /// Covey-derived stale claim fact for one OpenSpec current-work projection.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1189,6 +1246,7 @@ pub struct OpenSpecCurrentWorkBlocker {
     pub owner: OpenSpecCurrentWorkOwner,
     #[serde(default)]
     pub allowed_repairs: Vec<String>,
+    pub repair_playbook: OpenSpecCurrentWorkRepairPlaybook,
     pub subtask_id: Option<SubtaskId>,
     pub claim_id: Option<ClaimId>,
     pub queue_id: Option<QueueId>,
@@ -1201,18 +1259,26 @@ impl OpenSpecCurrentWorkBlocker {
     /// Builds a missing-import blocker.
     #[must_use]
     pub fn missing_import(openspec_change_id: &OpenSpecChangeId) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:missing_import:{}",
+            openspec_change_id.as_str()
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_missing_import_{}",
                 openspec_change_id.as_str()
             ),
-            evidence_id: format!(
-                "openspec_current_work:missing_import:{}",
-                openspec_change_id.as_str()
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::MissingImport,
             owner: OpenSpecCurrentWorkOwner::Covey,
             allowed_repairs: repair_commands(&["mutai-scheduler orchestrator run-openspec"]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::RunOpenSpec,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "Covey current-work contains scoped subtasks for the OpenSpec change",
+                "rerun repair after fixing OpenSpec import readiness; no partial Covey import is assumed",
+            ),
             subtask_id: None,
             claim_id: None,
             queue_id: None,
@@ -1228,22 +1294,30 @@ impl OpenSpecCurrentWorkBlocker {
     /// Builds a blocker for an applied queue item that still needs archive cleanup.
     #[must_use]
     pub fn applied_but_unarchived(status: &OpenSpecArchiveStatus) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:applied_but_unarchived:{}:{}",
+            status.queue_id.as_str(),
+            status.artifact_digest.as_str()
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_applied_but_unarchived_{}",
                 status.queue_id.as_str()
             ),
-            evidence_id: format!(
-                "openspec_current_work:applied_but_unarchived:{}:{}",
-                status.queue_id.as_str(),
-                status.artifact_digest.as_str()
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived,
             owner: OpenSpecCurrentWorkOwner::OpenSpecArchive,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator archive-openspec",
                 "mutai-scheduler orchestrator recover open-spec-archive-status",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::ArchiveOpenSpec,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "OpenSpec archive status is archived for the applied queue artifact",
+                "retry archive-openspec after resolving authority preflight or OpenSpec archive errors",
+            ),
             subtask_id: Some(status.subtask_id.clone()),
             claim_id: None,
             queue_id: Some(status.queue_id.clone()),
@@ -1259,22 +1333,30 @@ impl OpenSpecCurrentWorkBlocker {
     /// Builds a blocker for an applied queue item that has no archive status row yet.
     #[must_use]
     pub fn applied_queue_unarchived(queue_item: &ReadyQueueItem) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:applied_but_unarchived:{}:{}",
+            queue_item.queue_id(),
+            queue_item.artifact_digest()
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_applied_but_unarchived_{}",
                 queue_item.queue_id()
             ),
-            evidence_id: format!(
-                "openspec_current_work:applied_but_unarchived:{}:{}",
-                queue_item.queue_id(),
-                queue_item.artifact_digest()
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived,
             owner: OpenSpecCurrentWorkOwner::OpenSpecArchive,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator archive-openspec",
                 "mutai-scheduler orchestrator recover open-spec-archive-status",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::ArchiveOpenSpec,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "OpenSpec archive status is archived for the applied queue artifact",
+                "retry archive-openspec after materializing the archive blocker or fixing archive preflight",
+            ),
             subtask_id: Some(
                 SubtaskId::parse(queue_item.subtask_id().to_owned())
                     .expect("loaded queue subtask id is valid"),
@@ -1295,22 +1377,30 @@ impl OpenSpecCurrentWorkBlocker {
     /// Builds a blocker for an applied queue item that lacks a durable landing receipt.
     #[must_use]
     pub fn applied_without_landing_receipt(queue_item: &ReadyQueueItem) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:landing_receipt_missing:{}:{}",
+            queue_item.queue_id(),
+            queue_item.artifact_digest()
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_landing_receipt_missing_{}",
                 queue_item.queue_id()
             ),
-            evidence_id: format!(
-                "openspec_current_work:landing_receipt_missing:{}:{}",
-                queue_item.queue_id(),
-                queue_item.artifact_digest()
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty,
             owner: OpenSpecCurrentWorkOwner::ApplyGate,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator current-work",
                 "mutai-scheduler orchestrator recover landing-receipt",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::RecoverLandingReceipt,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "A durable landing receipt exists for the applied queue artifact and fence",
+                "fail closed unless accepted local landing authorization and landed commit evidence are derivable",
+            ),
             subtask_id: Some(
                 SubtaskId::parse(queue_item.subtask_id().to_owned())
                     .expect("loaded queue subtask id is valid"),
@@ -1344,6 +1434,13 @@ impl OpenSpecCurrentWorkBlocker {
                 OpenSpecCurrentWorkOwner::ApplyGate,
             ),
         };
+        let repair_action = match kind {
+            OpenSpecCurrentWorkBlockerKind::AuthorityHold
+            | OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty => {
+                OpenSpecCurrentWorkRepairAction::FailClosed
+            }
+            _ => OpenSpecCurrentWorkRepairAction::FailClosed,
+        };
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_apply_gate_{}_{}",
@@ -1357,6 +1454,13 @@ impl OpenSpecCurrentWorkBlocker {
                 "mutai-scheduler orchestrator current-work",
                 "mutai-scheduler orchestrator recover operator-blocked",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                repair_action,
+                OpenSpecCurrentWorkRepairSafety::Safe,
+                blocker.evidence_id.as_str(),
+                "Authority or apply-gate evidence is supplied externally and the blocker is absent from current-work",
+                "do not synthesize Authority/operator evidence; rerun after authoritative reconcile evidence exists",
+            ),
             subtask_id: queue_item.map(|item| {
                 SubtaskId::parse(item.subtask_id().to_owned()).expect("loaded subtask id is valid")
             }),
@@ -1388,6 +1492,13 @@ impl OpenSpecCurrentWorkBlocker {
                 OpenSpecCurrentWorkOwner::ApplyGate,
             ),
         };
+        let repair_action = match kind {
+            OpenSpecCurrentWorkBlockerKind::AuthorityHold
+            | OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty => {
+                OpenSpecCurrentWorkRepairAction::FailClosed
+            }
+            _ => OpenSpecCurrentWorkRepairAction::FailClosed,
+        };
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_settlement_reconcile_{}_{}",
@@ -1401,6 +1512,13 @@ impl OpenSpecCurrentWorkBlocker {
                 "mutai-scheduler orchestrator current-work",
                 "mutai-scheduler orchestrator recover operator-blocked",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                repair_action,
+                OpenSpecCurrentWorkRepairSafety::Safe,
+                blocker.authority_evidence_id.as_str(),
+                "Settlement reconcile evidence is supplied externally and the blocker is absent from current-work",
+                "do not synthesize Authority/operator evidence; rerun after authoritative reconcile evidence exists",
+            ),
             subtask_id: queue_item.map(|item| {
                 SubtaskId::parse(item.subtask_id().to_owned()).expect("loaded subtask id is valid")
             }),
@@ -1415,22 +1533,30 @@ impl OpenSpecCurrentWorkBlocker {
     /// Builds a blocker for a terminal blocked or changes-requested subtask.
     #[must_use]
     pub fn subtask_blocked(subtask: &SubtaskView) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:subtask_blocked:{}:{}",
+            subtask.subtask_id.as_str(),
+            subtask.state()
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_subtask_blocked_{}",
                 subtask.subtask_id.as_str()
             ),
-            evidence_id: format!(
-                "openspec_current_work:subtask_blocked:{}:{}",
-                subtask.subtask_id.as_str(),
-                subtask.state()
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::SubtaskBlocked,
             owner: OpenSpecCurrentWorkOwner::Executor,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator recover subtask",
                 "mutai-scheduler orchestrator recover redispatch",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::RecoverSubtask,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "The subtask is no longer blocked without a repair follow-up or explicit operator blocker",
+                "retry after creating or resolving the repair follow-up; do not abandon unrelated subtasks",
+            ),
             subtask_id: Some(subtask.subtask_id.clone()),
             claim_id: subtask.active_claim_id().cloned(),
             queue_id: None,
@@ -1443,22 +1569,30 @@ impl OpenSpecCurrentWorkBlocker {
     /// Builds a blocker for a scoped held claim whose lease has expired.
     #[must_use]
     pub fn expired_claim(claim: &Claim, lease_now_ms: i64) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:expired_claim:{}:{}",
+            claim.subtask_id.as_str(),
+            claim.claim_id.as_str()
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_expired_claim_{}",
                 claim.claim_id.as_str()
             ),
-            evidence_id: format!(
-                "openspec_current_work:expired_claim:{}:{}",
-                claim.subtask_id.as_str(),
-                claim.claim_id.as_str()
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::ExpiredClaim,
             owner: OpenSpecCurrentWorkOwner::Covey,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator recover expired-claim",
                 "mutai-scheduler orchestrator recover redispatch",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::RecoverExpiredClaim,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "The expired claim is released or no longer attached to the scoped subtask",
+                "retry only for the same claim id; do not downgrade to unlocked work",
+            ),
             subtask_id: Some(claim.subtask_id.clone()),
             claim_id: Some(claim.claim_id.clone()),
             queue_id: None,
@@ -1477,23 +1611,31 @@ impl OpenSpecCurrentWorkBlocker {
     /// explicit current-work idleness threshold but has not expired.
     #[must_use]
     pub fn stale_claim(stale: &OpenSpecCurrentWorkStaleClaim) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:stale_claim:{}:{}:{}",
+            stale.claim.subtask_id.as_str(),
+            stale.claim.claim_id.as_str(),
+            stale.threshold_ms
+        );
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_stale_claim_{}",
                 stale.claim.claim_id.as_str()
             ),
-            evidence_id: format!(
-                "openspec_current_work:stale_claim:{}:{}:{}",
-                stale.claim.subtask_id.as_str(),
-                stale.claim.claim_id.as_str(),
-                stale.threshold_ms
-            ),
+            evidence_id: evidence_id.clone(),
             kind: OpenSpecCurrentWorkBlockerKind::StaleClaim,
             owner: OpenSpecCurrentWorkOwner::Covey,
             allowed_repairs: repair_commands(&[
                 "mutai-scheduler orchestrator recover dead-claim",
                 "mutai-scheduler orchestrator recover operator-blocked",
             ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::RecoverDeadClaim,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "The stale scheduler-owned claim is released only when pane/artifact safety checks pass",
+                "if safety checks fail, leave the blocker open with evidence and retry after operator inspection",
+            ),
             subtask_id: Some(stale.claim.subtask_id.clone()),
             claim_id: Some(stale.claim.claim_id.clone()),
             queue_id: None,
@@ -1512,23 +1654,36 @@ impl OpenSpecCurrentWorkBlocker {
     #[must_use]
     pub fn operator_blocked(blocker: &OperatorBlocker) -> Self {
         let kind = operator_blocker_kind(blocker.reason.as_str());
+        let evidence_id = blocker.source_evidence_id.as_ref().map_or_else(
+            || {
+                format!(
+                    "openspec_current_work:operator_blocked:{}",
+                    blocker.blocker_id.as_str()
+                )
+            },
+            |evidence| evidence.as_str().to_owned(),
+        );
+        let repair_action = operator_blocker_repair_action(kind, blocker.queue_id.is_some());
+        let repair_safety = match repair_action {
+            OpenSpecCurrentWorkRepairAction::FailClosed => OpenSpecCurrentWorkRepairSafety::Safe,
+            _ => OpenSpecCurrentWorkRepairSafety::Mutating,
+        };
         Self {
             blocker_id: format!(
                 "blocker_openspec_current_work_operator_blocked_{}",
                 blocker.blocker_id.as_str()
             ),
-            evidence_id: blocker.source_evidence_id.as_ref().map_or_else(
-                || {
-                    format!(
-                        "openspec_current_work:operator_blocked:{}",
-                        blocker.blocker_id.as_str()
-                    )
-                },
-                |evidence| evidence.as_str().to_owned(),
-            ),
+            evidence_id: evidence_id.clone(),
             kind,
             owner: OpenSpecCurrentWorkOwner::Operator,
             allowed_repairs: operator_blocker_repairs(kind),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                repair_action,
+                repair_safety,
+                evidence_id,
+                operator_blocker_expected_postcondition(kind),
+                operator_blocker_rollback_note(kind),
+            ),
             subtask_id: Some(blocker.subtask_id.clone()),
             claim_id: None,
             queue_id: blocker.queue_id.clone(),
@@ -1539,12 +1694,22 @@ impl OpenSpecCurrentWorkBlocker {
     }
 }
 
+/// Resolved blocker lookup result.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenSpecCurrentWorkBlockerResolution {
+    pub openspec_change_id: OpenSpecChangeId,
+    pub current_work: OpenSpecCurrentWork,
+    pub blocker: OpenSpecCurrentWorkBlocker,
+}
+
 fn operator_blocker_kind(reason: &str) -> OpenSpecCurrentWorkBlockerKind {
     match reason {
         "scheduler_state_loss"
         | "assignment_pane_missing"
         | "missing_assignments_json"
         | "unreadable_assignments_json" => OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss,
+        "stale_claim" => OpenSpecCurrentWorkBlockerKind::StaleClaim,
         "hook_state_stale_claim" | "hook_state_stale_claim_context" => {
             OpenSpecCurrentWorkBlockerKind::HookStateStaleClaim
         }
@@ -1599,6 +1764,84 @@ fn operator_blocker_repairs(kind: OpenSpecCurrentWorkBlockerKind) -> Vec<String>
         }
     };
     repair_commands(commands)
+}
+
+fn operator_blocker_repair_action(
+    kind: OpenSpecCurrentWorkBlockerKind,
+    has_queue_target: bool,
+) -> OpenSpecCurrentWorkRepairAction {
+    match kind {
+        OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss => {
+            if has_queue_target {
+                OpenSpecCurrentWorkRepairAction::RecoverQueue
+            } else {
+                OpenSpecCurrentWorkRepairAction::RecoverSubtask
+            }
+        }
+        OpenSpecCurrentWorkBlockerKind::StaleClaim => {
+            OpenSpecCurrentWorkRepairAction::RecoverDeadClaim
+        }
+        OpenSpecCurrentWorkBlockerKind::HookStateStaleClaim
+        | OpenSpecCurrentWorkBlockerKind::HookStateStaleLandingAuthorization
+        | OpenSpecCurrentWorkBlockerKind::HookStateInvalidLandingAuthorization
+        | OpenSpecCurrentWorkBlockerKind::AuthorityHold
+        | OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty
+        | OpenSpecCurrentWorkBlockerKind::OperatorBlocked => {
+            OpenSpecCurrentWorkRepairAction::FailClosed
+        }
+        OpenSpecCurrentWorkBlockerKind::MissingImport => {
+            OpenSpecCurrentWorkRepairAction::RunOpenSpec
+        }
+        OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived => {
+            OpenSpecCurrentWorkRepairAction::ArchiveOpenSpec
+        }
+        OpenSpecCurrentWorkBlockerKind::SubtaskBlocked => {
+            OpenSpecCurrentWorkRepairAction::RecoverSubtask
+        }
+        OpenSpecCurrentWorkBlockerKind::ExpiredClaim => {
+            OpenSpecCurrentWorkRepairAction::RecoverExpiredClaim
+        }
+    }
+}
+
+fn operator_blocker_expected_postcondition(kind: OpenSpecCurrentWorkBlockerKind) -> &'static str {
+    match kind {
+        OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss => {
+            "The named scheduler target has been reconciled and the durable operator blocker is resolved"
+        }
+        OpenSpecCurrentWorkBlockerKind::StaleClaim => {
+            "The stale scheduler-owned claim is released only when pane/artifact safety checks pass"
+        }
+        OpenSpecCurrentWorkBlockerKind::HookStateStaleClaim
+        | OpenSpecCurrentWorkBlockerKind::HookStateStaleLandingAuthorization
+        | OpenSpecCurrentWorkBlockerKind::HookStateInvalidLandingAuthorization => {
+            "Hook-local state no longer contradicts live Covey current-work facts"
+        }
+        OpenSpecCurrentWorkBlockerKind::AuthorityHold
+        | OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty => {
+            "Authoritative reconcile evidence exists and current-work no longer reports the blocker"
+        }
+        _ => {
+            "The durable operator blocker is resolved only after its typed postcondition is externally satisfied"
+        }
+    }
+}
+
+fn operator_blocker_rollback_note(kind: OpenSpecCurrentWorkBlockerKind) -> &'static str {
+    match kind {
+        OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss => {
+            "retry the bounded target recovery; leave the durable blocker open if the target still lacks evidence"
+        }
+        OpenSpecCurrentWorkBlockerKind::StaleClaim => {
+            "if pane/artifact checks fail, keep the blocker open and rerun current-work after inspection"
+        }
+        OpenSpecCurrentWorkBlockerKind::AuthorityHold
+        | OpenSpecCurrentWorkBlockerKind::GitApplyUncertainty
+        | OpenSpecCurrentWorkBlockerKind::OperatorBlocked => {
+            "fail closed without mutation; do not synthesize missing operator or Authority evidence"
+        }
+        _ => "fail closed without broad maintenance fallback",
+    }
 }
 
 fn repair_commands(commands: &[&str]) -> Vec<String> {

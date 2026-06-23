@@ -156,6 +156,27 @@ fn validate_manifest_path(
     Ok(())
 }
 
+fn validate_worktree_path(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    const MAX_WORKTREE_PATH_LEN: usize = 4 * 1024;
+
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > MAX_WORKTREE_PATH_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 4096 bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_normalized_text(
     field: &'static str,
     value: &str,
@@ -680,6 +701,7 @@ string_newtype!(
     "manifest_path",
     validate_manifest_path
 );
+string_newtype!(ApplyWorktreePath, "worktree_path", validate_worktree_path);
 string_newtype!(ChangedPathsDigest, "changed_paths_digest", validate_digest);
 string_newtype!(FindingsDigest, "findings_digest", validate_digest);
 string_newtype!(

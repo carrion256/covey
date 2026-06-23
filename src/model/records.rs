@@ -4,18 +4,19 @@ use std::collections::HashSet;
 
 use super::{
     AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId,
-    ApplyGateBlockerKind, ApplyGateBlockerReason, ArtifactDigest, ArtifactKind,
-    ArtifactManifestPath, BaseRev, CancelMetaTaskReq, ChangedPathsDigest, ClaimId, ClaimResult,
-    ClaimState, CommandTranscriptDigest, ConflictId, ConflictKind, ConflictResolutionState,
-    CoveyTypeValidationError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq,
-    EventObjectId, EventSeq, EventType, ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq,
-    ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq, MetaTaskId, MetaTaskState, ModelId,
-    ObjectType, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
+    ApplyGateBlockerKind, ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState,
+    ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev, CancelMetaTaskReq,
+    ChangedPathsDigest, ClaimId, ClaimResult, ClaimState, CommandTranscriptDigest, ConflictId,
+    ConflictKind, ConflictResolutionState, CoveyTypeValidationError, CreateSubtaskRequest,
+    DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, ExitSessionReq,
+    FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq,
+    MarkApplyWorktreeStateReq, MetaTaskId, MetaTaskState, ModelId, ObjectType,
+    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
     OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerState,
     OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
     PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyGateBlockerReq,
-    RecordApplyVerificationReq, RecordOpenSpecArchiveStatusReq, RecordOperatorBlockerReq,
-    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
+    RecordApplyVerificationReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
+    RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
     RecordSettlementReconcileBlockerReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
     ReservationId, ReservationState, ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId,
     ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
@@ -3622,6 +3623,18 @@ impl<'de> Deserialize<'de> for ReadyQueueItem {
     }
 }
 
+/// Covey-owned registry row for an apply-gate-created worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyWorktree {
+    pub path: ApplyWorktreePath,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub state: ApplyWorktreeState,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
 /// Durable cleanup status for an applied OpenSpec-imported queue item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpecArchiveStatus {
@@ -4473,6 +4486,8 @@ pub enum EventPayload {
     ApplyGateBlockerRecorded(RecordApplyGateBlockerReq),
     SettlementReconcileBlockerRecorded(RecordSettlementReconcileBlockerReq),
     ReadyQueueApplied(MarkAppliedReq),
+    ApplyWorktreeRecorded(RecordApplyWorktreeReq),
+    ApplyWorktreeStateRecorded(MarkApplyWorktreeStateReq),
     OpenSpecArchiveStatusRecorded(RecordOpenSpecArchiveStatusReq),
     OperatorBlockerRecorded(RecordOperatorBlockerReq),
     OperatorBlockerResolved(ResolveOperatorBlockerReq),
@@ -4516,6 +4531,8 @@ impl EventPayload {
                 EventType::SettlementReconcileBlockerRecorded
             }
             Self::ReadyQueueApplied(_) => EventType::ReadyQueueApplied,
+            Self::ApplyWorktreeRecorded(_) => EventType::ApplyWorktreeRecorded,
+            Self::ApplyWorktreeStateRecorded(_) => EventType::ApplyWorktreeStateRecorded,
             Self::OpenSpecArchiveStatusRecorded(_) => EventType::OpenSpecArchiveStatusRecorded,
             Self::OperatorBlockerRecorded(_) => EventType::OperatorBlockerRecorded,
             Self::OperatorBlockerResolved(_) => EventType::OperatorBlockerResolved,
@@ -4558,8 +4575,11 @@ impl EventPayload {
             | Self::ApplyGateBlockerRecorded(_)
             | Self::SettlementReconcileBlockerRecorded(_)
             | Self::ReadyQueueApplied(_)
-            | Self::OpenSpecArchiveStatusRecorded(_)
             | Self::ReadyQueueSuperseded(_) => ObjectType::ReadyQueue,
+            Self::ApplyWorktreeRecorded(_) | Self::ApplyWorktreeStateRecorded(_) => {
+                ObjectType::ApplyWorktree
+            }
+            Self::OpenSpecArchiveStatusRecorded(_) => ObjectType::ReadyQueue,
             Self::OperatorBlockerRecorded(_) | Self::OperatorBlockerResolved(_) => {
                 ObjectType::OperatorBlocker
             }

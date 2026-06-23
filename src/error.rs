@@ -169,6 +169,10 @@ pub enum CoveyError {
     InvalidReadyQueueMetrics { reason: String },
     #[error("invalid observability row shape: {reason}")]
     InvalidObservabilityRow { reason: String },
+    #[error("current-work blocker not found for {blocker_id}")]
+    CurrentWorkBlockerNotFound { blocker_id: String },
+    #[error("current-work blocker id {blocker_id} is ambiguous")]
+    AmbiguousCurrentWorkBlocker { blocker_id: String },
     #[error(
         "import duplicate for source issue {source_issue_id}: subtask {subtask_id} already exists"
     )]
@@ -190,20 +194,21 @@ pub enum CoveyError {
 impl PartialEq for CoveyError {
     fn eq(&self, other: &Self) -> bool {
         use CoveyError::{
-            ApplyGateEvidenceMissing, ApplyGateSeparationOfDutiesViolation,
-            ArtifactDigestCollision, ArtifactNotFound, ClaimNotFound, ClaimNotHeld,
-            ConflictNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
-            IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
-            InputTooLarge, InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination,
-            InvalidImportRow, InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath,
-            InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
-            InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
-            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
-            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
-            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
-            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
-            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
+            AmbiguousCurrentWorkBlocker, ApplyGateEvidenceMissing,
+            ApplyGateSeparationOfDutiesViolation, ArtifactDigestCollision, ArtifactNotFound,
+            ClaimNotFound, ClaimNotHeld, ConflictNotFound, CurrentWorkBlockerNotFound,
+            DatabaseError, DuplicateSubtaskId, FenceTokenMismatch, IdempotencyConflict,
+            IllegalTransition, ImportDuplicate, ImportSourceNotFound, InputTooLarge,
+            InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination, InvalidImportRow,
+            InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath, InvalidReadyQueueMetrics,
+            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema, LeaseExpired,
+            MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
+            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
+            ReviewKindMismatch, ReviewNotFound, RuntimeAttestationMissing,
+            SeparationOfDutiesViolation, SerializationError, SessionAlreadyActive,
+            SessionAlreadyHasActiveSubtask, SessionNotActive, SessionNotFound, StaleFenceToken,
+            StaleReviewArtifact, SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError,
+            UnknownArtifactDigest, WrongRole,
         };
 
         match (self, other) {
@@ -558,6 +563,22 @@ impl PartialEq for CoveyError {
                     reason: right_reason,
                 },
             ) => left_reason == right_reason,
+            (
+                CurrentWorkBlockerNotFound {
+                    blocker_id: left_id,
+                },
+                CurrentWorkBlockerNotFound {
+                    blocker_id: right_id,
+                },
+            )
+            | (
+                AmbiguousCurrentWorkBlocker {
+                    blocker_id: left_id,
+                },
+                AmbiguousCurrentWorkBlocker {
+                    blocker_id: right_id,
+                },
+            ) => left_id == right_id,
             (
                 ImportDuplicate {
                     source_issue_id: left_id,

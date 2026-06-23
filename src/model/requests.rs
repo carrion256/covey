@@ -10,16 +10,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
     AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId, ApplyGateBlockerKind,
-    ApplyGateBlockerReason, ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev,
-    ChangedPathsDigest, ClaimId, CommandTranscriptDigest, ConflictId, ConflictResolutionState,
-    CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid,
-    LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId, OpenSpecArchiveBlockedReason,
-    OpenSpecArchiveStatusState, OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId,
-    OperatorBlockerReason, OperatorBlockerTargetKind, PermissiveLandingReceiptDigest, PromptText,
-    ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId,
-    ReservationScope, ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass,
-    SessionRole, SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason,
-    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
+    ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState, ArtifactDigest, ArtifactKind,
+    ArtifactManifestPath, BaseRev, ChangedPathsDigest, ClaimId, CommandTranscriptDigest,
+    ConflictId, ConflictResolutionState, CoveyTypeValidationError, FenceSeq, FindingsDigest,
+    IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
+    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
+    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerTargetKind,
+    PermissiveLandingReceiptDigest, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
+    QueueId, RepoopsPath, ReservationId, ReservationScope, ReviewId, ReviewVerdict,
+    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole, SessionToken,
+    SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget, SubtaskId,
+    SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -1326,6 +1327,71 @@ impl MarkAppliedReq {
             session_token: SessionToken::parse(session_token.into())?,
             queue_id: QueueId::parse(queue_id.into())?,
             claim_fence_seq: FenceSeq::parse(claim_fence_seq.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record an apply-gate-created worktree as lifecycle evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordApplyWorktreeReq {
+    pub session_token: SessionToken,
+    pub queue_id: QueueId,
+    pub artifact_digest: ArtifactDigest,
+    pub path: ApplyWorktreePath,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordApplyWorktreeReq {
+    /// Builds an apply worktree registry request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, queue id, artifact digest,
+    /// worktree path, or idempotency key is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        queue_id: impl Into<String>,
+        artifact_digest: impl Into<String>,
+        path: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            queue_id: QueueId::parse(queue_id.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            path: ApplyWorktreePath::parse(path.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to advance a registered apply worktree lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkApplyWorktreeStateReq {
+    pub session_token: SessionToken,
+    pub path: ApplyWorktreePath,
+    pub state: ApplyWorktreeState,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl MarkApplyWorktreeStateReq {
+    /// Builds a worktree lifecycle transition request from raw scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, path, or idempotency key is
+    /// invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        path: impl Into<String>,
+        state: ApplyWorktreeState,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            path: ApplyWorktreePath::parse(path.into())?,
+            state,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }

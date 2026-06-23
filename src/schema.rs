@@ -57,6 +57,8 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::OpenSpecImported => "open_spec_imported",
         EventType::OperatorBlockerRecorded => "operator_blocker_recorded",
         EventType::OperatorBlockerResolved => "operator_blocker_resolved",
+        EventType::ApplyWorktreeRecorded => "apply_worktree_recorded",
+        EventType::ApplyWorktreeStateRecorded => "apply_worktree_state_recorded",
     }
 }
 

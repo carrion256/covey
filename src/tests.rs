@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use crate::{
-    BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock, Covey,
-    FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecArchiveStatusState,
-    OpenSpecCurrentWorkBlockerKind, OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkState,
-    OperatorBlockerState, OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
-    ReconcileChangesRequestedFollowupsReq, RecordOpenSpecArchiveStatusReq,
-    RecordOperatorBlockerReq, RegisterSessionReq, ReleaseClaimReq, ResolveOperatorBlockerReq,
-    Result, SessionRole, SubmitMetaTaskReq,
+    ApplyWorktreeState, BeginOpenSpecArchiveCleanupReq, ClaimNextReq, ClaimReadyQueueReq, Clock,
+    Covey, CoveyError, FinishOpenSpecArchiveCleanupReq, ManualClock, OpenSpecArchiveStatusState,
+    OpenSpecCurrentWorkBlockerKind, OpenSpecCurrentWorkOwner, OpenSpecCurrentWorkRepairAction,
+    OpenSpecCurrentWorkRepairSafety, OpenSpecCurrentWorkState, OperatorBlockerState,
+    OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
+    ReconcileChangesRequestedFollowupsReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
+    RecordOperatorBlockerReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
+    ResolveOperatorBlockerReq, Result, SessionRole, SubmitMetaTaskReq,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -439,6 +440,133 @@ fn seed_archive_scoped_subtask(
         )
         .expect("insert archive blocker");
     }
+}
+
+#[test]
+fn apply_worktree_registry_marks_cleanup_allowed_after_archive_receipt() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "change-worktree-cleanup");
+    let apply_gate = covey
+        .register_session(
+            RegisterSessionReq::try_from_raw_parts(
+                "apply-worktree-cleanup",
+                "apply-worktree-cleanup-1",
+                SessionRole::ApplyGate,
+                "register-apply-worktree-cleanup",
+            )
+            .expect("valid apply session"),
+        )
+        .expect("register apply gate");
+    covey
+        .record_runtime_attestation(
+            RecordRuntimeAttestationReq::try_from_parts(
+                apply_gate.session_token.to_string(),
+                "codex",
+                "gpt-5",
+                "provider-run-apply-worktree-cleanup",
+                "codex-cli",
+                Some("process-apply-worktree-cleanup".to_owned()),
+                None,
+                "blake3:apply-worktree-cleanup-transcript",
+                TEST_WALL_NOW_MS,
+                TEST_WALL_NOW_MS,
+                "runtime-apply-worktree-cleanup",
+            )
+            .expect("valid runtime attestation"),
+        )
+        .expect("record runtime attestation");
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
+             VALUES ('worktree-cleanup-work', 'openspec:change-worktree-cleanup', 'worktree cleanup work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 2, 2)",
+            [],
+        )
+        .expect("insert worktree cleanup subtask");
+        conn.execute(
+            "INSERT INTO openspec_subtask_scope (subtask_id, openspec_change_id, openspec_task_id, source_path, scenario_refs_json, updated_at)
+             VALUES ('worktree-cleanup-work', 'change-worktree-cleanup', 'task-worktree-cleanup', 'openspec/changes/change-worktree-cleanup/tasks.md', '[]', 2)",
+            [],
+        )
+        .expect("insert OpenSpec scope");
+        conn.execute(
+            "INSERT INTO artifacts (artifact_digest, artifact_kind, base_rev, produced_by_subtask_id, produced_by_session, manifest_path, changed_paths_digest, created_at)
+             VALUES ('blake3:worktree-cleanup-artifact', 'patch_bundle', 'base', 'worktree-cleanup-work', 'session-exec-archive', 'worktree-cleanup-work.json', 'blake3:paths-worktree-cleanup', 2)",
+            [],
+        )
+        .expect("insert artifact");
+        conn.execute(
+            "UPDATE subtasks SET state = 'ready_for_apply', artifact_digest = 'blake3:worktree-cleanup-artifact', updated_at = 2 WHERE subtask_id = 'worktree-cleanup-work'",
+            [],
+        )
+        .expect("mark worktree cleanup subtask ready");
+        conn.execute(
+            "INSERT INTO ready_queue (queue_id, artifact_digest, subtask_id, settlement_target, state, claimed_by_session_token, claim_fence_seq, claim_lease_deadline, enqueued_at, updated_at)
+             VALUES ('queue-worktree-cleanup', 'blake3:worktree-cleanup-artifact', 'worktree-cleanup-work', 'canonical', 'in_flight', ?1, 1, ?2, 2, 2)",
+            params![apply_gate.session_token.as_str(), TEST_WALL_NOW_MS + 60_000],
+        )
+        .expect("insert in-flight queue");
+    }
+
+    let registered = covey
+        .record_apply_worktree(
+            RecordApplyWorktreeReq::try_from_raw_parts(
+                apply_gate.session_token.to_string(),
+                "queue-worktree-cleanup",
+                "blake3:worktree-cleanup-artifact",
+                "/data/tmp/mutai-apply-worktree-cleanup",
+                "record-apply-worktree-cleanup",
+            )
+            .expect("valid worktree registry request"),
+        )
+        .expect("record apply worktree");
+    assert_eq!(registered.state, ApplyWorktreeState::Active);
+
+    {
+        let conn = covey.conn.lock().expect("covey connection mutex");
+        conn.execute(
+            "UPDATE ready_queue SET state = 'applied', claimed_by_session_token = NULL, claim_lease_deadline = NULL, updated_at = 3 WHERE queue_id = 'queue-worktree-cleanup'",
+            [],
+        )
+        .expect("mark queue applied");
+        conn.execute(
+            "UPDATE subtasks SET state = 'applied', updated_at = 3 WHERE subtask_id = 'worktree-cleanup-work'",
+            [],
+        )
+        .expect("mark subtask applied");
+        conn.execute(
+            "INSERT INTO openspec_archive_status (queue_id, subtask_id, artifact_digest, openspec_change_id, state, blocked_reason, archive_proof_digest, recorded_by_session, created_at, updated_at)
+             VALUES ('queue-worktree-cleanup', 'worktree-cleanup-work', 'blake3:worktree-cleanup-artifact', 'change-worktree-cleanup', 'blocked', 'applied_but_unarchived', NULL, 'session-orch-archive', 3, 3)",
+            [],
+        )
+        .expect("insert archive blocker");
+    }
+    covey
+        .record_openspec_archive_status(
+            RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
+                "session-orch-archive",
+                "queue-worktree-cleanup",
+                "blake3:worktree-cleanup-artifact",
+                "change-worktree-cleanup",
+                OpenSpecArchiveStatusState::Archived,
+                None,
+                Some("blake3:archive-proof-worktree-cleanup".to_owned()),
+                "archive-worktree-cleanup",
+            )
+            .expect("valid archive status"),
+        )
+        .expect("record archive receipt");
+
+    let candidates = covey
+        .apply_worktree_cleanup_candidates(TEST_WALL_NOW_MS, 10)
+        .expect("cleanup candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].path.as_str(),
+        "/data/tmp/mutai-apply-worktree-cleanup"
+    );
+    assert_eq!(candidates[0].state, ApplyWorktreeState::CleanupAllowed);
 }
 
 fn seed_current_work_scoped_subtask(
@@ -972,6 +1100,47 @@ fn openspec_current_work_reports_missing_import_as_blocked() {
 }
 
 #[test]
+fn resolves_synthetic_missing_import_current_work_blocker_by_id() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+
+    let resolved = covey
+        .resolve_openspec_current_work_blocker(
+            "blocker_openspec_current_work_missing_import_missing-current-work",
+            None,
+        )
+        .expect("resolve missing import blocker");
+
+    assert_eq!(resolved.openspec_change_id.as_str(), "missing-current-work");
+    assert_eq!(
+        resolved.blocker.kind,
+        OpenSpecCurrentWorkBlockerKind::MissingImport
+    );
+    assert_eq!(
+        resolved.blocker.repair_playbook.repair_action,
+        OpenSpecCurrentWorkRepairAction::RunOpenSpec
+    );
+}
+
+#[test]
+fn resolving_unknown_current_work_blocker_fails_without_projection() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+
+    let error = covey
+        .resolve_openspec_current_work_blocker(
+            "blocker_openspec_current_work_subtask_blocked_missing",
+            None,
+        )
+        .expect_err("unknown blocker must fail");
+
+    assert!(matches!(
+        error,
+        CoveyError::CurrentWorkBlockerNotFound { .. }
+    ));
+}
+
+#[test]
 fn openspec_current_work_reports_expired_claim_as_named_blocker() {
     let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
@@ -1070,6 +1239,18 @@ fn openspec_current_work_reports_stale_claim_when_threshold_is_explicit() {
             "mutai-scheduler orchestrator recover operator-blocked"
         ]
     );
+    assert!(matches!(
+        covey.resolve_openspec_current_work_blocker(&current.blockers[0].blocker_id, None),
+        Err(CoveyError::CurrentWorkBlockerNotFound { .. })
+    ));
+    let resolved = covey
+        .resolve_openspec_current_work_blocker(&current.blockers[0].blocker_id, Some(60_000))
+        .expect("resolve stale blocker with threshold");
+    assert_eq!(resolved.openspec_change_id.as_str(), "current-stale-claim");
+    assert_eq!(
+        resolved.blocker.repair_playbook.repair_action,
+        OpenSpecCurrentWorkRepairAction::RecoverDeadClaim
+    );
 }
 
 #[test]
@@ -1133,6 +1314,14 @@ fn openspec_current_work_reports_operator_blocker() {
             "mutai-scheduler orchestrator recover resolve-operator-blocker"
         ]
     );
+    let resolved = covey
+        .resolve_openspec_current_work_blocker(&current.blockers[0].blocker_id, None)
+        .expect("resolve durable operator blocker");
+    assert_eq!(
+        resolved.openspec_change_id.as_str(),
+        "current-operator-blocked"
+    );
+    assert_eq!(resolved.blocker, current.blockers[0]);
 }
 
 #[test]
@@ -1754,6 +1943,35 @@ fn openspec_current_work_applied_but_unarchived_is_named_blocker() {
             "mutai-scheduler orchestrator recover open-spec-archive-status"
         ]
     );
+    assert_eq!(
+        current.blockers[0].repair_playbook.repair_action,
+        OpenSpecCurrentWorkRepairAction::ArchiveOpenSpec
+    );
+    assert_eq!(
+        current.blockers[0].repair_playbook.repair_safety,
+        OpenSpecCurrentWorkRepairSafety::Mutating
+    );
+    assert_eq!(
+        current.blockers[0].repair_playbook.required_evidence_id,
+        current.blockers[0].evidence_id
+    );
+    assert!(
+        current.blockers[0]
+            .repair_playbook
+            .expected_postcondition
+            .contains("archived")
+    );
+    assert!(
+        current.blockers[0]
+            .repair_playbook
+            .rollback_retry_note
+            .contains("retry")
+    );
+    let resolved = covey
+        .resolve_openspec_current_work_blocker(&current.blockers[0].blocker_id, None)
+        .expect("resolve current-work blocker by id");
+    assert_eq!(resolved.openspec_change_id.as_str(), "current-unarchived");
+    assert_eq!(resolved.blocker, current.blockers[0]);
 }
 
 #[test]
