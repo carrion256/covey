@@ -426,12 +426,11 @@ fn load_current_work_landing_receipt_queue_ids_tx(
         format!(
             r#"
         {CURRENT_WORK_SCOPE_CTE}
-        SELECT receipt.queue_id
+        SELECT q.queue_id
         FROM current_scope scope
         JOIN ready_queue q ON q.subtask_id = scope.subtask_id
         JOIN landing_receipts receipt
-          ON receipt.queue_id = q.queue_id
-         AND receipt.artifact_digest = q.artifact_digest
+          ON receipt.artifact_digest = q.artifact_digest
         ORDER BY receipt.created_at ASC, receipt.queue_id ASC
         "#
         )

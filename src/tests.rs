@@ -2091,6 +2091,71 @@ fn openspec_current_work_blocks_applied_queue_without_landing_receipt() {
 }
 
 #[test]
+fn openspec_current_work_treats_duplicate_applied_queue_as_receipted_by_artifact() {
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-duplicate-receipt");
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-duplicate-receipt",
+        "current-duplicate-receipt-work",
+        "applied",
+        Some("blake3:current-duplicate-receipt"),
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-duplicate-receipt-work",
+        "queue-current-duplicate-receipt-original",
+        "blake3:current-duplicate-receipt",
+        "applied",
+        2,
+    );
+    seed_current_work_queue(
+        &covey,
+        "current-duplicate-receipt-work",
+        "queue-current-duplicate-receipt-requeue",
+        "blake3:current-duplicate-receipt",
+        "applied",
+        3,
+    );
+    seed_landing_receipt(
+        &covey,
+        "queue-current-duplicate-receipt-original",
+        "blake3:current-duplicate-receipt",
+        2,
+    );
+
+    let current = covey
+        .openspec_current_work("current-duplicate-receipt")
+        .expect("current work");
+
+    assert!(
+        current
+            .blockers
+            .iter()
+            .all(|blocker| blocker.reason != "landing_receipt_missing"),
+        "duplicate applied queues for an already receipted artifact must not require an impossible second receipt: {:?}",
+        current.blockers
+    );
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(
+        current.next_owner,
+        OpenSpecCurrentWorkOwner::OpenSpecArchive
+    );
+    assert_eq!(
+        current
+            .blockers
+            .iter()
+            .filter(|blocker| {
+                blocker.kind == OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived
+            })
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn openspec_current_work_reports_native_apply_gate_authority_hold() {
     let clock = Arc::new(ManualClock::new(1_700_000_000_000));
     let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
