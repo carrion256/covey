@@ -78,6 +78,18 @@ impl EventPayload {
             EventType::ApplyWorktreeStateRecorded => {
                 Self::ApplyWorktreeStateRecorded(serde_json::from_str(payload_json)?)
             }
+            EventType::VcsWorkspaceRecorded => {
+                Self::VcsWorkspaceRecorded(serde_json::from_str(payload_json)?)
+            }
+            EventType::VcsWorkspaceObserved => {
+                Self::VcsWorkspaceObserved(serde_json::from_str(payload_json)?)
+            }
+            EventType::VcsPacketStackEntryRecorded => {
+                Self::VcsPacketStackEntryRecorded(serde_json::from_str(payload_json)?)
+            }
+            EventType::VcsPrPublicationRecorded => {
+                Self::VcsPrPublicationRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::ProseApplyBlockerRecorded => {
                 Self::ProseApplyBlockerRecorded(serde_json::from_str(payload_json)?)
             }

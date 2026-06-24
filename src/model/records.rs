@@ -11,19 +11,24 @@ use super::{
     DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, ExitSessionReq,
     FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq,
     MarkApplyWorktreeStateReq, MetaTaskId, MetaTaskState, ModelId, ObjectType,
-    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
-    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerState,
-    OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
-    PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyGateBlockerReq,
-    RecordApplyVerificationReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
-    RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq, RecordProseApplyBlockerReq,
-    RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq, ReleaseClaimReq,
-    RequestReservationReq, RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
-    ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId,
-    RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick, SessionRole, SessionState,
-    SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget,
-    StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskPriority, SubtaskState,
-    SubtaskTitle, SupersedeQueueItemReq, TimestampMs, VerifierId,
+    ObserveVcsWorkspaceReq, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState,
+    OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason,
+    OperatorBlockerState, OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId,
+    ProviderRunIdIssuer, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState,
+    RecordApplyGateBlockerReq, RecordApplyVerificationReq, RecordApplyWorktreeReq,
+    RecordOpenSpecArchiveStatusReq, RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq,
+    RecordProseApplyBlockerReq, RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq,
+    RecordVcsPacketStackEntryReq, RecordVcsPrPublicationReq, RecordVcsWorkspaceReq,
+    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationId, ReservationState,
+    ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict,
+    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick,
+    SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
+    SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
+    SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
+    VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind,
+    VcsPrPublicationStatus, VcsWorkspaceCleanliness, VcsWorkspaceId, VcsWorkspaceKind,
+    VcsWorkspaceObservationReason, VcsWorkspacePath, VcsWorkspaceRef, VcsWorkspaceState,
+    VerifierId,
 };
 
 /// Persisted session row.
@@ -3635,6 +3640,70 @@ pub struct ApplyWorktree {
     pub updated_at: TimestampMs,
 }
 
+/// Covey-owned registry row for a scheduler-created VCS workspace/cache path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsWorkspace {
+    pub workspace_id: VcsWorkspaceId,
+    pub kind: VcsWorkspaceKind,
+    pub path: VcsWorkspacePath,
+    pub jj_workspace_name: Option<VcsWorkspaceRef>,
+    pub claim_id: Option<ClaimId>,
+    pub subtask_id: Option<SubtaskId>,
+    pub openspec_change_id: Option<OpenSpecChangeId>,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub current_bookmark: Option<VcsWorkspaceRef>,
+    pub current_change_id: Option<VcsWorkspaceRef>,
+    pub current_commit_id: Option<VcsWorkspaceRef>,
+    pub state: VcsWorkspaceState,
+    pub last_cleanliness: VcsWorkspaceCleanliness,
+    pub last_observed_reason: Option<VcsWorkspaceObservationReason>,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+    pub last_observed_at: Option<TimestampMs>,
+}
+
+/// Reviewed claim-level change included in an OpenSpec packet stack projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsPacketStackEntry {
+    pub stack_entry_id: VcsPacketStackEntryId,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub packet_bookmark: VcsWorkspaceRef,
+    pub claim_id: ClaimId,
+    pub subtask_id: SubtaskId,
+    pub artifact_digest: ArtifactDigest,
+    pub review_id: ReviewId,
+    pub findings_digest: FindingsDigest,
+    pub claim_bookmark: VcsWorkspaceRef,
+    pub claim_change_id: VcsWorkspaceRef,
+    pub claim_commit_id: VcsWorkspaceRef,
+    pub stack_position: i64,
+    pub tree_equivalence_digest: Option<ArtifactDigest>,
+    pub state: VcsPacketStackEntryState,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+/// Scheduler-created GitHub publication projection for one packet or claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsPrPublication {
+    pub publication_id: VcsPrPublicationId,
+    pub kind: VcsPrPublicationKind,
+    pub openspec_change_id: Option<OpenSpecChangeId>,
+    pub claim_id: Option<ClaimId>,
+    pub bookmark: VcsWorkspaceRef,
+    pub head_commit_id: VcsWorkspaceRef,
+    pub base_ref: VcsWorkspaceRef,
+    pub pr_url: Option<VcsWorkspaceRef>,
+    pub status: VcsPrPublicationStatus,
+    pub blocker_reason: Option<VcsWorkspaceObservationReason>,
+    pub recorded_by_session: SessionToken,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
 /// Durable cleanup status for an applied OpenSpec-imported queue item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpecArchiveStatus {
@@ -4488,6 +4557,10 @@ pub enum EventPayload {
     ReadyQueueApplied(MarkAppliedReq),
     ApplyWorktreeRecorded(RecordApplyWorktreeReq),
     ApplyWorktreeStateRecorded(MarkApplyWorktreeStateReq),
+    VcsWorkspaceRecorded(RecordVcsWorkspaceReq),
+    VcsWorkspaceObserved(ObserveVcsWorkspaceReq),
+    VcsPacketStackEntryRecorded(RecordVcsPacketStackEntryReq),
+    VcsPrPublicationRecorded(RecordVcsPrPublicationReq),
     ProseApplyBlockerRecorded(RecordProseApplyBlockerReq),
     OpenSpecArchiveStatusRecorded(RecordOpenSpecArchiveStatusReq),
     OperatorBlockerRecorded(RecordOperatorBlockerReq),
@@ -4534,6 +4607,10 @@ impl EventPayload {
             Self::ReadyQueueApplied(_) => EventType::ReadyQueueApplied,
             Self::ApplyWorktreeRecorded(_) => EventType::ApplyWorktreeRecorded,
             Self::ApplyWorktreeStateRecorded(_) => EventType::ApplyWorktreeStateRecorded,
+            Self::VcsWorkspaceRecorded(_) => EventType::VcsWorkspaceRecorded,
+            Self::VcsWorkspaceObserved(_) => EventType::VcsWorkspaceObserved,
+            Self::VcsPacketStackEntryRecorded(_) => EventType::VcsPacketStackEntryRecorded,
+            Self::VcsPrPublicationRecorded(_) => EventType::VcsPrPublicationRecorded,
             Self::ProseApplyBlockerRecorded(_) => EventType::ProseApplyBlockerRecorded,
             Self::OpenSpecArchiveStatusRecorded(_) => EventType::OpenSpecArchiveStatusRecorded,
             Self::OperatorBlockerRecorded(_) => EventType::OperatorBlockerRecorded,
@@ -4582,6 +4659,11 @@ impl EventPayload {
             Self::ApplyWorktreeRecorded(_) | Self::ApplyWorktreeStateRecorded(_) => {
                 ObjectType::ApplyWorktree
             }
+            Self::VcsWorkspaceRecorded(_) | Self::VcsWorkspaceObserved(_) => {
+                ObjectType::VcsWorkspace
+            }
+            Self::VcsPacketStackEntryRecorded(_) => ObjectType::VcsPacketStackEntry,
+            Self::VcsPrPublicationRecorded(_) => ObjectType::VcsPrPublication,
             Self::OpenSpecArchiveStatusRecorded(_) => ObjectType::ReadyQueue,
             Self::OperatorBlockerRecorded(_) | Self::OperatorBlockerResolved(_) => {
                 ObjectType::OperatorBlocker

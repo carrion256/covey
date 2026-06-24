@@ -20,7 +20,7 @@ pub use records::{
     RequestedReview, Reservation, ReservationOverlapConflictPayload, Review, ReviewCommon,
     ReviewSubtask, ReviewTarget, RuntimeAttestation, Session, SettlementReconcileBlocker,
     StaleSessionsPayload, Subtask, SubtaskLifecycle, SupersededReadyQueueItem, SupersededReview,
-    TypedEvent, WorkSubtask,
+    TypedEvent, VcsPacketStackEntry, VcsPrPublication, VcsWorkspace, WorkSubtask,
 };
 #[allow(unused_imports)]
 pub use records::{GeneratedReservationMembers, ReservationScope, ReservationScopeKey};
@@ -37,7 +37,8 @@ pub use types::{
     ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsClaimRef, RepoopsPath, ReservationId,
     ReviewId, RuntimeContainerId, RuntimeProcessId, SessionHeartbeatTick, SessionToken,
     SettlementReconcileEvidenceId, SourceIssueId, SubtaskId, SubtaskPriority, SubtaskTitle,
-    TimestampMs, VerifierId,
+    TimestampMs, VcsPacketStackEntryId, VcsPrPublicationId, VcsWorkspaceId,
+    VcsWorkspaceObservationReason, VcsWorkspacePath, VcsWorkspaceRef, VerifierId,
 };
 pub use views::*;
 
@@ -49,4 +50,7 @@ pub(crate) use state::{
     openspec_archive_status_state_name, ready_queue_state_name, reservation_state_name,
     review_state_name, review_verdict_name, scope_class_name, session_state_name,
     settlement_reconcile_reason_name, subtask_kind_name, subtask_state_name,
+    vcs_packet_stack_entry_state_name, vcs_pr_publication_kind_name,
+    vcs_pr_publication_status_name, vcs_workspace_cleanliness_name, vcs_workspace_kind_name,
+    vcs_workspace_state_name,
 };

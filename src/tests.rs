@@ -9,8 +9,9 @@ use crate::{
     OpenSpecCurrentWorkRepairSafety, OpenSpecCurrentWorkState, OperatorBlockerState,
     OperatorBlockerTargetKind, ReadyQueueState, ReconcileApplyQueueReq,
     ReconcileChangesRequestedFollowupsReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
-    RecordOperatorBlockerReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    ResolveOperatorBlockerReq, Result, SessionRole, SubmitMetaTaskReq,
+    RecordOperatorBlockerReq, RecordRuntimeAttestationReq, RecordVcsWorkspaceReq,
+    RegisterSessionReq, ReleaseClaimReq, ResolveOperatorBlockerReq, Result, SessionRole,
+    SubmitMetaTaskReq, VcsWorkspaceCleanliness, VcsWorkspaceKind, VcsWorkspaceState,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -1472,7 +1473,7 @@ fn openspec_current_work_classifies_escalated_operator_blocker_reasons() {
     seed_current_work_scoped_subtask(
         &covey,
         "current-typed-operator-blockers",
-        "current-typed-authority-hold-work",
+        "current-typed-workspace-loss-work",
         "available",
         None,
         3,
@@ -1480,10 +1481,18 @@ fn openspec_current_work_classifies_escalated_operator_blocker_reasons() {
     seed_current_work_scoped_subtask(
         &covey,
         "current-typed-operator-blockers",
-        "current-typed-git-apply-work",
+        "current-typed-authority-hold-work",
         "available",
         None,
         4,
+    );
+    seed_current_work_scoped_subtask(
+        &covey,
+        "current-typed-operator-blockers",
+        "current-typed-git-apply-work",
+        "available",
+        None,
+        5,
     );
 
     for (blocker_id, subtask_id, reason) in [
@@ -1491,6 +1500,11 @@ fn openspec_current_work_classifies_escalated_operator_blocker_reasons() {
             "operator-blocker-scheduler-state-loss",
             "current-typed-scheduler-loss-work",
             "scheduler_state_loss",
+        ),
+        (
+            "operator-blocker-workspace-loss",
+            "current-typed-workspace-loss-work",
+            "execution_workspace_unusable",
         ),
         (
             "operator-blocker-authority-hold",
@@ -1541,6 +1555,85 @@ fn openspec_current_work_classifies_escalated_operator_blocker_reasons() {
             .allowed_repairs
             .contains(&"mutai-scheduler orchestrator current-work".to_owned())
     }));
+}
+
+#[test]
+fn openspec_current_work_blocks_on_dirty_active_registered_vcs_workspace() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_archive_session_and_meta(&covey, "current-dirty-vcs-workspace");
+    seed_current_work_claimed_subtask(
+        &covey,
+        "current-dirty-vcs-workspace",
+        "current-dirty-vcs-workspace-work",
+        "claim-dirty-current",
+        2,
+    );
+
+    covey
+        .record_vcs_workspace(
+            RecordVcsWorkspaceReq::try_from_raw_parts(
+                "session-orch-archive",
+                "vcs-workspace-dirty-current",
+                VcsWorkspaceKind::Claim,
+                "/data/tmp/mutai-jj-workspaces/repo/claims/claim-dirty-current",
+                Some("claim-dirty-current".to_owned()),
+                Some("claim-dirty-current".to_owned()),
+                Some("current-dirty-vcs-workspace-work".to_owned()),
+                Some("current-dirty-vcs-workspace".to_owned()),
+                None,
+                None,
+                Some("claim/claim-dirty-current".to_owned()),
+                Some("change-dirty-current".to_owned()),
+                Some("commit-dirty-current".to_owned()),
+                VcsWorkspaceState::Active,
+                VcsWorkspaceCleanliness::Dirty,
+                Some("worker workspace has uncommitted edits".to_owned()),
+                "record-dirty-current-vcs-workspace",
+            )
+            .expect("valid VCS workspace registry request"),
+        )
+        .expect("record dirty VCS workspace");
+
+    let current = covey
+        .openspec_current_work("current-dirty-vcs-workspace")
+        .expect("current work");
+
+    assert_eq!(current.state, OpenSpecCurrentWorkState::Blocked);
+    assert_eq!(current.next_owner, OpenSpecCurrentWorkOwner::Operator);
+    assert_eq!(current.vcs_workspaces.len(), 1);
+    let blocker = current
+        .blockers
+        .iter()
+        .find(|blocker| {
+            blocker.blocker_id
+                == "blocker_openspec_current_work_vcs_workspace_unusable_vcs-workspace-dirty-current"
+        })
+        .expect("dirty VCS workspace blocker");
+    assert_eq!(
+        blocker.kind,
+        OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss
+    );
+    assert_eq!(
+        blocker.claim_id.as_ref().map(|id| id.as_str()),
+        Some("claim-dirty-current")
+    );
+    assert_eq!(
+        blocker.subtask_id.as_ref().map(|id| id.as_str()),
+        Some("current-dirty-vcs-workspace-work")
+    );
+    assert!(blocker.reason.contains("vcs-workspace-dirty-current"));
+    assert!(blocker.reason.contains("claim/claim-dirty-current"));
+    assert!(
+        blocker
+            .allowed_repairs
+            .contains(&"mutai-scheduler orchestrator current-work".to_owned())
+    );
+    assert!(
+        blocker
+            .allowed_repairs
+            .contains(&"mutai-scheduler janitor vcs-workspaces".to_owned())
+    );
 }
 
 #[test]

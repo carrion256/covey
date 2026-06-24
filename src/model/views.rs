@@ -14,7 +14,8 @@ use super::{
     RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict,
     Session, SessionToken, SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget,
     Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState,
-    SubtaskTitle, TimestampMs, VerifierId,
+    SubtaskTitle, TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness, VcsWorkspaceState,
+    VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -1235,6 +1236,7 @@ pub enum OpenSpecCurrentWorkRepairAction {
     RecoverExpiredClaim,
     RecoverDeadClaim,
     RecoverQueue,
+    RecoverWorkspace,
     ArchiveOpenSpec,
     RecoverLandingReceipt,
     ResolveOperatorBlocker,
@@ -1705,6 +1707,69 @@ impl OpenSpecCurrentWorkBlocker {
         }
     }
 
+    /// Builds a blocker for a registered scheduler workspace/cache that cannot
+    /// safely be treated as an invisible execution detail.
+    #[must_use]
+    pub fn vcs_workspace_unusable(workspace: &VcsWorkspace) -> Self {
+        let evidence_id = format!(
+            "openspec_current_work:vcs_workspace_unusable:{}:{}",
+            workspace.workspace_id.as_str(),
+            workspace.last_cleanliness
+        );
+        let mut repair_playbook = OpenSpecCurrentWorkRepairPlaybook::new(
+            OpenSpecCurrentWorkRepairAction::RecoverWorkspace,
+            OpenSpecCurrentWorkRepairSafety::Mutating,
+            evidence_id.clone(),
+            "The registered VCS workspace is clean, recovered, archived, or no longer blocks current work",
+            "do not inspect or mutate unregistered filesystem paths; rerun current-work after scheduler repair or janitor evidence exists",
+        );
+        repair_playbook.repair_command =
+            Some("mutai-scheduler orchestrator current-work".to_owned());
+        Self {
+            blocker_id: format!(
+                "blocker_openspec_current_work_vcs_workspace_unusable_{}",
+                workspace.workspace_id.as_str()
+            ),
+            evidence_id,
+            kind: OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss,
+            owner: OpenSpecCurrentWorkOwner::Operator,
+            allowed_repairs: repair_commands(&[
+                "mutai-scheduler orchestrator current-work",
+                "mutai-scheduler orchestrator run-openspec",
+                "mutai-scheduler orchestrator recover workspace",
+                "mutai-scheduler orchestrator recover dead-claim",
+                "mutai-scheduler orchestrator recover redispatch",
+                "mutai-scheduler janitor vcs-workspaces",
+            ]),
+            repair_playbook,
+            subtask_id: workspace.subtask_id.clone(),
+            claim_id: workspace.claim_id.clone(),
+            queue_id: workspace.queue_id.clone(),
+            artifact_digest: workspace.artifact_digest.clone(),
+            review_id: None,
+            reason: format!(
+                "registered {:?} VCS workspace {} at {} is {:?}/{:?}; bookmark={:?} change={:?} commit={:?}",
+                workspace.kind,
+                workspace.workspace_id.as_str(),
+                workspace.path.as_str(),
+                workspace.state,
+                workspace.last_cleanliness,
+                workspace
+                    .current_bookmark
+                    .as_ref()
+                    .map(|value| value.as_str()),
+                workspace
+                    .current_change_id
+                    .as_ref()
+                    .map(|value| value.as_str()),
+                workspace
+                    .current_commit_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+            ),
+        }
+    }
+
     /// Builds a blocker from a durable operator-blocker row.
     #[must_use]
     pub fn operator_blocked(blocker: &OperatorBlocker) -> Self {
@@ -1763,7 +1828,8 @@ fn operator_blocker_kind(reason: &str) -> OpenSpecCurrentWorkBlockerKind {
         "scheduler_state_loss"
         | "assignment_pane_missing"
         | "missing_assignments_json"
-        | "unreadable_assignments_json" => OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss,
+        | "unreadable_assignments_json"
+        | "execution_workspace_unusable" => OpenSpecCurrentWorkBlockerKind::SchedulerStateLoss,
         "stale_claim" => OpenSpecCurrentWorkBlockerKind::StaleClaim,
         "hook_state_stale_claim" | "hook_state_stale_claim_context" => {
             OpenSpecCurrentWorkBlockerKind::HookStateStaleClaim
@@ -1931,6 +1997,8 @@ pub struct OpenSpecCurrentWork {
     pub queue_ids: Vec<QueueId>,
     pub artifact_digests: Vec<ArtifactDigest>,
     pub review_ids: Vec<ReviewId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcs_workspaces: Vec<VcsWorkspace>,
     pub archive_blockers: Vec<OpenSpecArchiveStatus>,
     pub blockers: Vec<OpenSpecCurrentWorkBlocker>,
 }
@@ -1951,6 +2019,7 @@ impl OpenSpecCurrentWork {
         active_claims: Vec<Claim>,
         repaired_source_subtask_ids: Vec<SubtaskId>,
         stale_claims: Vec<OpenSpecCurrentWorkStaleClaim>,
+        vcs_workspaces: Vec<VcsWorkspace>,
         lease_now_ms: i64,
     ) -> Self {
         let open_archive_blockers = archive_statuses
@@ -1971,6 +2040,7 @@ impl OpenSpecCurrentWork {
             &active_claims,
             &repaired_source_subtask_ids,
             &stale_claims,
+            &vcs_workspaces,
             lease_now_ms,
         );
         let state = current_work_state(
@@ -2012,6 +2082,7 @@ impl OpenSpecCurrentWork {
                         .expect("loaded review id is valid")
                 })
                 .collect(),
+            vcs_workspaces,
             archive_blockers: open_archive_blockers,
             blockers,
         }
@@ -2118,6 +2189,7 @@ fn current_work_blockers(
     active_claims: &[Claim],
     repaired_source_subtask_ids: &[SubtaskId],
     stale_claims: &[OpenSpecCurrentWorkStaleClaim],
+    vcs_workspaces: &[VcsWorkspace],
     lease_now_ms: i64,
 ) -> Vec<OpenSpecCurrentWorkBlocker> {
     if subtasks.is_empty() {
@@ -2206,6 +2278,17 @@ fn current_work_blockers(
         .map(OpenSpecCurrentWorkBlocker::stale_claim)
         .collect::<Vec<_>>();
     blockers.extend(stale_blockers);
+    blockers.extend(vcs_workspaces.iter().filter_map(|workspace| {
+        (workspace.state == VcsWorkspaceState::Active
+            && matches!(
+                workspace.last_cleanliness,
+                VcsWorkspaceCleanliness::Dirty
+                    | VcsWorkspaceCleanliness::Missing
+                    | VcsWorkspaceCleanliness::Stale
+                    | VcsWorkspaceCleanliness::Unusable
+            ))
+        .then(|| OpenSpecCurrentWorkBlocker::vcs_workspace_unusable(workspace))
+    }));
     blockers
 }
 

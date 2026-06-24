@@ -708,6 +708,28 @@ string_newtype!(
     validate_manifest_path
 );
 string_newtype!(ApplyWorktreePath, "worktree_path", validate_worktree_path);
+string_newtype!(VcsWorkspaceId, "vcs_workspace_id", validate_tokenish);
+string_newtype!(
+    VcsPacketStackEntryId,
+    "vcs_packet_stack_entry_id",
+    validate_tokenish
+);
+string_newtype!(
+    VcsPrPublicationId,
+    "vcs_pr_publication_id",
+    validate_tokenish
+);
+string_newtype!(
+    VcsWorkspacePath,
+    "vcs_workspace_path",
+    validate_worktree_path
+);
+string_newtype!(VcsWorkspaceRef, "vcs_workspace_ref", validate_tokenish);
+string_newtype!(
+    VcsWorkspaceObservationReason,
+    "vcs_workspace_observation_reason",
+    validate_normalized_text
+);
 string_newtype!(ChangedPathsDigest, "changed_paths_digest", validate_digest);
 string_newtype!(FindingsDigest, "findings_digest", validate_digest);
 string_newtype!(

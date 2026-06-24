@@ -20,7 +20,10 @@ use super::{
     ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope,
     ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole,
     SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget,
-    SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
+    SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VcsPacketStackEntryId,
+    VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind, VcsPrPublicationStatus,
+    VcsWorkspaceCleanliness, VcsWorkspaceId, VcsWorkspaceKind, VcsWorkspaceObservationReason,
+    VcsWorkspacePath, VcsWorkspaceRef, VcsWorkspaceState, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -1438,6 +1441,260 @@ impl MarkApplyWorktreeStateReq {
             session_token: SessionToken::parse(session_token.into())?,
             path: ApplyWorktreePath::parse(path.into())?,
             state,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record or refresh a scheduler-created VCS workspace binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordVcsWorkspaceReq {
+    pub session_token: SessionToken,
+    pub workspace_id: VcsWorkspaceId,
+    pub kind: VcsWorkspaceKind,
+    pub path: VcsWorkspacePath,
+    pub jj_workspace_name: Option<VcsWorkspaceRef>,
+    pub claim_id: Option<ClaimId>,
+    pub subtask_id: Option<SubtaskId>,
+    pub openspec_change_id: Option<OpenSpecChangeId>,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub current_bookmark: Option<VcsWorkspaceRef>,
+    pub current_change_id: Option<VcsWorkspaceRef>,
+    pub current_commit_id: Option<VcsWorkspaceRef>,
+    pub state: VcsWorkspaceState,
+    pub last_cleanliness: VcsWorkspaceCleanliness,
+    pub last_observed_reason: Option<VcsWorkspaceObservationReason>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordVcsWorkspaceReq {
+    /// Builds a VCS workspace registry request from raw scheduler values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identifiers, paths, refs, or evidence fields are
+    /// invalid for Covey persistence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        workspace_id: impl Into<String>,
+        kind: VcsWorkspaceKind,
+        path: impl Into<String>,
+        jj_workspace_name: Option<String>,
+        claim_id: Option<String>,
+        subtask_id: Option<String>,
+        openspec_change_id: Option<String>,
+        queue_id: Option<String>,
+        artifact_digest: Option<String>,
+        current_bookmark: Option<String>,
+        current_change_id: Option<String>,
+        current_commit_id: Option<String>,
+        state: VcsWorkspaceState,
+        last_cleanliness: VcsWorkspaceCleanliness,
+        last_observed_reason: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            workspace_id: VcsWorkspaceId::parse(workspace_id.into())?,
+            kind,
+            path: VcsWorkspacePath::parse(path.into())?,
+            jj_workspace_name: jj_workspace_name.map(VcsWorkspaceRef::parse).transpose()?,
+            claim_id: claim_id.map(ClaimId::parse).transpose()?,
+            subtask_id: subtask_id.map(SubtaskId::parse).transpose()?,
+            openspec_change_id: openspec_change_id
+                .map(OpenSpecChangeId::parse)
+                .transpose()?,
+            queue_id: queue_id.map(QueueId::parse).transpose()?,
+            artifact_digest: artifact_digest.map(ArtifactDigest::parse).transpose()?,
+            current_bookmark: current_bookmark.map(VcsWorkspaceRef::parse).transpose()?,
+            current_change_id: current_change_id.map(VcsWorkspaceRef::parse).transpose()?,
+            current_commit_id: current_commit_id.map(VcsWorkspaceRef::parse).transpose()?,
+            state,
+            last_cleanliness,
+            last_observed_reason: last_observed_reason
+                .map(VcsWorkspaceObservationReason::parse)
+                .transpose()?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to update observed state for a registered VCS workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserveVcsWorkspaceReq {
+    pub session_token: SessionToken,
+    pub workspace_id: VcsWorkspaceId,
+    pub state: VcsWorkspaceState,
+    pub last_cleanliness: VcsWorkspaceCleanliness,
+    pub last_observed_reason: Option<VcsWorkspaceObservationReason>,
+    pub current_bookmark: Option<VcsWorkspaceRef>,
+    pub current_change_id: Option<VcsWorkspaceRef>,
+    pub current_commit_id: Option<VcsWorkspaceRef>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ObserveVcsWorkspaceReq {
+    /// Builds a VCS workspace observation request from raw scheduler values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identifiers, refs, or observation reason values
+    /// are invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        workspace_id: impl Into<String>,
+        state: VcsWorkspaceState,
+        last_cleanliness: VcsWorkspaceCleanliness,
+        last_observed_reason: Option<String>,
+        current_bookmark: Option<String>,
+        current_change_id: Option<String>,
+        current_commit_id: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            workspace_id: VcsWorkspaceId::parse(workspace_id.into())?,
+            state,
+            last_cleanliness,
+            last_observed_reason: last_observed_reason
+                .map(VcsWorkspaceObservationReason::parse)
+                .transpose()?,
+            current_bookmark: current_bookmark.map(VcsWorkspaceRef::parse).transpose()?,
+            current_change_id: current_change_id.map(VcsWorkspaceRef::parse).transpose()?,
+            current_commit_id: current_commit_id.map(VcsWorkspaceRef::parse).transpose()?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record one reviewed claim as a packet stack projection entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordVcsPacketStackEntryReq {
+    pub session_token: SessionToken,
+    pub stack_entry_id: VcsPacketStackEntryId,
+    pub openspec_change_id: OpenSpecChangeId,
+    pub packet_bookmark: VcsWorkspaceRef,
+    pub claim_id: ClaimId,
+    pub subtask_id: SubtaskId,
+    pub artifact_digest: ArtifactDigest,
+    pub review_id: ReviewId,
+    pub findings_digest: FindingsDigest,
+    pub claim_bookmark: VcsWorkspaceRef,
+    pub claim_change_id: VcsWorkspaceRef,
+    pub claim_commit_id: VcsWorkspaceRef,
+    pub stack_position: i64,
+    pub tree_equivalence_digest: Option<ArtifactDigest>,
+    pub state: VcsPacketStackEntryState,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordVcsPacketStackEntryReq {
+    /// Builds a packet stack entry request from raw scheduler projection facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any typed id, digest, ref, or idempotency key is
+    /// invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        stack_entry_id: impl Into<String>,
+        openspec_change_id: impl Into<String>,
+        packet_bookmark: impl Into<String>,
+        claim_id: impl Into<String>,
+        subtask_id: impl Into<String>,
+        artifact_digest: impl Into<String>,
+        review_id: impl Into<String>,
+        findings_digest: impl Into<String>,
+        claim_bookmark: impl Into<String>,
+        claim_change_id: impl Into<String>,
+        claim_commit_id: impl Into<String>,
+        stack_position: i64,
+        tree_equivalence_digest: Option<String>,
+        state: VcsPacketStackEntryState,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            stack_entry_id: VcsPacketStackEntryId::parse(stack_entry_id.into())?,
+            openspec_change_id: OpenSpecChangeId::parse(openspec_change_id.into())?,
+            packet_bookmark: VcsWorkspaceRef::parse(packet_bookmark.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            subtask_id: SubtaskId::parse(subtask_id.into())?,
+            artifact_digest: ArtifactDigest::parse(artifact_digest.into())?,
+            review_id: ReviewId::parse(review_id.into())?,
+            findings_digest: FindingsDigest::parse(findings_digest.into())?,
+            claim_bookmark: VcsWorkspaceRef::parse(claim_bookmark.into())?,
+            claim_change_id: VcsWorkspaceRef::parse(claim_change_id.into())?,
+            claim_commit_id: VcsWorkspaceRef::parse(claim_commit_id.into())?,
+            stack_position,
+            tree_equivalence_digest: tree_equivalence_digest
+                .map(ArtifactDigest::parse)
+                .transpose()?,
+            state,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record a scheduler PR projection receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordVcsPrPublicationReq {
+    pub session_token: SessionToken,
+    pub publication_id: VcsPrPublicationId,
+    pub kind: VcsPrPublicationKind,
+    pub openspec_change_id: Option<OpenSpecChangeId>,
+    pub claim_id: Option<ClaimId>,
+    pub bookmark: VcsWorkspaceRef,
+    pub head_commit_id: VcsWorkspaceRef,
+    pub base_ref: VcsWorkspaceRef,
+    pub pr_url: Option<VcsWorkspaceRef>,
+    pub status: VcsPrPublicationStatus,
+    pub blocker_reason: Option<VcsWorkspaceObservationReason>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordVcsPrPublicationReq {
+    /// Builds a PR publication receipt from raw scheduler projection facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when identifiers, refs, status fields, or the
+    /// idempotency key are invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        publication_id: impl Into<String>,
+        kind: VcsPrPublicationKind,
+        openspec_change_id: Option<String>,
+        claim_id: Option<String>,
+        bookmark: impl Into<String>,
+        head_commit_id: impl Into<String>,
+        base_ref: impl Into<String>,
+        pr_url: Option<String>,
+        status: VcsPrPublicationStatus,
+        blocker_reason: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            publication_id: VcsPrPublicationId::parse(publication_id.into())?,
+            kind,
+            openspec_change_id: openspec_change_id
+                .map(OpenSpecChangeId::parse)
+                .transpose()?,
+            claim_id: claim_id.map(ClaimId::parse).transpose()?,
+            bookmark: VcsWorkspaceRef::parse(bookmark.into())?,
+            head_commit_id: VcsWorkspaceRef::parse(head_commit_id.into())?,
+            base_ref: VcsWorkspaceRef::parse(base_ref.into())?,
+            pr_url: pr_url.map(VcsWorkspaceRef::parse).transpose()?,
+            status,
+            blocker_reason: blocker_reason
+                .map(VcsWorkspaceObservationReason::parse)
+                .transpose()?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }

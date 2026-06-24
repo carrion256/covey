@@ -8,4 +8,6 @@ mod queue;
 mod repoops;
 mod reservation;
 mod session;
+mod vcs_projection;
+mod vcs_workspace;
 mod workflow;

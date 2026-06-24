@@ -59,6 +59,10 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::OperatorBlockerResolved => "operator_blocker_resolved",
         EventType::ApplyWorktreeRecorded => "apply_worktree_recorded",
         EventType::ApplyWorktreeStateRecorded => "apply_worktree_state_recorded",
+        EventType::VcsWorkspaceRecorded => "vcs_workspace_recorded",
+        EventType::VcsWorkspaceObserved => "vcs_workspace_observed",
+        EventType::VcsPacketStackEntryRecorded => "vcs_packet_stack_entry_recorded",
+        EventType::VcsPrPublicationRecorded => "vcs_pr_publication_recorded",
         EventType::ProseApplyBlockerRecorded => "prose_apply_blocker_recorded",
     }
 }

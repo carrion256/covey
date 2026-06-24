@@ -20,6 +20,9 @@ pub enum ObjectType {
     ApplyGateBlocker,
     SettlementReconcileBlocker,
     ApplyWorktree,
+    VcsWorkspace,
+    VcsPacketStackEntry,
+    VcsPrPublication,
 }
 
 pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
@@ -38,6 +41,9 @@ pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
         ObjectType::ApplyGateBlocker => "apply_gate_blocker",
         ObjectType::SettlementReconcileBlocker => "settlement_reconcile_blocker",
         ObjectType::ApplyWorktree => "apply_worktree",
+        ObjectType::VcsWorkspace => "vcs_workspace",
+        ObjectType::VcsPacketStackEntry => "vcs_packet_stack_entry",
+        ObjectType::VcsPrPublication => "vcs_pr_publication",
     }
 }
 
@@ -200,6 +206,10 @@ pub enum EventType {
     OperatorBlockerResolved,
     ApplyWorktreeRecorded,
     ApplyWorktreeStateRecorded,
+    VcsWorkspaceRecorded,
+    VcsWorkspaceObserved,
+    VcsPacketStackEntryRecorded,
+    VcsPrPublicationRecorded,
     ProseApplyBlockerRecorded,
 }
 
@@ -222,6 +232,130 @@ pub(crate) const fn apply_worktree_state_name(state: ApplyWorktreeState) -> &'st
         ApplyWorktreeState::Archived => "archived",
         ApplyWorktreeState::RetainedEvidence => "retained_evidence",
         ApplyWorktreeState::CleanupAllowed => "cleanup_allowed",
+    }
+}
+
+/// Kind of scheduler-created VCS execution cache recorded by Covey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum VcsWorkspaceKind {
+    Packet,
+    Claim,
+    Apply,
+    Execution,
+}
+
+pub(crate) const fn vcs_workspace_kind_name(kind: VcsWorkspaceKind) -> &'static str {
+    match kind {
+        VcsWorkspaceKind::Packet => "packet",
+        VcsWorkspaceKind::Claim => "claim",
+        VcsWorkspaceKind::Apply => "apply",
+        VcsWorkspaceKind::Execution => "execution",
+    }
+}
+
+/// Lifecycle state for a registered disposable VCS workspace/cache path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum VcsWorkspaceState {
+    Active,
+    Retained,
+    CleanupAllowed,
+    Archived,
+}
+
+pub(crate) const fn vcs_workspace_state_name(state: VcsWorkspaceState) -> &'static str {
+    match state {
+        VcsWorkspaceState::Active => "active",
+        VcsWorkspaceState::Retained => "retained",
+        VcsWorkspaceState::CleanupAllowed => "cleanup_allowed",
+        VcsWorkspaceState::Archived => "archived",
+    }
+}
+
+/// Last observed filesystem/VCS cleanliness for a registered workspace path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum VcsWorkspaceCleanliness {
+    Unknown,
+    Clean,
+    Dirty,
+    Missing,
+    Stale,
+    Unusable,
+}
+
+pub(crate) const fn vcs_workspace_cleanliness_name(
+    cleanliness: VcsWorkspaceCleanliness,
+) -> &'static str {
+    match cleanliness {
+        VcsWorkspaceCleanliness::Unknown => "unknown",
+        VcsWorkspaceCleanliness::Clean => "clean",
+        VcsWorkspaceCleanliness::Dirty => "dirty",
+        VcsWorkspaceCleanliness::Missing => "missing",
+        VcsWorkspaceCleanliness::Stale => "stale",
+        VcsWorkspaceCleanliness::Unusable => "unusable",
+    }
+}
+
+/// Review/projection state for one claim included in an OpenSpec packet stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum VcsPacketStackEntryState {
+    Candidate,
+    TreeEquivalent,
+    Published,
+    Superseded,
+}
+
+pub(crate) const fn vcs_packet_stack_entry_state_name(
+    state: VcsPacketStackEntryState,
+) -> &'static str {
+    match state {
+        VcsPacketStackEntryState::Candidate => "candidate",
+        VcsPacketStackEntryState::TreeEquivalent => "tree_equivalent",
+        VcsPacketStackEntryState::Published => "published",
+        VcsPacketStackEntryState::Superseded => "superseded",
+    }
+}
+
+/// Unit published to GitHub from scheduler-owned VCS projection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum VcsPrPublicationKind {
+    Packet,
+    Claim,
+}
+
+pub(crate) const fn vcs_pr_publication_kind_name(kind: VcsPrPublicationKind) -> &'static str {
+    match kind {
+        VcsPrPublicationKind::Packet => "packet",
+        VcsPrPublicationKind::Claim => "claim",
+    }
+}
+
+/// Publication status for a scheduler-created PR projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum VcsPrPublicationStatus {
+    Prepared,
+    Published,
+    Blocked,
+    Superseded,
+}
+
+pub(crate) const fn vcs_pr_publication_status_name(status: VcsPrPublicationStatus) -> &'static str {
+    match status {
+        VcsPrPublicationStatus::Prepared => "prepared",
+        VcsPrPublicationStatus::Published => "published",
+        VcsPrPublicationStatus::Blocked => "blocked",
+        VcsPrPublicationStatus::Superseded => "superseded",
     }
 }
 
@@ -550,4 +684,6 @@ pub enum StateValue {
     ConflictResolution(ConflictResolutionState),
     #[display("{_0}")]
     ApplyWorktree(ApplyWorktreeState),
+    #[display("{_0}")]
+    VcsWorkspace(VcsWorkspaceState),
 }

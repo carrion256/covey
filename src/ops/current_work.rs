@@ -10,6 +10,7 @@ use crate::{
         OpenSpecChangeId, OpenSpecCurrentWork, OpenSpecCurrentWorkBlockerResolution,
         OpenSpecCurrentWorkStaleClaim, OperatorBlocker, ReadyQueueItem, Review,
         SettlementReconcileBlocker, SettlementReconcileReason, SubtaskId, SubtaskRow, SubtaskView,
+        VcsWorkspace,
     },
     ops::operator_blocker::operator_blocker_select_sql,
     queries::{collect_rows, deserialize_row},
@@ -59,6 +60,7 @@ impl Covey {
                 load_current_work_settlement_reconcile_blockers_tx(tx, &change_id)?;
             let operator_blockers = load_current_work_operator_blockers_tx(tx, &change_id)?;
             let active_claims = load_current_work_active_claims_tx(tx, &change_id)?;
+            let vcs_workspaces = load_current_work_vcs_workspaces_tx(tx, &change_id)?;
             let repaired_source_subtask_ids =
                 load_current_work_repaired_source_subtask_ids_tx(tx, &change_id)?;
             let lease_now_ms = current_lease_now_ms_tx(tx, self.clock.wall_now_ms())?;
@@ -81,6 +83,7 @@ impl Covey {
                 active_claims,
                 repaired_source_subtask_ids,
                 stale_claims,
+                vcs_workspaces,
                 lease_now_ms,
             ))
         });
@@ -369,6 +372,26 @@ fn load_current_work_reviews_tx(
         .as_str(),
     )?;
     let rows = stmt.query_map(params![change_id.as_str()], deserialize_row::<Review>)?;
+    collect_rows(rows)
+}
+
+fn load_current_work_vcs_workspaces_tx(
+    tx: &Transaction<'_>,
+    change_id: &OpenSpecChangeId,
+) -> Result<Vec<VcsWorkspace>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT workspace_id, kind, path, jj_workspace_name, claim_id, subtask_id,
+               openspec_change_id, queue_id, artifact_digest, current_bookmark,
+               current_change_id, current_commit_id, state, last_cleanliness,
+               last_observed_reason, recorded_by_session, created_at, updated_at,
+               last_observed_at
+        FROM vcs_workspaces
+        WHERE openspec_change_id = ?1
+        ORDER BY kind, workspace_id
+        "#,
+    )?;
+    let rows = stmt.query_map(params![change_id.as_str()], deserialize_row::<VcsWorkspace>)?;
     collect_rows(rows)
 }
 
