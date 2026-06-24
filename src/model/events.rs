@@ -78,6 +78,9 @@ impl EventPayload {
             EventType::ApplyWorktreeStateRecorded => {
                 Self::ApplyWorktreeStateRecorded(serde_json::from_str(payload_json)?)
             }
+            EventType::ProseApplyBlockerRecorded => {
+                Self::ProseApplyBlockerRecorded(serde_json::from_str(payload_json)?)
+            }
             EventType::OpenSpecArchiveStatusRecorded => {
                 Self::OpenSpecArchiveStatusRecorded(serde_json::from_str(payload_json)?)
             }

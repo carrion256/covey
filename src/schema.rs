@@ -59,6 +59,7 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::OperatorBlockerResolved => "operator_blocker_resolved",
         EventType::ApplyWorktreeRecorded => "apply_worktree_recorded",
         EventType::ApplyWorktreeStateRecorded => "apply_worktree_state_recorded",
+        EventType::ProseApplyBlockerRecorded => "prose_apply_blocker_recorded",
     }
 }
 

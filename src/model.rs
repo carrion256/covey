@@ -33,10 +33,11 @@ pub use types::{
     FenceSeq, FindingsDigest, IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs,
     MetaTaskId, ModelId, OpenSpecArchiveBlockedReason, OpenSpecChangeId, OpenSpecDigest,
     OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason,
-    PermissiveLandingReceiptDigest, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
-    QueueId, RepoopsClaimRef, RepoopsPath, ReservationId, ReviewId, RuntimeContainerId,
-    RuntimeProcessId, SessionHeartbeatTick, SessionToken, SettlementReconcileEvidenceId,
-    SourceIssueId, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
+    PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId, ProseTasksetId, ProviderId,
+    ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsClaimRef, RepoopsPath, ReservationId,
+    ReviewId, RuntimeContainerId, RuntimeProcessId, SessionHeartbeatTick, SessionToken,
+    SettlementReconcileEvidenceId, SourceIssueId, SubtaskId, SubtaskPriority, SubtaskTitle,
+    TimestampMs, VerifierId,
 };
 pub use views::*;
 

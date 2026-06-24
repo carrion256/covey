@@ -10,11 +10,11 @@ use super::{
     AgentPrincipalId, ApplyGateBlocker, ApplyGateBlockerKind, Artifact, ArtifactDigest,
     ArtifactKind, ArtifactManifestPath, BaseRev, ChangedPathsDigest, Claim, ClaimId,
     FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask, MetaTaskId, OpenSpecArchiveStatus,
-    OpenSpecChangeId, OperatorBlocker, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef,
-    RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict, Session, SessionToken,
-    SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget, Subtask, SubtaskId,
-    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle,
-    TimestampMs, VerifierId,
+    OpenSpecChangeId, OperatorBlocker, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState,
+    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict,
+    Session, SessionToken, SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget,
+    Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState,
+    SubtaskTitle, TimestampMs, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -1149,6 +1149,61 @@ pub enum OpenSpecCurrentWorkOwner {
     OpenSpecArchive,
     Authority,
     Operator,
+}
+
+/// Covey-derived current-work label for one lightweight prose taskset.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProseCurrentWorkState {
+    Imported,
+    Claimed,
+    Reviewing,
+    Applying,
+    Applied,
+    Blocked,
+}
+
+/// Surface that owns the next move for a prose current-work projection.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProseCurrentWorkOwner {
+    Covey,
+    Executor,
+    Reviewer,
+    SchedulerApply,
+    Operator,
+}
+
+/// One named blocker for a lightweight prose taskset.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProseCurrentWorkBlocker {
+    pub blocker_id: String,
+    pub evidence_id: String,
+    pub owner: ProseCurrentWorkOwner,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub review_id: Option<ReviewId>,
+    pub reason: String,
+}
+
+/// Batch-level current-work projection for a lightweight prose taskset.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProseCurrentWork {
+    pub taskset_id: ProseTasksetId,
+    pub meta_task_id: MetaTaskId,
+    pub provenance_tier: String,
+    pub preview_digest: ArtifactDigest,
+    pub state: ProseCurrentWorkState,
+    pub next_owner: ProseCurrentWorkOwner,
+    pub subtask_ids: Vec<SubtaskId>,
+    pub queue_ids: Vec<QueueId>,
+    pub artifact_digests: Vec<ArtifactDigest>,
+    pub review_ids: Vec<ReviewId>,
+    pub blockers: Vec<ProseCurrentWorkBlocker>,
 }
 
 /// Stable blocker kind emitted by the current-work projection.

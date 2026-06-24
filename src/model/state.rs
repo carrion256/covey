@@ -200,6 +200,7 @@ pub enum EventType {
     OperatorBlockerResolved,
     ApplyWorktreeRecorded,
     ApplyWorktreeStateRecorded,
+    ProseApplyBlockerRecorded,
 }
 
 /// Covey-owned lifecycle state for apply worktrees retained as evidence.

@@ -3,6 +3,7 @@ mod import;
 mod maintenance;
 mod meta_task;
 mod operator_blocker;
+mod prose_intake;
 mod queue;
 mod repoops;
 mod reservation;

@@ -16,17 +16,63 @@ use super::{
     IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
     OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
     OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerTargetKind,
-    PermissiveLandingReceiptDigest, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
-    QueueId, RepoopsPath, ReservationId, ReservationScope, ReviewId, ReviewVerdict,
-    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole, SessionToken,
-    SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget, SubtaskId,
-    SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
+    PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId, ProseTasksetId, ProviderId,
+    ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope,
+    ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole,
+    SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget,
+    SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VerifierId,
 };
 
 fn parse_idempotency_key(
     value: impl Into<String>,
 ) -> Result<IdempotencyKey, CoveyTypeValidationError> {
     IdempotencyKey::parse(value.into())
+}
+
+/// Request to record a prose-lane apply blocker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordProseApplyBlockerReq {
+    pub session_token: SessionToken,
+    pub blocker_id: ProseApplyBlockerId,
+    pub taskset_id: ProseTasksetId,
+    pub queue_id: Option<QueueId>,
+    pub artifact_digest: Option<ArtifactDigest>,
+    pub review_id: Option<ReviewId>,
+    pub reason: PromptText,
+    pub detail: PromptText,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RecordProseApplyBlockerReq {
+    /// Builds a prose apply blocker request from raw scheduler values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identifier, digest, or detail text is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        blocker_id: impl Into<String>,
+        taskset_id: impl Into<String>,
+        queue_id: Option<String>,
+        artifact_digest: Option<String>,
+        review_id: Option<String>,
+        reason: impl Into<String>,
+        detail: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            blocker_id: ProseApplyBlockerId::parse(blocker_id.into())?,
+            taskset_id: ProseTasksetId::parse(taskset_id.into())?,
+            queue_id: queue_id.map(QueueId::parse).transpose()?,
+            artifact_digest: artifact_digest.map(ArtifactDigest::parse).transpose()?,
+            review_id: review_id.map(ReviewId::parse).transpose()?,
+            reason: PromptText::parse(reason.into())?,
+            detail: PromptText::parse(detail.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
 }
 
 fn parse_idempotency_key_string(value: impl Into<String>) -> Result<IdempotencyKey, String> {

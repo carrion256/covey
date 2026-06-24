@@ -16,14 +16,14 @@ use super::{
     OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
     PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyGateBlockerReq,
     RecordApplyVerificationReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
-    RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
-    RecordSettlementReconcileBlockerReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq,
-    ReservationId, ReservationState, ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId,
-    ReviewState, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
-    SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
-    SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
-    SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
-    VerifierId,
+    RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq, RecordProseApplyBlockerReq,
+    RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq, ReleaseClaimReq,
+    RequestReservationReq, RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
+    ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict, RuntimeContainerId,
+    RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick, SessionRole, SessionState,
+    SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskPriority, SubtaskState,
+    SubtaskTitle, SupersedeQueueItemReq, TimestampMs, VerifierId,
 };
 
 /// Persisted session row.
@@ -4488,6 +4488,7 @@ pub enum EventPayload {
     ReadyQueueApplied(MarkAppliedReq),
     ApplyWorktreeRecorded(RecordApplyWorktreeReq),
     ApplyWorktreeStateRecorded(MarkApplyWorktreeStateReq),
+    ProseApplyBlockerRecorded(RecordProseApplyBlockerReq),
     OpenSpecArchiveStatusRecorded(RecordOpenSpecArchiveStatusReq),
     OperatorBlockerRecorded(RecordOperatorBlockerReq),
     OperatorBlockerResolved(ResolveOperatorBlockerReq),
@@ -4533,6 +4534,7 @@ impl EventPayload {
             Self::ReadyQueueApplied(_) => EventType::ReadyQueueApplied,
             Self::ApplyWorktreeRecorded(_) => EventType::ApplyWorktreeRecorded,
             Self::ApplyWorktreeStateRecorded(_) => EventType::ApplyWorktreeStateRecorded,
+            Self::ProseApplyBlockerRecorded(_) => EventType::ProseApplyBlockerRecorded,
             Self::OpenSpecArchiveStatusRecorded(_) => EventType::OpenSpecArchiveStatusRecorded,
             Self::OperatorBlockerRecorded(_) => EventType::OperatorBlockerRecorded,
             Self::OperatorBlockerResolved(_) => EventType::OperatorBlockerResolved,
@@ -4575,7 +4577,8 @@ impl EventPayload {
             | Self::ApplyGateBlockerRecorded(_)
             | Self::SettlementReconcileBlockerRecorded(_)
             | Self::ReadyQueueApplied(_)
-            | Self::ReadyQueueSuperseded(_) => ObjectType::ReadyQueue,
+            | Self::ReadyQueueSuperseded(_)
+            | Self::ProseApplyBlockerRecorded(_) => ObjectType::ReadyQueue,
             Self::ApplyWorktreeRecorded(_) | Self::ApplyWorktreeStateRecorded(_) => {
                 ObjectType::ApplyWorktree
             }

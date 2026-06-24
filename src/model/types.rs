@@ -654,6 +654,12 @@ string_newtype!(SessionToken, "session_token", validate_tokenish);
 string_newtype!(AgentPrincipalId, "agent_principal_id", validate_tokenish);
 string_newtype!(AgentInstanceId, "agent_instance_id", validate_tokenish);
 string_newtype!(MetaTaskId, "meta_task_id", validate_tokenish);
+string_newtype!(ProseTasksetId, "prose_taskset_id", validate_tokenish);
+string_newtype!(
+    ProseApplyBlockerId,
+    "prose_apply_blocker_id",
+    validate_tokenish
+);
 string_newtype!(PromptText, "prompt_text", validate_prompt_text);
 string_newtype!(SubtaskId, "subtask_id", validate_tokenish);
 string_newtype!(SubtaskTitle, "title", validate_subtask_title);

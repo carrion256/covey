@@ -10,8 +10,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::{Display, EnumString};
 
 use super::{
-    CoveyTypeValidationError, IdempotencyKey, MetaTaskId, ObjectType, OpenSpecChangeId,
-    OpenSpecDigest, PromptText, SessionToken, SourceIssueId, SubtaskId, SubtaskTitle, TimestampMs,
+    ArtifactDigest, CoveyTypeValidationError, IdempotencyKey, MetaTaskId, ObjectType,
+    OpenSpecChangeId, OpenSpecDigest, PromptText, ProseTasksetId, SessionToken, SourceIssueId,
+    SubtaskId, SubtaskTitle, TimestampMs,
 };
 
 /// Request to import eligible bd issues from a beads database into Covey as work subtasks.
@@ -36,6 +37,35 @@ pub struct BeadsDbPath(String);
 /// Filesystem path to the project root that owns an OpenSpec change.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectRootPath(String);
+
+/// Request to persist a confirmed lightweight prose preview as Covey work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportProseReq {
+    pub session_token: SessionToken,
+    pub taskset_id: ProseTasksetId,
+    pub prompt_text: PromptText,
+    pub source_excerpt: PromptText,
+    pub preview_digest: ArtifactDigest,
+    pub tasks: Vec<ImportProseTaskReq>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+/// One work item in a lightweight prose import request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportProseTaskReq {
+    pub title: SubtaskTitle,
+}
+
+/// Result of a persisted lightweight prose import.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportProseResult {
+    pub taskset_id: ProseTasksetId,
+    pub meta_task_id: MetaTaskId,
+    pub preview_digest: ArtifactDigest,
+    pub provenance_tier: String,
+    pub subtask_ids: Vec<SubtaskId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawImportBdV1Req {
@@ -215,6 +245,46 @@ impl ProjectRootPath {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl ImportProseReq {
+    /// Builds an import request from raw CLI values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identifier, text field, digest, or task title
+    /// does not satisfy Covey's boundary invariants.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        taskset_id: impl Into<String>,
+        prompt_text: impl Into<String>,
+        source_excerpt: impl Into<String>,
+        preview_digest: impl Into<String>,
+        task_titles: Vec<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            taskset_id: ProseTasksetId::parse(taskset_id.into())?,
+            prompt_text: PromptText::parse(prompt_text.into())?,
+            source_excerpt: PromptText::parse(source_excerpt.into())?,
+            preview_digest: ArtifactDigest::parse(preview_digest.into())?,
+            tasks: task_titles
+                .into_iter()
+                .map(ImportProseTaskReq::try_from_title)
+                .collect::<Result<Vec<_>, _>>()?,
+            idempotency_key: IdempotencyKey::parse(idempotency_key.into())?,
+        })
+    }
+}
+
+impl ImportProseTaskReq {
+    /// Builds a prose task request from a raw title.
+    pub fn try_from_title(title: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            title: SubtaskTitle::parse(title.into())?,
+        })
     }
 }
 
