@@ -1431,6 +1431,45 @@ impl OpenSpecCurrentWorkBlocker {
         }
     }
 
+    /// Builds a blocker for a direct-applied artifact that has no archive status row yet.
+    #[must_use]
+    pub fn direct_applied_unarchived(subtask: &SubtaskView) -> Self {
+        let artifact_digest = subtask
+            .artifact_digest()
+            .expect("direct applied archive blocker requires artifact digest");
+        let evidence_id = format!(
+            "openspec_current_work:applied_but_unarchived:{}:{}",
+            subtask.subtask_id.as_str(),
+            artifact_digest.as_str()
+        );
+        Self {
+            blocker_id: format!(
+                "blocker_openspec_current_work_applied_but_unarchived_{}",
+                subtask.subtask_id.as_str()
+            ),
+            evidence_id: evidence_id.clone(),
+            kind: OpenSpecCurrentWorkBlockerKind::AppliedButUnarchived,
+            owner: OpenSpecCurrentWorkOwner::OpenSpecArchive,
+            allowed_repairs: repair_commands(&[
+                "mutai-scheduler orchestrator archive-openspec",
+                "mutai-scheduler orchestrator recover open-spec-archive-status",
+            ]),
+            repair_playbook: OpenSpecCurrentWorkRepairPlaybook::new(
+                OpenSpecCurrentWorkRepairAction::ArchiveOpenSpec,
+                OpenSpecCurrentWorkRepairSafety::Mutating,
+                evidence_id,
+                "OpenSpec archive status is archived for the direct-applied artifact",
+                "retry archive-openspec after materializing the archive blocker or fixing archive preflight",
+            ),
+            subtask_id: Some(subtask.subtask_id.clone()),
+            claim_id: None,
+            queue_id: None,
+            artifact_digest: Some(artifact_digest.clone()),
+            review_id: None,
+            reason: "applied_but_unarchived".to_owned(),
+        }
+    }
+
     /// Builds a blocker for an applied queue item that lacks a durable landing receipt.
     #[must_use]
     pub fn applied_without_landing_receipt(queue_item: &ReadyQueueItem) -> Self {
@@ -2110,14 +2149,7 @@ fn current_work_state(
         && archive_statuses
             .iter()
             .any(|status| status.state == super::OpenSpecArchiveStatusState::Archived)
-        && archive_statuses
-            .iter()
-            .filter(|status| status.state == super::OpenSpecArchiveStatusState::Archived)
-            .count()
-            >= queue_items
-                .iter()
-                .filter(|item| item.state() == ReadyQueueState::Applied)
-                .count()
+        && archived_status_count(archive_statuses) >= archive_target_count(subtasks, queue_items)
     {
         return OpenSpecCurrentWorkState::Archived;
     }
@@ -2246,6 +2278,24 @@ fn current_work_blockers(
                 })
                 .map(OpenSpecCurrentWorkBlocker::applied_queue_unarchived),
         );
+        blockers.extend(
+            subtasks
+                .iter()
+                .filter(|subtask| subtask.state() == SubtaskState::Applied)
+                .filter(|subtask| {
+                    let Some(artifact_digest) = subtask.artifact_digest() else {
+                        return false;
+                    };
+                    !queue_items.iter().any(|item| {
+                        item.subtask_id() == subtask.subtask_id.as_str()
+                            && item.artifact_digest() == artifact_digest.as_str()
+                    }) && !archive_statuses.iter().any(|status| {
+                        status.subtask_id == subtask.subtask_id
+                            && status.artifact_digest == *artifact_digest
+                    })
+                })
+                .map(OpenSpecCurrentWorkBlocker::direct_applied_unarchived),
+        );
     }
     blockers.extend(subtasks.iter().filter_map(|subtask| {
         (matches!(
@@ -2290,6 +2340,34 @@ fn current_work_blockers(
         .then(|| OpenSpecCurrentWorkBlocker::vcs_workspace_unusable(workspace))
     }));
     blockers
+}
+
+fn archived_status_count(archive_statuses: &[OpenSpecArchiveStatus]) -> usize {
+    archive_statuses
+        .iter()
+        .filter(|status| status.state == super::OpenSpecArchiveStatusState::Archived)
+        .count()
+}
+
+fn archive_target_count(subtasks: &[SubtaskView], queue_items: &[ReadyQueueItem]) -> usize {
+    let applied_queue_targets = queue_items
+        .iter()
+        .filter(|item| item.state() == ReadyQueueState::Applied)
+        .count();
+    let direct_applied_targets = subtasks
+        .iter()
+        .filter(|subtask| subtask.state() == SubtaskState::Applied)
+        .filter(|subtask| {
+            let Some(artifact_digest) = subtask.artifact_digest() else {
+                return false;
+            };
+            !queue_items.iter().any(|item| {
+                item.subtask_id() == subtask.subtask_id.as_str()
+                    && item.artifact_digest() == artifact_digest.as_str()
+            })
+        })
+        .count();
+    applied_queue_targets + direct_applied_targets
 }
 
 fn queue_item_by_id<'a>(

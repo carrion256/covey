@@ -15,7 +15,9 @@ use crate::{
         SubtaskState, SubtaskTitle, review_state_name, review_verdict_name, subtask_kind_name,
         subtask_state_name,
     },
-    ops::queue::enqueue_approved_subtask_for_apply_tx,
+    ops::queue::{
+        enqueue_approved_subtask_for_apply_tx, record_direct_applied_openspec_archive_blocker_tx,
+    },
     queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
     store::append_session_event,
@@ -37,6 +39,13 @@ const fn artifact_kind_name(kind: ArtifactKind) -> &'static str {
         ArtifactKind::FindingsBundle => "findings_bundle",
         ArtifactKind::VerificationBundle => "verification_bundle",
     }
+}
+
+const fn is_applyable_artifact_kind(kind: ArtifactKind) -> bool {
+    matches!(
+        kind,
+        ArtifactKind::PatchBundle | ArtifactKind::IsolatedCommitRef | ArtifactKind::TreeBundle
+    )
 }
 
 impl Covey {
@@ -466,8 +475,14 @@ impl Covey {
                     close_claim_and_detach(tx, &claim, ClaimState::Released, now)?;
                     clear_session_active_subtask(tx, &req.session_token, now)?;
 
+                    let artifact = load_artifact_tx(tx, review.artifact_digest())?;
                     let work_state = match req.verdict {
-                        ReviewVerdict::Approve => SubtaskState::Approved,
+                        ReviewVerdict::Approve
+                            if is_applyable_artifact_kind(artifact.artifact_kind) =>
+                        {
+                            SubtaskState::Approved
+                        }
+                        ReviewVerdict::Approve => SubtaskState::Applied,
                         ReviewVerdict::ChangesRequested => SubtaskState::ChangesRequested,
                         ReviewVerdict::Blocked => SubtaskState::Blocked,
                     };
@@ -525,7 +540,9 @@ impl Covey {
                         now,
                     )?;
 
-                    if matches!(req.verdict, ReviewVerdict::Approve) {
+                    if matches!(req.verdict, ReviewVerdict::Approve)
+                        && is_applyable_artifact_kind(artifact.artifact_kind)
+                    {
                         enqueue_approved_subtask_for_apply_tx(
                             tx,
                             &req.session_token,
@@ -534,6 +551,15 @@ impl Covey {
                             crate::model::SettlementTarget::Canonical,
                             now,
                             format!("auto-enqueue-approved-review:{}", req.review_id),
+                        )?;
+                    } else if matches!(req.verdict, ReviewVerdict::Approve) {
+                        record_direct_applied_openspec_archive_blocker_tx(
+                            tx,
+                            &req.session_token,
+                            review.subtask_id(),
+                            review.artifact_digest(),
+                            now,
+                            format!("auto-openspec-archive-blocker-review:{}", req.review_id),
                         )?;
                     }
 
