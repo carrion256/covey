@@ -127,19 +127,19 @@ impl From<CoveyError> for ReportableError {
         use CoveyError::{
             AmbiguousCurrentWorkBlocker, ApplyGateEvidenceMissing,
             ApplyGateSeparationOfDutiesViolation, ArtifactDigestCollision, ArtifactNotFound,
-            ClaimNotFound, ClaimNotHeld, ConflictNotFound, CurrentWorkBlockerNotFound,
-            DatabaseError, DuplicateSubtaskId, FenceTokenMismatch, IdempotencyConflict,
-            IllegalTransition, ImportDuplicate, ImportSourceNotFound, InputTooLarge,
-            InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination, InvalidImportRow,
-            InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath, InvalidReadyQueueMetrics,
-            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema, LeaseExpired,
-            MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
-            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
-            ReviewKindMismatch, ReviewNotFound, RuntimeAttestationMissing,
-            SeparationOfDutiesViolation, SerializationError, SessionAlreadyActive,
-            SessionAlreadyHasActiveSubtask, SessionNotActive, SessionNotFound, StaleFenceToken,
-            StaleReviewArtifact, SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError,
-            UnknownArtifactDigest, WrongRole,
+            ClaimNotFound, ClaimNotHeld, CompletionPolicyViolation, ConflictNotFound,
+            CurrentWorkBlockerNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
+            IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
+            InputTooLarge, InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination,
+            InvalidImportRow, InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath,
+            InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
+            InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
+            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
+            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
+            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
+            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
+            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match error {
@@ -203,6 +203,7 @@ impl From<CoveyError> for ReportableError {
             | MetaTaskUnavailable { .. }
             | ArtifactDigestCollision { .. }
             | DuplicateSubtaskId { .. }
+            | CompletionPolicyViolation { .. }
             | IdempotencyConflict { .. }
             | ImportDuplicate { .. }
             | ApplyGateEvidenceMissing { .. }

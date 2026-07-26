@@ -5,9 +5,10 @@ use std::collections::HashSet;
 use super::{
     AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId,
     ApplyGateBlockerKind, ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState,
-    ArtifactDigest, ArtifactKind, ArtifactManifestPath, BaseRev, CancelMetaTaskReq,
-    ChangedPathsDigest, ClaimId, ClaimResult, ClaimState, CommandTranscriptDigest, ConflictId,
-    ConflictKind, ConflictResolutionState, CoveyTypeValidationError, CreateSubtaskRequest,
+    ArtifactDigest, ArtifactKind, ArtifactManifestPath, AttemptEvidenceDigest, AttemptFailureCode,
+    AttemptOutcomeKind, AttemptSummary, BaseRev, CancelMetaTaskReq, ChangedPathsDigest, ClaimId,
+    ClaimResult, ClaimState, CommandTranscriptDigest, CompletionPolicy, ConflictId, ConflictKind,
+    ConflictResolutionState, CoveyTypeValidationError, CreateSubtaskRequest, CreateWorkSubtaskReq,
     DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, ExitSessionReq,
     FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq,
     MarkApplyWorktreeStateReq, MetaTaskId, MetaTaskState, ModelId, ObjectType,
@@ -21,8 +22,8 @@ use super::{
     RecordVcsPacketStackEntryReq, RecordVcsPrPublicationReq, RecordVcsWorkspaceReq,
     ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationId, ReservationState,
     ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict,
-    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick,
-    SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
+    RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
+    SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
     SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
     VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind,
@@ -1113,6 +1114,8 @@ pub(crate) struct SubtaskRow {
     kind: SubtaskRowKind,
     lifecycle: SubtaskLifecycle,
     pub priority: SubtaskPriority,
+    completion_policy: CompletionPolicy,
+    routing_key: RoutingKey,
     timestamps: SubtaskTimestamps,
 }
 
@@ -1141,6 +1144,10 @@ struct RawSubtaskRow {
     current_claim_id: Option<ClaimId>,
     artifact_digest: Option<ArtifactDigest>,
     priority: SubtaskPriority,
+    #[serde(default = "default_completion_policy")]
+    completion_policy: CompletionPolicy,
+    #[serde(default = "default_routing_key")]
+    routing_key: RoutingKey,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -1158,6 +1165,8 @@ impl SubtaskRow {
         current_claim_id: Option<ClaimId>,
         artifact_digest: Option<ArtifactDigest>,
         priority: SubtaskPriority,
+        completion_policy: CompletionPolicy,
+        routing_key: RoutingKey,
         created_at: TimestampMs,
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
@@ -1173,6 +1182,15 @@ impl SubtaskRow {
             current_claim_id,
             artifact_digest,
         )?;
+        if subtask_kind == SubtaskKind::Work {
+            lifecycle.ensure_allowed_for_completion_policy(completion_policy)?;
+        } else if completion_policy != CompletionPolicy::CanonicalApply
+            || routing_key.as_str() != "mutai"
+        {
+            return Err(invalid_subtask_row(
+                "review and cleanup subtasks require canonical_apply policy and mutai routing",
+            ));
+        }
         let timestamps = SubtaskTimestamps::new(created_at, updated_at)?;
         Ok(Self {
             subtask_id,
@@ -1182,6 +1200,8 @@ impl SubtaskRow {
             kind,
             lifecycle,
             priority,
+            completion_policy,
+            routing_key,
             timestamps,
         })
     }
@@ -1209,6 +1229,16 @@ impl SubtaskRow {
     #[must_use]
     pub(crate) fn artifact_digest(&self) -> Option<&ArtifactDigest> {
         self.lifecycle.artifact_digest()
+    }
+
+    #[must_use]
+    pub(crate) const fn completion_policy(&self) -> CompletionPolicy {
+        self.completion_policy
+    }
+
+    #[must_use]
+    pub(crate) const fn routing_key(&self) -> &RoutingKey {
+        &self.routing_key
     }
 
     #[must_use]
@@ -1290,6 +1320,8 @@ impl From<&SubtaskRow> for RawSubtaskRow {
             current_claim_id: row.current_claim_id().cloned(),
             artifact_digest: row.artifact_digest().cloned(),
             priority: row.priority,
+            completion_policy: row.completion_policy(),
+            routing_key: row.routing_key().clone(),
             created_at: row.created_at(),
             updated_at: row.updated_at(),
         }
@@ -1311,6 +1343,8 @@ impl TryFrom<RawSubtaskRow> for SubtaskRow {
             raw.current_claim_id,
             raw.artifact_digest,
             raw.priority,
+            raw.completion_policy,
+            raw.routing_key,
             raw.created_at,
             raw.updated_at,
         )
@@ -1387,6 +1421,10 @@ pub enum SubtaskLifecycle {
         active_claim_id: Option<ClaimId>,
         artifact_digest: ArtifactDigest,
     },
+    Completed {
+        artifact_digest: Option<ArtifactDigest>,
+    },
+    Failed,
     Abandoned {
         artifact_digest: Option<ArtifactDigest>,
     },
@@ -1496,6 +1534,22 @@ impl SubtaskLifecycle {
                     "applied subtask is missing artifact digest",
                 )?,
             }),
+            SubtaskState::Completed => {
+                if active_claim_id.is_some() {
+                    return Err(invalid_subtask_row(
+                        "completed subtask cannot carry active claim state",
+                    ));
+                }
+                Ok(Self::Completed { artifact_digest })
+            }
+            SubtaskState::Failed => {
+                if active_claim_id.is_some() || artifact_digest.is_some() {
+                    return Err(invalid_subtask_row(
+                        "failed subtask cannot carry claim or artifact state",
+                    ));
+                }
+                Ok(Self::Failed)
+            }
             SubtaskState::Abandoned => {
                 if active_claim_id.is_some() {
                     return Err(invalid_subtask_row(
@@ -1532,6 +1586,8 @@ impl SubtaskLifecycle {
             Self::Decided => SubtaskState::Decided,
             Self::ReadyForApply { .. } => SubtaskState::ReadyForApply,
             Self::Applied { .. } => SubtaskState::Applied,
+            Self::Completed { .. } => SubtaskState::Completed,
+            Self::Failed => SubtaskState::Failed,
             Self::Abandoned { .. } => SubtaskState::Abandoned,
         }
     }
@@ -1560,7 +1616,12 @@ impl SubtaskLifecycle {
             | Self::Applied {
                 active_claim_id, ..
             } => active_claim_id.as_ref(),
-            Self::Available | Self::Blocked { .. } | Self::Decided | Self::Abandoned { .. } => None,
+            Self::Available
+            | Self::Blocked { .. }
+            | Self::Decided
+            | Self::Completed { .. }
+            | Self::Failed
+            | Self::Abandoned { .. } => None,
         }
     }
 
@@ -1586,10 +1647,14 @@ impl SubtaskLifecycle {
                 artifact_digest, ..
             } => Some(artifact_digest),
             Self::Blocked { artifact_digest } => Some(artifact_digest),
-            Self::Abandoned { artifact_digest } => artifact_digest.as_ref(),
-            Self::Available | Self::Claimed { .. } | Self::InProgress { .. } | Self::Decided => {
-                None
+            Self::Completed { artifact_digest } | Self::Abandoned { artifact_digest } => {
+                artifact_digest.as_ref()
             }
+            Self::Available
+            | Self::Claimed { .. }
+            | Self::InProgress { .. }
+            | Self::Decided
+            | Self::Failed => None,
         }
     }
 
@@ -1611,7 +1676,9 @@ impl SubtaskLifecycle {
                 | SubtaskState::ChangesRequested
                 | SubtaskState::Approved
                 | SubtaskState::ReadyForApply
-                | SubtaskState::Applied,
+                | SubtaskState::Applied
+                | SubtaskState::Completed
+                | SubtaskState::Failed,
             ) => Err(invalid_subtask_row(
                 "review subtasks cannot use work artifact lifecycle states",
             )),
@@ -1622,9 +1689,61 @@ impl SubtaskLifecycle {
                 | SubtaskState::ReviewPending
                 | SubtaskState::ChangesRequested
                 | SubtaskState::Approved
-                | SubtaskState::ReadyForApply,
+                | SubtaskState::ReadyForApply
+                | SubtaskState::Completed
+                | SubtaskState::Failed,
             ) => Err(invalid_subtask_row(
                 "cleanup subtasks cannot use work artifact or review lifecycle states",
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    pub(super) fn ensure_allowed_for_completion_policy(
+        &self,
+        completion_policy: CompletionPolicy,
+    ) -> rusqlite::Result<()> {
+        if completion_policy == CompletionPolicy::Direct && self.artifact_digest().is_some() {
+            return Err(invalid_subtask_row(
+                "direct subtask cannot carry artifact lifecycle state",
+            ));
+        }
+        match (completion_policy, self) {
+            (
+                CompletionPolicy::Direct,
+                Self::Completed {
+                    artifact_digest: None,
+                }
+                | Self::Failed,
+            ) => Ok(()),
+            (CompletionPolicy::Direct, Self::Completed { .. }) => Err(invalid_subtask_row(
+                "direct completed subtask cannot carry artifact state",
+            )),
+            (
+                CompletionPolicy::Reviewed,
+                Self::Completed {
+                    artifact_digest: Some(_),
+                },
+            ) => Ok(()),
+            (
+                CompletionPolicy::Reviewed,
+                Self::Completed {
+                    artifact_digest: None,
+                },
+            ) => Err(invalid_subtask_row(
+                "reviewed completed subtask requires artifact state",
+            )),
+            (
+                CompletionPolicy::Reviewed,
+                Self::Approved { .. } | Self::ReadyForApply { .. } | Self::Applied { .. },
+            ) => Err(invalid_subtask_row(
+                "reviewed subtasks cannot use canonical-apply lifecycle states",
+            )),
+            (CompletionPolicy::Reviewed | CompletionPolicy::CanonicalApply, Self::Failed) => Err(
+                invalid_subtask_row("only direct subtasks can use failed lifecycle state"),
+            ),
+            (CompletionPolicy::CanonicalApply, Self::Completed { .. }) => Err(invalid_subtask_row(
+                "canonical-apply subtasks cannot use completed lifecycle state",
             )),
             _ => Ok(()),
         }
@@ -1669,6 +1788,8 @@ pub struct WorkSubtask {
     title: SubtaskTitle,
     lifecycle: SubtaskLifecycle,
     priority: SubtaskPriority,
+    completion_policy: CompletionPolicy,
+    routing_key: RoutingKey,
     timestamps: SubtaskTimestamps,
 }
 
@@ -1706,6 +1827,10 @@ struct RawWorkSubtask {
     title: String,
     lifecycle: SubtaskLifecycle,
     priority: SubtaskPriority,
+    #[serde(default = "default_completion_policy")]
+    completion_policy: CompletionPolicy,
+    #[serde(default = "default_routing_key")]
+    routing_key: RoutingKey,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -1749,7 +1874,34 @@ impl WorkSubtask {
         created_at: TimestampMs,
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
+        Self::new_with_execution_contract(
+            subtask_id,
+            meta_task_id,
+            title,
+            lifecycle,
+            priority,
+            CompletionPolicy::CanonicalApply,
+            default_routing_key(),
+            created_at,
+            updated_at,
+        )
+    }
+
+    /// Builds work with an explicit immutable completion and routing contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_execution_contract(
+        subtask_id: SubtaskId,
+        meta_task_id: MetaTaskId,
+        title: String,
+        lifecycle: SubtaskLifecycle,
+        priority: SubtaskPriority,
+        completion_policy: CompletionPolicy,
+        routing_key: RoutingKey,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> rusqlite::Result<Self> {
         lifecycle.ensure_allowed_for_kind(SubtaskKind::Work)?;
+        lifecycle.ensure_allowed_for_completion_policy(completion_policy)?;
         let title =
             SubtaskTitle::parse(title).map_err(|err| invalid_subtask_row(&err.to_string()))?;
         let timestamps = SubtaskTimestamps::new(created_at, updated_at)?;
@@ -1759,8 +1911,20 @@ impl WorkSubtask {
             title,
             lifecycle,
             priority,
+            completion_policy,
+            routing_key,
             timestamps,
         })
+    }
+
+    #[must_use]
+    pub const fn completion_policy(&self) -> CompletionPolicy {
+        self.completion_policy
+    }
+
+    #[must_use]
+    pub const fn routing_key(&self) -> &RoutingKey {
+        &self.routing_key
     }
 }
 
@@ -1832,12 +1996,14 @@ impl TryFrom<RawWorkSubtask> for WorkSubtask {
     type Error = rusqlite::Error;
 
     fn try_from(raw: RawWorkSubtask) -> Result<Self, Self::Error> {
-        Self::new(
+        Self::new_with_execution_contract(
             raw.subtask_id,
             raw.meta_task_id,
             raw.title,
             raw.lifecycle,
             raw.priority,
+            raw.completion_policy,
+            raw.routing_key,
             raw.created_at,
             raw.updated_at,
         )
@@ -1852,6 +2018,8 @@ impl From<&WorkSubtask> for RawWorkSubtask {
             title: subtask.title.as_str().to_owned(),
             lifecycle: subtask.lifecycle.clone(),
             priority: subtask.priority,
+            completion_policy: subtask.completion_policy,
+            routing_key: subtask.routing_key.clone(),
             created_at: subtask.timestamps.created_at(),
             updated_at: subtask.timestamps.updated_at(),
         }
@@ -2050,12 +2218,14 @@ impl TryFrom<SubtaskRow> for Subtask {
         let created_at = row.created_at();
         let updated_at = row.updated_at();
         match row.kind {
-            SubtaskRowKind::Work => Ok(Self::Work(WorkSubtask::new(
+            SubtaskRowKind::Work => Ok(Self::Work(WorkSubtask::new_with_execution_contract(
                 row.subtask_id,
                 row.meta_task_id,
                 row.title.into(),
                 row.lifecycle,
                 row.priority,
+                row.completion_policy,
+                row.routing_key,
                 created_at,
                 updated_at,
             )?)),
@@ -2091,6 +2261,14 @@ fn invalid_subtask_row(reason: &str) -> rusqlite::Error {
             reason.to_owned(),
         )),
     )
+}
+
+fn default_routing_key() -> RoutingKey {
+    RoutingKey::parse("mutai").expect("the built-in mutai routing key is valid")
+}
+
+const fn default_completion_policy() -> CompletionPolicy {
+    CompletionPolicy::CanonicalApply
 }
 
 /// Persisted claim row.
@@ -2268,6 +2446,171 @@ impl ClaimTimestamps {
 
     const fn updated_at(self) -> TimestampMs {
         self.updated_at
+    }
+}
+
+/// Immutable evidence recorded for one fenced execution attempt.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptOutcome {
+    pub claim_id: ClaimId,
+    pub subtask_id: SubtaskId,
+    pub fence_seq: FenceSeq,
+    outcome: AttemptOutcomeResult,
+    pub evidence_digest: AttemptEvidenceDigest,
+    pub summary: AttemptSummary,
+    pub recorded_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttemptOutcomeResult {
+    Succeeded,
+    RetryableFailure { failure_code: AttemptFailureCode },
+    TerminalFailure { failure_code: AttemptFailureCode },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawAttemptOutcome {
+    claim_id: ClaimId,
+    subtask_id: SubtaskId,
+    fence_seq: FenceSeq,
+    outcome_kind: AttemptOutcomeKind,
+    evidence_digest: AttemptEvidenceDigest,
+    failure_code: Option<AttemptFailureCode>,
+    summary: AttemptSummary,
+    recorded_at: TimestampMs,
+}
+
+impl AttemptOutcome {
+    /// Builds one attempt outcome while enforcing success/failure field shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when success carries a failure code or a failed outcome
+    /// omits its failure code.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        claim_id: ClaimId,
+        subtask_id: SubtaskId,
+        fence_seq: FenceSeq,
+        outcome_kind: AttemptOutcomeKind,
+        evidence_digest: AttemptEvidenceDigest,
+        failure_code: Option<AttemptFailureCode>,
+        summary: AttemptSummary,
+        recorded_at: TimestampMs,
+    ) -> Result<Self, String> {
+        let outcome = AttemptOutcomeResult::from_parts(outcome_kind, failure_code)?;
+        Ok(Self {
+            claim_id,
+            subtask_id,
+            fence_seq,
+            outcome,
+            evidence_digest,
+            summary,
+            recorded_at,
+        })
+    }
+
+    #[must_use]
+    pub const fn outcome_kind(&self) -> AttemptOutcomeKind {
+        self.outcome.kind()
+    }
+
+    #[must_use]
+    pub const fn failure_code(&self) -> Option<&AttemptFailureCode> {
+        self.outcome.failure_code()
+    }
+}
+
+impl AttemptOutcomeResult {
+    fn from_parts(
+        outcome_kind: AttemptOutcomeKind,
+        failure_code: Option<AttemptFailureCode>,
+    ) -> Result<Self, String> {
+        match (outcome_kind, failure_code) {
+            (AttemptOutcomeKind::Succeeded, None) => Ok(Self::Succeeded),
+            (AttemptOutcomeKind::Succeeded, Some(_)) => {
+                Err("successful attempt outcome cannot carry failure_code".to_owned())
+            }
+            (AttemptOutcomeKind::RetryableFailure, Some(failure_code)) => {
+                Ok(Self::RetryableFailure { failure_code })
+            }
+            (AttemptOutcomeKind::TerminalFailure, Some(failure_code)) => {
+                Ok(Self::TerminalFailure { failure_code })
+            }
+            (AttemptOutcomeKind::RetryableFailure | AttemptOutcomeKind::TerminalFailure, None) => {
+                Err("failed attempt outcome requires failure_code".to_owned())
+            }
+        }
+    }
+
+    const fn kind(&self) -> AttemptOutcomeKind {
+        match self {
+            Self::Succeeded => AttemptOutcomeKind::Succeeded,
+            Self::RetryableFailure { .. } => AttemptOutcomeKind::RetryableFailure,
+            Self::TerminalFailure { .. } => AttemptOutcomeKind::TerminalFailure,
+        }
+    }
+
+    const fn failure_code(&self) -> Option<&AttemptFailureCode> {
+        match self {
+            Self::Succeeded => None,
+            Self::RetryableFailure { failure_code } | Self::TerminalFailure { failure_code } => {
+                Some(failure_code)
+            }
+        }
+    }
+}
+
+impl From<&AttemptOutcome> for RawAttemptOutcome {
+    fn from(outcome: &AttemptOutcome) -> Self {
+        Self {
+            claim_id: outcome.claim_id.clone(),
+            subtask_id: outcome.subtask_id.clone(),
+            fence_seq: outcome.fence_seq,
+            outcome_kind: outcome.outcome_kind(),
+            evidence_digest: outcome.evidence_digest.clone(),
+            failure_code: outcome.failure_code().cloned(),
+            summary: outcome.summary.clone(),
+            recorded_at: outcome.recorded_at,
+        }
+    }
+}
+
+impl TryFrom<RawAttemptOutcome> for AttemptOutcome {
+    type Error = String;
+
+    fn try_from(raw: RawAttemptOutcome) -> Result<Self, Self::Error> {
+        Self::new(
+            raw.claim_id,
+            raw.subtask_id,
+            raw.fence_seq,
+            raw.outcome_kind,
+            raw.evidence_digest,
+            raw.failure_code,
+            raw.summary,
+            raw.recorded_at,
+        )
+    }
+}
+
+impl Serialize for AttemptOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawAttemptOutcome::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AttemptOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawAttemptOutcome::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -4540,8 +4883,12 @@ pub enum EventPayload {
     MetaTaskSubmitted(SubmitMetaTaskReq),
     MetaTaskCancelled(CancelMetaTaskReq),
     SubtaskCreated(CreateSubtaskRequest),
+    WorkSubtaskCreated(CreateWorkSubtaskReq),
     SubtaskClaimed(ClaimResult),
     SubtaskStarted(StartSubtaskReq),
+    SubtaskFinished(AttemptOutcome),
+    SubtaskRetried(AttemptOutcome),
+    SubtaskFailed(AttemptOutcome),
     SubtaskAbandoned(AbandonSubtaskReq),
     ClaimReleased(ReleaseClaimReq),
     ClaimRenewed(ClaimResult),
@@ -4588,8 +4935,12 @@ impl EventPayload {
             Self::MetaTaskSubmitted(_) => EventType::MetaTaskSubmitted,
             Self::MetaTaskCancelled(_) => EventType::MetaTaskCancelled,
             Self::SubtaskCreated(_) => EventType::SubtaskCreated,
+            Self::WorkSubtaskCreated(_) => EventType::WorkSubtaskCreated,
             Self::SubtaskClaimed(_) => EventType::SubtaskClaimed,
             Self::SubtaskStarted(_) => EventType::SubtaskStarted,
+            Self::SubtaskFinished(_) => EventType::SubtaskFinished,
+            Self::SubtaskRetried(_) => EventType::SubtaskRetried,
+            Self::SubtaskFailed(_) => EventType::SubtaskFailed,
             Self::SubtaskAbandoned(_) => EventType::SubtaskAbandoned,
             Self::ClaimReleased(_) => EventType::ClaimReleased,
             Self::ClaimRenewed(_) => EventType::ClaimRenewed,
@@ -4637,9 +4988,13 @@ impl EventPayload {
             | Self::SessionsReaped(_) => ObjectType::Session,
             Self::RuntimeAttestationRecorded(_) => ObjectType::RuntimeAttestation,
             Self::MetaTaskSubmitted(_) | Self::MetaTaskCancelled(_) => ObjectType::MetaTask,
-            Self::SubtaskCreated(_) | Self::SubtaskStarted(_) | Self::SubtaskAbandoned(_) => {
-                ObjectType::Subtask
-            }
+            Self::SubtaskCreated(_)
+            | Self::WorkSubtaskCreated(_)
+            | Self::SubtaskStarted(_)
+            | Self::SubtaskFinished(_)
+            | Self::SubtaskRetried(_)
+            | Self::SubtaskFailed(_)
+            | Self::SubtaskAbandoned(_) => ObjectType::Subtask,
             Self::SubtaskClaimed(_)
             | Self::ClaimReleased(_)
             | Self::ClaimRenewed(_)

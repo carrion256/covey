@@ -86,7 +86,25 @@ pub(crate) const fn subtask_state_name(state: SubtaskState) -> &'static str {
         SubtaskState::Decided => "decided",
         SubtaskState::ReadyForApply => "ready_for_apply",
         SubtaskState::Applied => "applied",
+        SubtaskState::Completed => "completed",
+        SubtaskState::Failed => "failed",
         SubtaskState::Abandoned => "abandoned",
+    }
+}
+
+pub(crate) const fn completion_policy_name(policy: CompletionPolicy) -> &'static str {
+    match policy {
+        CompletionPolicy::Direct => "direct",
+        CompletionPolicy::Reviewed => "reviewed",
+        CompletionPolicy::CanonicalApply => "canonical_apply",
+    }
+}
+
+pub(crate) const fn attempt_outcome_kind_name(kind: AttemptOutcomeKind) -> &'static str {
+    match kind {
+        AttemptOutcomeKind::Succeeded => "succeeded",
+        AttemptOutcomeKind::RetryableFailure => "retryable_failure",
+        AttemptOutcomeKind::TerminalFailure => "terminal_failure",
     }
 }
 
@@ -177,8 +195,12 @@ pub enum EventType {
     MetaTaskSubmitted,
     MetaTaskCancelled,
     SubtaskCreated,
+    WorkSubtaskCreated,
     SubtaskClaimed,
     SubtaskStarted,
+    SubtaskFinished,
+    SubtaskRetried,
+    SubtaskFailed,
     SubtaskAbandoned,
     ClaimReleased,
     ClaimRenewed,
@@ -488,7 +510,29 @@ pub enum SubtaskState {
     Decided,
     ReadyForApply,
     Applied,
+    Completed,
+    Failed,
     Abandoned,
+}
+
+/// Immutable assurance required before a work subtask is successful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum CompletionPolicy {
+    Direct,
+    Reviewed,
+    CanonicalApply,
+}
+
+/// Immutable outcome recorded for one fenced execution attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum AttemptOutcomeKind {
+    Succeeded,
+    RetryableFailure,
+    TerminalFailure,
 }
 
 /// Claim lifecycle states.

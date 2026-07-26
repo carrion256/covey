@@ -1,10 +1,11 @@
 use super::{
-    AbandonSubtaskReq, Artifact, ArtifactDigest, ArtifactKind, CancelMetaTaskReq, Claim, ClaimId,
-    ClaimNextReq, ClaimReadyQueueReq, ClaimResult, ClaimState, ClaimSubtaskReq, Conflict,
-    ConflictKind, ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq,
-    EnqueueForApplyReq, Event, EventPayload, EventType, ExitSessionReq, ExpiredCountPayload,
-    ExpiringClaim, FenceSeq, HeartbeatReq, IdempotencyKey, ImportBdV1Req, ImportBdV1Result,
-    ImportBdV1SkipReason, ImportOpenSpecAction, ImportOpenSpecConflict,
+    AbandonSubtaskReq, Artifact, ArtifactDigest, ArtifactKind, AttemptEvidenceDigest,
+    AttemptFailureCode, AttemptOutcome, AttemptOutcomeKind, AttemptSummary, CancelMetaTaskReq,
+    Claim, ClaimId, ClaimNextReq, ClaimReadyQueueReq, ClaimResult, ClaimState, ClaimSubtaskReq,
+    CompletionPolicy, Conflict, ConflictKind, ConflictResolutionState, CreateSubtaskRequest,
+    DecideReviewReq, EnqueueForApplyReq, Event, EventPayload, EventType, ExitSessionReq,
+    ExpiredCountPayload, ExpiringClaim, FenceSeq, HeartbeatReq, IdempotencyKey, ImportBdV1Req,
+    ImportBdV1Result, ImportBdV1SkipReason, ImportOpenSpecAction, ImportOpenSpecConflict,
     ImportOpenSpecConflictReason, ImportOpenSpecEvent, ImportOpenSpecItemResult, ImportOpenSpecReq,
     ImportOpenSpecResult, LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq,
     MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, MetaTaskStatus, ObjectType,
@@ -17,14 +18,15 @@ use super::{
     RepoopsAuthorityLockFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq,
     RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
     ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
-    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, ScopeClass, Session, SessionHandle,
-    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
-    StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
-    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
-    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq,
-    WorkSubtask, bd_import_v1_subtask_id, make_id, parse_generated_members,
+    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, RoutingKey, ScopeClass, Session,
+    SessionHandle, SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget,
+    StaleSessionsPayload, StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId,
+    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus,
+    SubtaskTitle, SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent,
+    VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id, make_id,
+    parse_generated_members,
 };
-use crate::CoveyError;
+use crate::{CoveyError, CreateWorkSubtaskReq};
 use serde::Serialize;
 use serde_json::json;
 
@@ -314,6 +316,8 @@ fn subtask_row_preserves_flat_review_target_shape() {
         None,
         None,
         SubtaskPriority::parse(10).expect("valid subtask priority"),
+        CompletionPolicy::CanonicalApply,
+        RoutingKey::parse("mutai").expect("valid routing key"),
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -659,6 +663,8 @@ fn subtask_row_rejects_non_monotonic_timestamps() {
         None,
         None,
         SubtaskPriority::parse(10).expect("valid subtask priority"),
+        CompletionPolicy::CanonicalApply,
+        RoutingKey::parse("mutai").expect("valid routing key"),
         TimestampMs::parse(200).expect("valid timestamp"),
         TimestampMs::parse(100).expect("valid timestamp"),
     )
@@ -709,6 +715,56 @@ fn work_subtask_domain_rejects_non_monotonic_timestamps() {
             .contains("subtask updated_at must be greater than or equal to created_at"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn attempt_outcome_enforces_failure_shape_without_exposing_session_tokens() {
+    let claim_id = ClaimId::parse("claim-1").expect("valid claim id");
+    let subtask_id = SubtaskId::parse("subtask-1").expect("valid subtask id");
+    let fence_seq = FenceSeq::parse(1).expect("valid fence");
+    let evidence_digest =
+        AttemptEvidenceDigest::parse("blake3:outcome").expect("valid evidence digest");
+    let summary = AttemptSummary::parse("completed work").expect("valid summary");
+    let recorded_at = TimestampMs::parse(200).expect("valid timestamp");
+
+    let outcome = AttemptOutcome::new(
+        claim_id.clone(),
+        subtask_id.clone(),
+        fence_seq,
+        AttemptOutcomeKind::Succeeded,
+        evidence_digest.clone(),
+        None,
+        summary.clone(),
+        recorded_at,
+    )
+    .expect("successful attempt outcome should construct");
+    let value = serde_json::to_value(&outcome).expect("attempt outcome should serialize");
+    assert_eq!(value["outcome_kind"], "succeeded");
+    assert!(value.get("recorded_by_session").is_none());
+
+    let failure_code = AttemptFailureCode::parse("terminal_failure").expect("valid failure code");
+    AttemptOutcome::new(
+        claim_id.clone(),
+        subtask_id.clone(),
+        fence_seq,
+        AttemptOutcomeKind::Succeeded,
+        evidence_digest.clone(),
+        Some(failure_code),
+        summary.clone(),
+        recorded_at,
+    )
+    .expect_err("successful outcome must reject failure code");
+    AttemptOutcome::new(
+        claim_id,
+        subtask_id,
+        fence_seq,
+        AttemptOutcomeKind::TerminalFailure,
+        evidence_digest,
+        None,
+        summary,
+        recorded_at,
+    )
+    .expect_err("failed outcome must require failure code");
 }
 
 #[test]
@@ -775,6 +831,8 @@ fn review_subtask_domain_requires_a_target_artifact() {
         None,
         None,
         SubtaskPriority::parse(10).expect("valid subtask priority"),
+        CompletionPolicy::CanonicalApply,
+        RoutingKey::parse("mutai").expect("valid routing key"),
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -1453,6 +1511,8 @@ fn claimed_artifact_subtask_status_json(
             "active_claim_id": "claim-1",
             "artifact_digest": "blake3:artifact",
             "priority": 10,
+            "completion_policy": "canonical_apply",
+            "routing_key": "mutai",
             "created_at": 100,
             "updated_at": 200
         },
@@ -1476,6 +1536,7 @@ fn claimed_artifact_subtask_status_json(
             "changed_paths_digest": "blake3:paths",
             "created_at": 150
         },
+        "attempt_outcomes": [],
         "reviews": [],
         "ready_queue": []
     })
@@ -1505,6 +1566,8 @@ fn try_work_subtask_row(
         current_claim_id,
         artifact_digest,
         SubtaskPriority::parse(10).expect("valid subtask priority"),
+        CompletionPolicy::CanonicalApply,
+        RoutingKey::parse("mutai").expect("valid routing key"),
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -1523,6 +1586,8 @@ fn subtask_rows_reject_blank_titles() {
         None,
         None,
         SubtaskPriority::parse(10).expect("valid subtask priority"),
+        CompletionPolicy::CanonicalApply,
+        RoutingKey::parse("mutai").expect("valid routing key"),
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -5786,6 +5851,17 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         priority: SubtaskPriority::parse(10).expect("valid subtask priority"),
         idempotency_key: IdempotencyKey::parse("idem-create").expect("valid idempotency key"),
     };
+    let create_work = CreateWorkSubtaskReq::try_from_raw_parts(
+        "session-1",
+        "meta-1",
+        Some("subtask-direct-1".to_owned()),
+        "run direct work",
+        10,
+        CompletionPolicy::Direct,
+        "hermes",
+        "idem-create-work",
+    )
+    .expect("valid explicit work request");
     let claim = ClaimResult::new(
         ClaimId::parse("claim-1").expect("valid claim id"),
         SubtaskId::parse("subtask-1").expect("valid subtask id"),
@@ -5799,6 +5875,39 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         "idem-start".to_owned(),
     )
     .expect("valid start-subtask request");
+    let finish = AttemptOutcome::new(
+        ClaimId::parse("claim-finish").expect("valid claim id"),
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        FenceSeq::parse(1).expect("valid fence"),
+        AttemptOutcomeKind::Succeeded,
+        AttemptEvidenceDigest::parse("blake3:finish").expect("valid digest"),
+        None,
+        AttemptSummary::parse("completed work").expect("valid summary"),
+        TimestampMs::parse(100).expect("valid timestamp"),
+    )
+    .expect("valid finish outcome");
+    let retry = AttemptOutcome::new(
+        ClaimId::parse("claim-retry").expect("valid claim id"),
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        FenceSeq::parse(2).expect("valid fence"),
+        AttemptOutcomeKind::RetryableFailure,
+        AttemptEvidenceDigest::parse("blake3:retry").expect("valid digest"),
+        Some(AttemptFailureCode::parse("transient_failure").expect("valid failure code")),
+        AttemptSummary::parse("retry work").expect("valid summary"),
+        TimestampMs::parse(101).expect("valid timestamp"),
+    )
+    .expect("valid retry outcome");
+    let fail = AttemptOutcome::new(
+        ClaimId::parse("claim-fail").expect("valid claim id"),
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        FenceSeq::parse(3).expect("valid fence"),
+        AttemptOutcomeKind::TerminalFailure,
+        AttemptEvidenceDigest::parse("blake3:failure").expect("valid digest"),
+        Some(AttemptFailureCode::parse("terminal_failure").expect("valid failure code")),
+        AttemptSummary::parse("failed work").expect("valid summary"),
+        TimestampMs::parse(102).expect("valid timestamp"),
+    )
+    .expect("valid fail outcome");
     let release = ReleaseClaimReq::try_from_raw_parts(
         "session-1".to_owned(),
         ClaimId::parse("claim-1").expect("valid claim id"),
@@ -5926,6 +6035,11 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
             EventPayload::SubtaskCreated(create),
         ),
         (
+            EventType::WorkSubtaskCreated,
+            payload_json(&create_work),
+            EventPayload::WorkSubtaskCreated(create_work),
+        ),
+        (
             EventType::SubtaskClaimed,
             payload_json(&claim),
             EventPayload::SubtaskClaimed(claim.clone()),
@@ -5934,6 +6048,21 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
             EventType::SubtaskStarted,
             payload_json(&start),
             EventPayload::SubtaskStarted(start.clone()),
+        ),
+        (
+            EventType::SubtaskFinished,
+            payload_json(&finish),
+            EventPayload::SubtaskFinished(finish),
+        ),
+        (
+            EventType::SubtaskRetried,
+            payload_json(&retry),
+            EventPayload::SubtaskRetried(retry),
+        ),
+        (
+            EventType::SubtaskFailed,
+            payload_json(&fail),
+            EventPayload::SubtaskFailed(fail),
         ),
         (
             EventType::SubtaskAbandoned,

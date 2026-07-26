@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
-use covey::{ArtifactKind, ReviewVerdict, SubtaskKind};
+use covey::{ArtifactKind, CompletionPolicy, ReviewVerdict, SubtaskKind};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum SubtaskCommand {
@@ -8,6 +8,9 @@ pub(crate) enum SubtaskCommand {
     ClaimNext(ClaimNextArgs),
     Claim(ClaimSubtaskArgs),
     Start(StartSubtaskArgs),
+    Finish(FinishSubtaskArgs),
+    Retry(RetrySubtaskArgs),
+    Fail(FailSubtaskArgs),
     Abandon(AbandonSubtaskArgs),
     Status(SubtaskStatusArgs),
     Candidates(SubtaskCandidatesArgs),
@@ -54,6 +57,10 @@ pub(crate) struct CreateSubtaskArgs {
     pub(crate) review_target_artifact_digest: Option<String>,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
+    #[arg(long, value_enum)]
+    pub(crate) completion_policy: Option<CompletionPolicyArg>,
+    #[arg(long)]
+    pub(crate) routing_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -66,6 +73,8 @@ pub(crate) struct ClaimNextArgs {
     pub(crate) meta_task_id: Option<String>,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
+    #[arg(long)]
+    pub(crate) routing_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -88,6 +97,58 @@ pub(crate) struct StartSubtaskArgs {
     pub(crate) claim_id: String,
     #[arg(long)]
     pub(crate) fence_seq: i64,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct FinishSubtaskArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) claim_id: String,
+    #[arg(long)]
+    pub(crate) fence_seq: i64,
+    #[arg(long)]
+    pub(crate) evidence_digest: String,
+    #[arg(long)]
+    pub(crate) summary: String,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RetrySubtaskArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) claim_id: String,
+    #[arg(long)]
+    pub(crate) fence_seq: i64,
+    #[arg(long)]
+    pub(crate) evidence_digest: String,
+    #[arg(long)]
+    pub(crate) failure_code: String,
+    #[arg(long)]
+    pub(crate) summary: String,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct FailSubtaskArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) claim_id: String,
+    #[arg(long)]
+    pub(crate) fence_seq: i64,
+    #[arg(long)]
+    pub(crate) evidence_digest: String,
+    #[arg(long)]
+    pub(crate) failure_code: String,
+    #[arg(long)]
+    pub(crate) summary: String,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }
@@ -118,12 +179,16 @@ pub(crate) struct SubtaskCandidatesArgs {
     pub(crate) limit: usize,
     #[arg(long)]
     pub(crate) meta_task_id: Option<String>,
+    #[arg(long)]
+    pub(crate) routing_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct SubtaskAvailabilityArgs {
     #[arg(long)]
     pub(crate) meta_task_id: Option<String>,
+    #[arg(long)]
+    pub(crate) routing_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -260,6 +325,24 @@ pub(crate) enum SubtaskKindArg {
 pub(crate) enum CandidateRoleArg {
     Executor,
     Reviewer,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum CompletionPolicyArg {
+    Direct,
+    Reviewed,
+    CanonicalApply,
+}
+
+impl From<CompletionPolicyArg> for CompletionPolicy {
+    fn from(value: CompletionPolicyArg) -> Self {
+        match value {
+            CompletionPolicyArg::Direct => CompletionPolicy::Direct,
+            CompletionPolicyArg::Reviewed => CompletionPolicy::Reviewed,
+            CompletionPolicyArg::CanonicalApply => CompletionPolicy::CanonicalApply,
+        }
+    }
 }
 
 impl From<CandidateRoleArg> for covey::SessionRole {

@@ -4013,7 +4013,7 @@ fn claim_candidate_lookup_queries_use_candidate_indexes() {
         SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest,
                state, current_claim_id, artifact_digest, priority, created_at, updated_at
         FROM subtasks
-        WHERE state NOT IN ('available', 'applied', 'abandoned', 'decided')
+        WHERE state NOT IN ('available', 'applied', 'completed', 'failed', 'abandoned', 'decided')
           AND updated_at <= ?1
         ORDER BY updated_at ASC
         LIMIT ?2
@@ -4045,7 +4045,7 @@ fn claim_candidate_lookup_queries_use_candidate_indexes() {
         FROM subtasks st
         LEFT JOIN claims c ON c.claim_id = st.current_claim_id
         LEFT JOIN sessions s ON s.session_token = c.owner_session_token
-        WHERE st.state NOT IN ('available', 'applied', 'abandoned', 'decided')
+        WHERE st.state NOT IN ('available', 'applied', 'completed', 'failed', 'abandoned', 'decided')
           AND st.updated_at <= ?1
         ORDER BY st.updated_at ASC
         LIMIT ?2
@@ -4108,7 +4108,7 @@ fn claim_candidate_lookup_queries_use_candidate_indexes() {
             SELECT 1
             FROM subtasks
             WHERE meta_task_id = ?1
-              AND state NOT IN ('applied', 'abandoned', 'decided')
+              AND state NOT IN ('applied', 'completed', 'failed', 'abandoned', 'decided')
             LIMIT 1
         )
         "#,

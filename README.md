@@ -4,10 +4,13 @@ Covey is a small, correctness-critical coordination substrate for agent cohorts.
 
 1. What work exists?
 2. Who is doing what right now?
-3. What is the status of the artifact a session produced?
+3. What result or artifact did a session produce?
 4. What happened, in order?
 
-That is the whole job. Covey stores state, enforces invariants, and exposes changes. It does not plan work, schedule agents, apply patches, invoke models, or act as a general-purpose workflow engine.
+That is the whole job. Covey stores state, enforces invariants, and exposes
+changes. It can serve as a local agent work queue, but it does not plan work,
+supervise or spawn agents, apply patches, invoke models, or act as a
+general-purpose workflow engine.
 
 Version: `0.1` draft.
 
@@ -21,6 +24,7 @@ Covey is intentionally narrow.
 - It is not a general application database.
 - It is not a distributed system.
 - It is not a replacement for git, mutAI, or other higher-level coordination systems.
+- It is not an agent supervisor, polling loop, process scheduler, or retry timer.
 
 If a proposed feature does more than store, constrain, and notify, it probably belongs somewhere else.
 
@@ -46,8 +50,11 @@ Covey tracks a fixed set of entities:
 
 - `sessions`: who is connected, what role they have, and when they last heartbeated
 - `meta_tasks`: top-level operator work items
-- `subtasks`: decomposed units of work, including first-class review subtasks
+- `subtasks`: decomposed units of work with immutable completion policies and
+  exact routing keys, including first-class review subtasks
 - `claims`: fenced ownership of a subtask with leases
+- `subtask_attempt_outcomes`: immutable success, retryable-failure, or
+  terminal-failure receipts for direct work attempts
 - `artifacts`: immutable outputs identified by digest
 - `reviews`: verdicts attached to an exact artifact digest
 - `reservations`: advisory path-scope hints for planning
@@ -64,6 +71,14 @@ Covey exists to make invalid states hard or impossible.
 - At most one active session per `agent_principal_id`
 - At most one held claim per subtask
 - Fence tokens increase monotonically per subtask claim lifecycle
+- Completion policy and routing key are immutable task facts
+- Candidate reads and `claim-next` match one exact routing key; the legacy API
+  is the `mutai` route
+- Direct attempt outcomes require the current held claim, live lease, and exact
+  fence, and close that claim in the same transaction
+- `direct` work cannot publish artifacts, request review, or enter the apply
+  queue; `reviewed` work cannot enter the apply queue; only
+  `canonical_apply` work can reach `applied`
 - Ready-queue apply claims are fenced and leased before apply completion is accepted
 - Artifact digests are unique and immutable
 - Reviews bind to one exact artifact digest; a new artifact requires a new review
@@ -73,24 +88,56 @@ Covey exists to make invalid states hard or impossible.
 
 These guarantees are enforced through database constraints plus transactional checks in the Covey API layer.
 
-## State Machines
+## Completion Policies
 
-The approval workflow is:
+Every work subtask has one immutable completion policy:
 
-`available -> claimed -> in_progress -> artifact_published -> review_pending -> approved -> ready_for_apply -> applied`
+- `direct`: the executor records a fenced attempt receipt. Success ends in
+  `completed`; a retryable failure returns the task to `available`; a terminal
+  failure ends in `failed`.
+- `reviewed`: the executor publishes a non-applyable immutable artifact and an
+  independent reviewer decides the exact digest. Approval ends in `completed`
+  without creating an apply-queue item. Generated review subtasks use the
+  shared `mutai` reviewer lane; work routing is not end-to-end workflow
+  affinity.
+- `canonical_apply`: the executor publishes an applyable artifact, review
+  approval creates the apply-queue item, and authorized landing ends in
+  `applied`.
 
-Approval is a transaction boundary: when a review verdict approves the current
-artifact, Covey advances the work to `ready_for_apply` and creates the queued
-apply item in the same lifecycle mutation. The explicit queue enqueue API
-remains idempotent for callers that retry after approval, and
-`queue reconcile-apply` materializes old approved/ready-for-apply rows that
-pre-date this invariant.
+Existing canonical findings and verification artifacts retain the legacy
+review-to-`applied` compatibility path without an apply-queue item. That path
+does not grant direct completion and does not represent Authority settlement.
+
+```mermaid
+stateDiagram-v2
+    [*] --> available
+    available --> claimed
+    claimed --> in_progress
+    in_progress --> completed: direct success
+    in_progress --> available: direct retryable failure
+    in_progress --> failed: direct terminal failure
+    in_progress --> artifact_published: reviewed / canonical_apply
+    artifact_published --> review_pending
+    review_pending --> completed: reviewed approval
+    review_pending --> approved: canonical_apply approval
+    approved --> ready_for_apply
+    ready_for_apply --> applied
+```
+
+Canonical-apply approval is a transaction boundary: when a review verdict
+approves that policy's current artifact, Covey advances the work to
+`ready_for_apply` and creates the queued apply item in the same lifecycle
+mutation. The explicit queue enqueue API remains idempotent for callers that
+retry after approval, and `queue reconcile-apply` materializes old
+approved/ready-for-apply rows that pre-date this invariant. Reviewed approval
+instead ends at `completed` without queue state.
 
 Failed review verdicts move the reviewed work subtask to immutable evidence
 states: `changes_requested` or `blocked`. Covey creates a new `available` work
 subtask linked to the review findings for follow-up execution instead of
-reclaiming the failed subtask. Terminal work states are `applied` and
-`abandoned`.
+reclaiming the failed subtask. Terminal work states include `completed`,
+`failed`, `applied`, and `abandoned`; only the state appropriate to the task's
+completion policy counts as successful dependency evidence.
 
 Claims are simpler:
 
@@ -98,13 +145,20 @@ Claims are simpler:
 
 Reviews are keyed to artifact digests, so stale approvals cannot accidentally bless new outputs.
 
+An attempt receipt is Covey coordination evidence. It proves which live
+claim/fence recorded an outcome; it is not Authority evidence, review approval,
+repo mutation evidence, or settlement authorization. `completed` therefore
+does not mean landed. Canonical repository work remains successful only at
+`applied`.
+
 ## API Shape
 
 The crate exposes a narrow `Covey` API grouped around:
 
 - session lifecycle: register, heartbeat, exit
 - meta-task lifecycle: submit and cancel
-- subtask lifecycle: create, claim, start, abandon, release claim
+- subtask lifecycle: create with policy/routing, claim by exact route, start,
+  finish, retry, fail, abandon, and release claim
 - lease lifecycle: renew claim and reservation leases
 - artifact publication
 - review request and decision
@@ -114,7 +168,9 @@ The crate exposes a narrow `Covey` API grouped around:
 - conflict listing and resolution
 - status queries and maintenance operations
 
-All mutating requests carry a `session_token`. Ownership-sensitive operations also require a fence token.
+All mutating requests carry a `session_token`. Ownership-sensitive operations
+also require a fence token. Routing keys partition candidate and claim-next
+selection; they are coordination selectors, not credentials or authorization.
 
 ## Concurrency And Liveness
 
@@ -127,13 +183,18 @@ Covey relies on single-writer transactional serialization in the local deploymen
 - Sessions older than the stale threshold are marked `stale`
 - Claims, reservations, and apply claims are rejected on command paths once their leases expire; maintenance only cleans persisted rows lazily
 
-This keeps safety in the substrate and policy in the orchestrator.
+This keeps safety in the substrate and policy in the orchestrator. Covey does
+not poll a route, launch a process, renew a worker session on its behalf, or
+decide when more capacity should exist.
 
 ## Guarantees And Non-Goals
 
 Covey guarantees safety, ordering, and transactional integrity inside one authoritative local store. It does not guarantee distributed consistency, recovery from manual storage edits, or anything beyond the durability model of the chosen backing store.
 
-If something needs to plan, decide, merge, message, or repair, that is outside Covey.
+If something needs to plan, supervise, merge, message, or perform timed repair,
+that is outside Covey. A consumer such as a future Hermes adapter may use the
+typed queue APIs, but no Hermes integration or Hermes-specific lifecycle is
+part of Covey.
 
 ## Observability
 
@@ -219,22 +280,34 @@ covey import openspec \
   --project-root /path/to/project \
   --session-token <orch-session>
 
-# Claim and publish
+# Claim and publish canonical mutAI work. Omitting policy/routing uses
+# canonical_apply + mutai for compatibility.
 covey subtask claim-next --session-token <worker-session> --lease-duration-ms 30000
 covey artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest blake3:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest blake3:paths
+
+# Create and finish direct queue work on an exact route
+covey subtask create --session-token <orch-session> --meta-task-id <meta-task> \
+  --title "inspect incident" --kind work --priority 1 \
+  --completion-policy direct --routing-key research
+covey subtask claim-next --session-token <worker-session> \
+  --lease-duration-ms 30000 --routing-key research
+covey subtask finish --session-token <worker-session> --claim-id <claim> \
+  --fence-seq <fence> --evidence-digest blake3:<digest> --summary "inspection complete"
 ```
 
 Scheduler read paths are explicit and read-only:
 
 ```bash
 covey subtask candidates --role executor --limit 50
+covey subtask candidates --role executor --routing-key research --limit 50
 covey subtask candidates --role reviewer --limit 50
 covey queue candidates --limit 50
 ```
 
-These commands expose exact claimable IDs and ordering facts for
-`mutai-scheduler`. They do not create claims, advance fences, lease queue items,
-append events, or perform lifecycle transitions.
+These commands expose exact claimable IDs and ordering facts. Without
+`--routing-key` they expose only the legacy `mutai` route; an explicit key reads
+only that exact route. They do not create claims, advance fences, lease queue
+items, append events, or perform lifecycle transitions.
 
 Apply-queue reconciliation is an explicit write path for operator and scheduler
 bootstrap:

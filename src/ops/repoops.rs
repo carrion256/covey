@@ -164,6 +164,8 @@ fn repoops_claim_status_for_subtask(state: SubtaskState) -> RepoopsAuthorityClai
         | SubtaskState::Decided
         | SubtaskState::ReadyForApply
         | SubtaskState::Applied
+        | SubtaskState::Completed
+        | SubtaskState::Failed
         | SubtaskState::Abandoned => RepoopsAuthorityClaimStatus::Open,
     }
 }

@@ -9,15 +9,33 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             {
                 return Err(covey::CoveyError::ReviewKindMismatch);
             }
-            let subtask_id = store.create_subtask(CreateSubtaskRequest::try_from_raw_parts(
-                args.session_token,
-                args.meta_task_id,
-                args.subtask_id,
-                args.title,
-                args.priority,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("create-subtask")),
-            )?)?;
+            let idempotency_key = args
+                .idempotency_key
+                .unwrap_or_else(|| new_idempotency_key("create-subtask"));
+            let subtask_id = match (args.completion_policy, args.routing_key) {
+                (None, None) => store.create_subtask(CreateSubtaskRequest::try_from_raw_parts(
+                    args.session_token,
+                    args.meta_task_id,
+                    args.subtask_id,
+                    args.title,
+                    args.priority,
+                    idempotency_key,
+                )?)?,
+                (completion_policy, routing_key) => {
+                    store.create_work_subtask(CreateWorkSubtaskReq::try_from_raw_parts(
+                        args.session_token,
+                        args.meta_task_id,
+                        args.subtask_id,
+                        args.title,
+                        args.priority,
+                        completion_policy
+                            .map(Into::into)
+                            .unwrap_or(covey::CompletionPolicy::CanonicalApply),
+                        routing_key.unwrap_or_else(|| "mutai".to_owned()),
+                        idempotency_key,
+                    )?)?
+                }
+            };
             Ok(Rendered::summary(
                 SubtaskRef {
                     subtask_id: subtask_id.clone(),
@@ -26,13 +44,25 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::ClaimNext(args) => {
-            let claim = store.claim_next_subtask(ClaimNextReq::try_from_raw_parts_scoped(
-                args.session_token.clone(),
-                args.lease_duration_ms,
-                args.meta_task_id.clone(),
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("claim-next-subtask")),
-            )?)?;
+            let idempotency_key = args
+                .idempotency_key
+                .unwrap_or_else(|| new_idempotency_key("claim-next-subtask"));
+            let claim = if let Some(routing_key) = args.routing_key {
+                store.claim_next_routed_subtask(ClaimNextRoutedReq::try_from_raw_parts(
+                    args.session_token.clone(),
+                    args.lease_duration_ms,
+                    routing_key,
+                    args.meta_task_id.clone(),
+                    idempotency_key,
+                )?)?
+            } else {
+                store.claim_next_subtask(ClaimNextReq::try_from_raw_parts_scoped(
+                    args.session_token.clone(),
+                    args.lease_duration_ms,
+                    args.meta_task_id.clone(),
+                    idempotency_key,
+                )?)?
+            };
             Ok(Rendered::summary(
                 &claim,
                 match &claim {
@@ -77,6 +107,53 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 format!("subtask started claim={}", args.claim_id),
             ))
         }
+        SubtaskCommand::Finish(args) => {
+            let outcome = store.finish_subtask(FinishSubtaskReq::try_from_raw_parts(
+                args.session_token,
+                args.claim_id,
+                args.fence_seq,
+                args.evidence_digest,
+                args.summary,
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("finish-subtask")),
+            )?)?;
+            Ok(Rendered::summary(
+                &outcome,
+                format!("subtask completed {}", outcome.subtask_id),
+            ))
+        }
+        SubtaskCommand::Retry(args) => {
+            let outcome = store.retry_subtask(RetrySubtaskReq::try_from_raw_parts(
+                args.session_token,
+                args.claim_id,
+                args.fence_seq,
+                args.evidence_digest,
+                args.failure_code,
+                args.summary,
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("retry-subtask")),
+            )?)?;
+            Ok(Rendered::summary(
+                &outcome,
+                format!("subtask retry recorded {}", outcome.subtask_id),
+            ))
+        }
+        SubtaskCommand::Fail(args) => {
+            let outcome = store.fail_subtask(FailSubtaskReq::try_from_raw_parts(
+                args.session_token,
+                args.claim_id,
+                args.fence_seq,
+                args.evidence_digest,
+                args.failure_code,
+                args.summary,
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("fail-subtask")),
+            )?)?;
+            Ok(Rendered::summary(
+                &outcome,
+                format!("subtask failed {}", outcome.subtask_id),
+            ))
+        }
         SubtaskCommand::Abandon(args) => {
             store.abandon_subtask(AbandonSubtaskReq::try_from_raw_parts(
                 args.session_token.clone(),
@@ -99,16 +176,28 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             Ok(Rendered::pretty(&status))
         }
         SubtaskCommand::Candidates(args) => {
-            let candidates = store.subtask_candidates(
-                args.role.into(),
-                args.limit,
-                args.meta_task_id.as_deref(),
-            )?;
+            let role = args.role.into();
+            let candidates = if let Some(routing_key) = args.routing_key {
+                store.subtask_candidates_routed(
+                    role,
+                    &covey::RoutingKey::parse(routing_key)?,
+                    args.limit,
+                    args.meta_task_id.as_deref(),
+                )?
+            } else {
+                store.subtask_candidates(role, args.limit, args.meta_task_id.as_deref())?
+            };
             Ok(Rendered::pretty(&candidates))
         }
         SubtaskCommand::Availability(args) => {
-            let availability =
-                store.claimable_subtask_availability(args.meta_task_id.as_deref())?;
+            let availability = if let Some(routing_key) = args.routing_key {
+                store.claimable_subtask_availability_routed(
+                    &covey::RoutingKey::parse(routing_key)?,
+                    args.meta_task_id.as_deref(),
+                )?
+            } else {
+                store.claimable_subtask_availability(args.meta_task_id.as_deref())?
+            };
             Ok(Rendered::pretty(&availability))
         }
         SubtaskCommand::Stuck(args) => {
@@ -337,6 +426,8 @@ mod tests {
                     review_target_subtask_id: None,
                     review_target_artifact_digest: None,
                     idempotency_key: None,
+                    completion_policy: None,
+                    routing_key: None,
                 }),
             )
             .expect("create subtask through dispatcher");
@@ -353,7 +444,10 @@ mod tests {
         assert_eq!(status.data["subtask"]["subtask_id"], "work-a");
         let availability = dispatch_subtask(
             &store,
-            SubtaskCommand::Availability(SubtaskAvailabilityArgs { meta_task_id: None }),
+            SubtaskCommand::Availability(SubtaskAvailabilityArgs {
+                meta_task_id: None,
+                routing_key: None,
+            }),
         )
         .expect("availability should render");
         assert_eq!(availability.data["executor_claimable_count"], 3);
@@ -375,6 +469,7 @@ mod tests {
                 lease_duration_ms: 60_000,
                 meta_task_id: None,
                 idempotency_key: None,
+                routing_key: None,
             }),
         )
         .expect("claim next should render");

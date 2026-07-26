@@ -8,14 +8,14 @@ use strum::Display;
 
 use super::{
     AgentPrincipalId, ApplyGateBlocker, ApplyGateBlockerKind, Artifact, ArtifactDigest,
-    ArtifactKind, ArtifactManifestPath, BaseRev, ChangedPathsDigest, Claim, ClaimId,
-    FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask, MetaTaskId, OpenSpecArchiveStatus,
-    OpenSpecChangeId, OperatorBlocker, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState,
-    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict,
-    Session, SessionToken, SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget,
-    Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState,
-    SubtaskTitle, TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness, VcsWorkspaceState,
-    VerifierId,
+    ArtifactKind, ArtifactManifestPath, AttemptOutcome, BaseRev, ChangedPathsDigest, Claim,
+    ClaimId, CompletionPolicy, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask, MetaTaskId,
+    OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker, ProseTasksetId, QueueId,
+    ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState,
+    ReviewTarget, ReviewVerdict, RoutingKey, Session, SessionToken, SettlementReconcileBlocker,
+    SettlementReconcileReason, SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
+    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VcsWorkspace,
+    VcsWorkspaceCleanliness, VcsWorkspaceState, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -29,6 +29,8 @@ pub struct SubtaskView {
     kind: SubtaskViewKind,
     lifecycle: SubtaskLifecycle,
     pub priority: SubtaskPriority,
+    completion_policy: CompletionPolicy,
+    routing_key: RoutingKey,
     timestamps: SubtaskViewTimestamps,
 }
 
@@ -56,6 +58,10 @@ struct RawSubtaskView {
     active_claim_id: Option<ClaimId>,
     artifact_digest: Option<ArtifactDigest>,
     priority: SubtaskPriority,
+    #[serde(default = "default_completion_policy")]
+    completion_policy: CompletionPolicy,
+    #[serde(default = "default_routing_key")]
+    routing_key: RoutingKey,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -69,6 +75,8 @@ impl SubtaskView {
         kind: SubtaskViewKind,
         lifecycle: SubtaskLifecycle,
         priority: SubtaskPriority,
+        completion_policy: CompletionPolicy,
+        routing_key: RoutingKey,
         created_at: TimestampMs,
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
@@ -80,6 +88,8 @@ impl SubtaskView {
             kind,
             lifecycle,
             priority,
+            completion_policy,
+            routing_key,
             timestamps,
         })
     }
@@ -112,6 +122,16 @@ impl SubtaskView {
     #[must_use]
     pub fn artifact_digest(&self) -> Option<&ArtifactDigest> {
         self.lifecycle.artifact_digest()
+    }
+
+    #[must_use]
+    pub const fn completion_policy(&self) -> CompletionPolicy {
+        self.completion_policy
+    }
+
+    #[must_use]
+    pub const fn routing_key(&self) -> &RoutingKey {
+        &self.routing_key
     }
 
     /// Returns when this subtask view was created.
@@ -184,6 +204,8 @@ impl TryFrom<SubtaskRow> for SubtaskView {
         let lifecycle = domain.lifecycle();
         let created_at = row.created_at();
         let updated_at = row.updated_at();
+        let completion_policy = row.completion_policy();
+        let routing_key = row.routing_key().clone();
 
         Self::new(
             row.subtask_id,
@@ -192,6 +214,8 @@ impl TryFrom<SubtaskRow> for SubtaskView {
             SubtaskViewKind::from_parts(domain.kind(), domain.review_target().cloned())?,
             lifecycle.clone(),
             row.priority,
+            completion_policy,
+            routing_key,
             created_at,
             updated_at,
         )
@@ -210,6 +234,8 @@ impl From<&SubtaskView> for RawSubtaskView {
             active_claim_id: view.active_claim_id().cloned(),
             artifact_digest: view.artifact_digest().cloned(),
             priority: view.priority,
+            completion_policy: view.completion_policy(),
+            routing_key: view.routing_key().clone(),
             created_at: view.created_at(),
             updated_at: view.updated_at(),
         }
@@ -227,6 +253,15 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
             raw.active_claim_id,
             raw.artifact_digest,
         )?;
+        if kind.kind() == SubtaskKind::Work {
+            lifecycle.ensure_allowed_for_completion_policy(raw.completion_policy)?;
+        } else if raw.completion_policy != CompletionPolicy::CanonicalApply
+            || raw.routing_key.as_str() != "mutai"
+        {
+            return Err(invalid_subtask_view(
+                "review and cleanup views require canonical_apply policy and mutai routing",
+            ));
+        }
         Self::new(
             raw.subtask_id,
             raw.meta_task_id,
@@ -235,6 +270,8 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
             kind,
             lifecycle,
             raw.priority,
+            raw.completion_policy,
+            raw.routing_key,
             raw.created_at,
             raw.updated_at,
         )
@@ -353,7 +390,7 @@ enum SessionStatusState {
     },
     WithActiveSubtask {
         session: Session,
-        active_subtask: SubtaskView,
+        active_subtask: Box<SubtaskView>,
     },
 }
 
@@ -394,7 +431,7 @@ impl SessionStatus {
             (Some(expected), Some(active_subtask)) if &active_subtask.subtask_id == expected => {
                 SessionStatusState::WithActiveSubtask {
                     session,
-                    active_subtask,
+                    active_subtask: Box::new(active_subtask),
                 }
             }
             (Some(_), Some(_)) => {
@@ -473,6 +510,7 @@ impl TryFrom<RawSessionStatus> for SessionStatus {
 pub struct SubtaskStatus {
     subtask: SubtaskView,
     attachments: SubtaskStatusAttachments,
+    attempt_outcomes: Vec<AttemptOutcome>,
     reviews: Vec<Review>,
     ready_queue: Vec<ReadyQueueItem>,
     readiness: SubtaskReadinessStatus,
@@ -491,6 +529,8 @@ struct RawSubtaskStatus {
     subtask: SubtaskView,
     claim: Option<Claim>,
     artifact: Option<Artifact>,
+    #[serde(default)]
+    attempt_outcomes: Vec<AttemptOutcome>,
     reviews: Vec<Review>,
     ready_queue: Vec<ReadyQueueItem>,
     #[serde(default)]
@@ -511,7 +551,15 @@ impl SubtaskStatus {
         reviews: Vec<Review>,
         ready_queue: Vec<ReadyQueueItem>,
     ) -> Result<Self, String> {
-        Self::new_with_landing_receipt(subtask, claim, artifact, reviews, ready_queue, false)
+        Self::new_with_landing_receipt_and_attempt_outcomes(
+            subtask,
+            claim,
+            artifact,
+            Vec::new(),
+            reviews,
+            ready_queue,
+            false,
+        )
     }
 
     /// Builds a subtask status view with explicit landing receipt evidence.
@@ -528,7 +576,39 @@ impl SubtaskStatus {
         ready_queue: Vec<ReadyQueueItem>,
         landing_receipt_recorded: bool,
     ) -> Result<Self, String> {
+        Self::new_with_landing_receipt_and_attempt_outcomes(
+            subtask,
+            claim,
+            artifact,
+            Vec::new(),
+            reviews,
+            ready_queue,
+            landing_receipt_recorded,
+        )
+    }
+
+    /// Builds a subtask status view including immutable execution-attempt outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an attachment or attempt outcome does not belong
+    /// to the subtask, or contradicts its lifecycle fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_landing_receipt_and_attempt_outcomes(
+        subtask: SubtaskView,
+        claim: Option<Claim>,
+        artifact: Option<Artifact>,
+        attempt_outcomes: Vec<AttemptOutcome>,
+        reviews: Vec<Review>,
+        ready_queue: Vec<ReadyQueueItem>,
+        landing_receipt_recorded: bool,
+    ) -> Result<Self, String> {
         let attachments = SubtaskStatusAttachments::from_parts(&subtask, claim, artifact)?;
+        for outcome in &attempt_outcomes {
+            if outcome.subtask_id != subtask.subtask_id {
+                return Err("subtask status attempt outcomes must belong to the subtask".to_owned());
+            }
+        }
         for review in &reviews {
             if review.subtask_id() != subtask.subtask_id.as_str() {
                 return Err("subtask status reviews must belong to the subtask".to_owned());
@@ -550,6 +630,7 @@ impl SubtaskStatus {
             ),
             subtask,
             attachments,
+            attempt_outcomes,
             reviews,
             ready_queue,
         })
@@ -571,6 +652,11 @@ impl SubtaskStatus {
     #[must_use]
     pub const fn artifact(&self) -> Option<&Artifact> {
         self.attachments.artifact()
+    }
+
+    /// Returns immutable outcomes for completed execution attempts.
+    pub fn attempt_outcomes(&self) -> &[AttemptOutcome] {
+        &self.attempt_outcomes
     }
 
     /// Returns reviews associated with the subtask.
@@ -731,6 +817,7 @@ impl From<&SubtaskStatus> for RawSubtaskStatus {
             subtask: status.subtask.clone(),
             claim: status.claim().cloned(),
             artifact: status.artifact().cloned(),
+            attempt_outcomes: status.attempt_outcomes.clone(),
             reviews: status.reviews.clone(),
             ready_queue: status.ready_queue.clone(),
             readiness: status.readiness.clone(),
@@ -742,12 +829,14 @@ impl TryFrom<RawSubtaskStatus> for SubtaskStatus {
     type Error = String;
 
     fn try_from(raw: RawSubtaskStatus) -> Result<Self, Self::Error> {
-        Self::new(
+        Self::new_with_landing_receipt_and_attempt_outcomes(
             raw.subtask,
             raw.claim,
             raw.artifact,
+            raw.attempt_outcomes,
             raw.reviews,
             raw.ready_queue,
+            raw.readiness.landed,
         )
     }
 }
@@ -876,6 +965,10 @@ pub struct SubtaskCandidate {
     pub state: SubtaskState,
     pub artifact_digest: Option<ArtifactDigest>,
     pub priority: SubtaskPriority,
+    #[serde(default = "default_completion_policy")]
+    pub completion_policy: CompletionPolicy,
+    #[serde(default = "default_routing_key")]
+    pub routing_key: RoutingKey,
     pub effective_priority: i64,
     pub is_repair_followup: bool,
     pub blocked_dependents_count: usize,
@@ -896,6 +989,46 @@ impl SubtaskCandidate {
         state: SubtaskState,
         artifact_digest: Option<ArtifactDigest>,
         priority: SubtaskPriority,
+        effective_priority: i64,
+        is_repair_followup: bool,
+        blocked_dependents_count: usize,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        Self::new_with_execution_contract(
+            subtask_id,
+            meta_task_id,
+            title,
+            kind,
+            review_target_subtask_id,
+            review_target_artifact_digest,
+            state,
+            artifact_digest,
+            priority,
+            CompletionPolicy::CanonicalApply,
+            default_routing_key(),
+            effective_priority,
+            is_repair_followup,
+            blocked_dependents_count,
+            created_at,
+            updated_at,
+        )
+    }
+
+    /// Builds a candidate with its persisted completion and routing contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_execution_contract(
+        subtask_id: SubtaskId,
+        meta_task_id: MetaTaskId,
+        title: SubtaskTitle,
+        kind: SubtaskKind,
+        review_target_subtask_id: Option<SubtaskId>,
+        review_target_artifact_digest: Option<ArtifactDigest>,
+        state: SubtaskState,
+        artifact_digest: Option<ArtifactDigest>,
+        priority: SubtaskPriority,
+        completion_policy: CompletionPolicy,
+        routing_key: RoutingKey,
         effective_priority: i64,
         is_repair_followup: bool,
         blocked_dependents_count: usize,
@@ -936,6 +1069,8 @@ impl SubtaskCandidate {
             state,
             artifact_digest,
             priority,
+            completion_policy,
+            routing_key,
             effective_priority,
             is_repair_followup,
             blocked_dependents_count,
@@ -943,6 +1078,14 @@ impl SubtaskCandidate {
             updated_at,
         })
     }
+}
+
+fn default_routing_key() -> RoutingKey {
+    RoutingKey::parse("mutai").expect("the built-in mutai routing key is valid")
+}
+
+const fn default_completion_policy() -> CompletionPolicy {
+    CompletionPolicy::CanonicalApply
 }
 
 /// Read-only scheduler candidate for the apply queue lane.

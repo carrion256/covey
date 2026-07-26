@@ -415,6 +415,9 @@ pub(crate) fn ensure_subtask_transition(
             (from, to),
             (SubtaskState::Available, SubtaskState::Claimed)
                 | (SubtaskState::Claimed, SubtaskState::InProgress)
+                | (SubtaskState::InProgress, SubtaskState::Available)
+                | (SubtaskState::InProgress, SubtaskState::Completed)
+                | (SubtaskState::InProgress, SubtaskState::Failed)
                 | (SubtaskState::InProgress, SubtaskState::ArtifactPublished)
                 | (
                     SubtaskState::ArtifactPublished,
@@ -425,6 +428,7 @@ pub(crate) fn ensure_subtask_transition(
                 | (SubtaskState::ReviewPending, SubtaskState::ChangesRequested)
                 | (SubtaskState::ReviewPending, SubtaskState::Blocked)
                 | (SubtaskState::ReviewPending, SubtaskState::Approved)
+                | (SubtaskState::ReviewPending, SubtaskState::Completed)
                 | (SubtaskState::ReviewPending, SubtaskState::Applied)
                 | (SubtaskState::Approved, SubtaskState::ReadyForApply)
                 | (SubtaskState::ReadyForApply, SubtaskState::Applied)

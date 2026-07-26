@@ -7,12 +7,12 @@ use serde_rusqlite::from_row;
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ActorKind, Artifact, Claim, ClaimState, Event, MetaTask, MutationIdempotencyRecord,
-        ObjectType, OpenSpecImportProvenance, OpenSpecMissionArtifactMetadata,
-        OpenSpecSourceDigest, ReadyQueueItem, Reservation, ReservationState, Review,
-        RuntimeAttestation, Session, SessionState, SessionToken, SubtaskRow, TimestampMs,
-        claim_state_name, object_type_name, parse_generated_members, reservation_state_name,
-        session_state_name,
+        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, Event, MetaTask,
+        MutationIdempotencyRecord, ObjectType, OpenSpecImportProvenance,
+        OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
+        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
+        SubtaskRow, TimestampMs, claim_state_name, object_type_name, parse_generated_members,
+        reservation_state_name, session_state_name,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -147,7 +147,7 @@ pub(crate) fn load_meta_task_tx(tx: &Transaction<'_>, meta_task_id: &str) -> Res
 pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<SubtaskRow> {
     map_missing_row(
         tx.query_row(
-            "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at FROM subtasks WHERE subtask_id = ?1",
+            "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at FROM subtasks WHERE subtask_id = ?1",
             params![subtask_id],
             deserialize_row::<SubtaskRow>,
         ),
@@ -555,12 +555,29 @@ pub(crate) fn load_queue_items_for_subtask_tx(
     collect_rows(rows)
 }
 
+pub(crate) fn load_attempt_outcomes_for_subtask_tx(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+) -> Result<Vec<AttemptOutcome>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT claim_id, subtask_id, fence_seq, outcome_kind, evidence_digest,
+               failure_code, summary, recorded_at
+        FROM subtask_attempt_outcomes
+        WHERE subtask_id = ?1
+        ORDER BY fence_seq ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![subtask_id], deserialize_row::<AttemptOutcome>)?;
+    collect_rows(rows)
+}
+
 pub(crate) fn load_subtasks_for_meta_task_tx(
     tx: &Transaction<'_>,
     meta_task_id: &str,
 ) -> Result<Vec<SubtaskRow>> {
     let mut stmt = tx.prepare(
-        "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at FROM subtasks WHERE meta_task_id = ?1 ORDER BY priority ASC, created_at ASC",
+        "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at FROM subtasks WHERE meta_task_id = ?1 ORDER BY priority ASC, created_at ASC",
     )?;
     let rows = stmt.query_map(params![meta_task_id], deserialize_row::<SubtaskRow>)?;
     collect_rows(rows)

@@ -126,17 +126,20 @@ impl Covey {
                         r#"
                         UPDATE subtasks
                         SET state = CASE
-                                WHEN state IN (?2, ?3) THEN state
-                                ELSE ?4
+                                WHEN state IN (?2, ?3, ?4, ?5, ?6) THEN state
+                                ELSE ?7
                             END,
                             current_claim_id = NULL,
-                            updated_at = ?5
+                            updated_at = ?8
                         WHERE meta_task_id = ?1
                         "#,
                         params![
                             req.meta_task_id.as_str(),
                             subtask_state_name(SubtaskState::Applied),
+                            subtask_state_name(SubtaskState::Completed),
+                            subtask_state_name(SubtaskState::Failed),
                             subtask_state_name(SubtaskState::Abandoned),
+                            subtask_state_name(SubtaskState::Decided),
                             subtask_state_name(SubtaskState::Abandoned),
                             now
                         ],

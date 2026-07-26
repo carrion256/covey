@@ -895,6 +895,158 @@ fn workflow_commands_emit_json() {
 }
 
 #[test]
+fn direct_routed_queue_work_completes_through_cli_without_token_leakage() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let orchestrator = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "queue-orchestrator",
+            "--agent-instance-id",
+            "queue-orchestrator-1",
+            "--role",
+            "orchestrator",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("orchestrator token")
+        .to_owned();
+    let executor = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "queue-executor",
+            "--agent-instance-id",
+            "queue-executor-1",
+            "--role",
+            "executor",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("executor token")
+        .to_owned();
+    let meta_task_id = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orchestrator,
+            "--prompt-text",
+            "inspect queued input",
+        ],
+    ))["meta_task_id"]
+        .as_str()
+        .expect("meta-task id")
+        .to_owned();
+    let subtask_id = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "create",
+            "--session-token",
+            &orchestrator,
+            "--meta-task-id",
+            &meta_task_id,
+            "--title",
+            "inspect input",
+            "--kind",
+            "work",
+            "--priority",
+            "1",
+            "--completion-policy",
+            "direct",
+            "--routing-key",
+            "hermes",
+        ],
+    ))["subtask_id"]
+        .as_str()
+        .expect("subtask id")
+        .to_owned();
+
+    let candidates = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "candidates",
+            "--role",
+            "executor",
+            "--routing-key",
+            "hermes",
+        ],
+    ));
+    assert_eq!(candidates[0]["subtask_id"], subtask_id);
+    let legacy_candidates = success_data(&run_db(
+        &db,
+        &["subtask", "candidates", "--role", "executor"],
+    ));
+    assert_eq!(legacy_candidates, Value::Array(Vec::new()));
+
+    let claim = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "claim-next",
+            "--session-token",
+            &executor,
+            "--lease-duration-ms",
+            "30000",
+            "--routing-key",
+            "hermes",
+        ],
+    ));
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_owned();
+    let fence_seq = claim["fence_seq"]
+        .as_i64()
+        .expect("claim fence")
+        .to_string();
+    success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "start",
+            "--session-token",
+            &executor,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+        ],
+    ));
+    let outcome = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "finish",
+            "--session-token",
+            &executor,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+            "--evidence-digest",
+            "blake3:cli_result",
+            "--summary",
+            "inspection complete",
+        ],
+    ));
+    assert_eq!(outcome["outcome_kind"], "succeeded");
+
+    let status_output = run_db(&db, &["subtask", "status", "--subtask-id", &subtask_id]);
+    let status = success_data(&status_output);
+    assert_eq!(status["subtask"]["state"], "completed");
+    assert_eq!(status["subtask"]["completion_policy"], "direct");
+    assert_eq!(status["subtask"]["routing_key"], "hermes");
+    assert_eq!(status["attempt_outcomes"].as_array().map(Vec::len), Some(1));
+    assert!(!String::from_utf8_lossy(&status_output.stdout).contains(&executor));
+}
+
+#[test]
 fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
     let tmp = TempDir::new().expect("temp dir");
     let db = tmp.path().join("covey.sqlite");

@@ -267,6 +267,7 @@ pub(crate) fn ordered_claim_candidate(
     tx: &Transaction<'_>,
     kind: SubtaskKind,
     candidate_state: SubtaskState,
+    routing_key: &str,
     meta_task_id: Option<&str>,
     now: i64,
 ) -> Result<Option<String>> {
@@ -282,13 +283,21 @@ pub(crate) fn ordered_claim_candidate(
                     FROM subtasks s
                     WHERE s.kind = ?1
                       AND s.state = ?2
-                      AND s.meta_task_id = ?4
+                      AND s.routing_key = ?4
+                      AND s.meta_task_id = ?5
                       AND NOT EXISTS (
                           SELECT 1
                           FROM subtask_dependencies d
                           JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
                           WHERE d.subtask_id = s.subtask_id
-                            AND dep.state NOT IN (?5, ?6, ?7, ?8)
+                            AND NOT (
+                                (dep.kind = 'review' AND dep.state = 'decided')
+                                OR (dep.completion_policy = 'canonical_apply' AND dep.state = 'applied')
+                                OR (
+                                    dep.completion_policy IN ('direct', 'reviewed')
+                                    AND dep.state = 'completed'
+                                )
+                            )
                             AND NOT EXISTS (
                                 WITH RECURSIVE followup_chain(followup_subtask_id) AS (
                                     SELECT f.followup_subtask_id
@@ -304,7 +313,15 @@ pub(crate) fn ordered_claim_candidate(
                                 FROM followup_chain chain
                                 JOIN subtasks followup
                                   ON followup.subtask_id = chain.followup_subtask_id
-                                WHERE followup.state IN (?5, ?6, ?7, ?8)
+                                WHERE (followup.kind = 'review' AND followup.state = 'decided')
+                                   OR (
+                                       followup.completion_policy = 'canonical_apply'
+                                       AND followup.state = 'applied'
+                                   )
+                                   OR (
+                                       followup.completion_policy IN ('direct', 'reviewed')
+                                       AND followup.state = 'completed'
+                                   )
                             )
                       )
                     ORDER BY
@@ -322,11 +339,8 @@ pub(crate) fn ordered_claim_candidate(
                         subtask_kind_name(kind),
                         subtask_state_name(candidate_state),
                         now,
+                        routing_key,
                         meta_task_id,
-                        subtask_state_name(SubtaskState::Approved),
-                        subtask_state_name(SubtaskState::ReadyForApply),
-                        subtask_state_name(SubtaskState::Applied),
-                        subtask_state_name(SubtaskState::Decided)
                     ],
                     |row| row.get::<_, String>(0),
                 )
@@ -340,13 +354,21 @@ pub(crate) fn ordered_claim_candidate(
                     JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
                     WHERE s.kind = ?1
                       AND s.state = ?2
-                      AND m.state NOT IN (?3, ?4)
+                      AND s.routing_key = ?3
+                      AND m.state NOT IN (?4, ?5)
                       AND NOT EXISTS (
                           SELECT 1
                           FROM subtask_dependencies d
                           JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
                           WHERE d.subtask_id = s.subtask_id
-                            AND dep.state NOT IN (?6, ?7, ?8, ?9)
+                            AND NOT (
+                                (dep.kind = 'review' AND dep.state = 'decided')
+                                OR (dep.completion_policy = 'canonical_apply' AND dep.state = 'applied')
+                                OR (
+                                    dep.completion_policy IN ('direct', 'reviewed')
+                                    AND dep.state = 'completed'
+                                )
+                            )
                             AND NOT EXISTS (
                                 WITH RECURSIVE followup_chain(followup_subtask_id) AS (
                                     SELECT f.followup_subtask_id
@@ -362,12 +384,20 @@ pub(crate) fn ordered_claim_candidate(
                                 FROM followup_chain chain
                                 JOIN subtasks followup
                                   ON followup.subtask_id = chain.followup_subtask_id
-                                WHERE followup.state IN (?6, ?7, ?8, ?9)
+                                WHERE (followup.kind = 'review' AND followup.state = 'decided')
+                                   OR (
+                                       followup.completion_policy = 'canonical_apply'
+                                       AND followup.state = 'applied'
+                                   )
+                                   OR (
+                                       followup.completion_policy IN ('direct', 'reviewed')
+                                       AND followup.state = 'completed'
+                                   )
                             )
                       )
                     ORDER BY
                         MAX(
-                            s.priority - MIN(MAX(?5 - s.created_at, 0) / 30000, s.priority),
+                            s.priority - MIN(MAX(?6 - s.created_at, 0) / 30000, s.priority),
                             0
                         ) ASC,
                         s.priority ASC,
@@ -379,13 +409,10 @@ pub(crate) fn ordered_claim_candidate(
                     params![
                         subtask_kind_name(kind),
                         subtask_state_name(candidate_state),
+                        routing_key,
                         meta_task_state_name(MetaTaskState::Completed),
                         meta_task_state_name(MetaTaskState::Cancelled),
                         now,
-                        subtask_state_name(SubtaskState::Approved),
-                        subtask_state_name(SubtaskState::ReadyForApply),
-                        subtask_state_name(SubtaskState::Applied),
-                        subtask_state_name(SubtaskState::Decided)
                     ],
                     |row| row.get::<_, String>(0),
                 )
@@ -404,7 +431,8 @@ pub(crate) fn ordered_claim_candidate(
                     FROM subtasks s
                     WHERE s.kind = ?1
                       AND s.state = ?2
-                      AND s.meta_task_id = ?3
+                      AND s.routing_key = ?3
+                      AND s.meta_task_id = ?4
                     ORDER BY s.priority ASC, s.created_at ASC
                     LIMIT 1
                     "#,
@@ -413,6 +441,7 @@ pub(crate) fn ordered_claim_candidate(
                     params![
                         subtask_kind_name(kind),
                         subtask_state_name(candidate_state),
+                        routing_key,
                         meta_task_id
                     ],
                     |row| row.get::<_, String>(0),
@@ -427,7 +456,8 @@ pub(crate) fn ordered_claim_candidate(
                     JOIN meta_tasks m ON m.meta_task_id = s.meta_task_id
                     WHERE s.kind = ?1
                       AND s.state = ?2
-                      AND m.state NOT IN (?3, ?4)
+                      AND s.routing_key = ?3
+                      AND m.state NOT IN (?4, ?5)
                     ORDER BY s.priority ASC, s.created_at ASC
                     LIMIT 1
                     "#,
@@ -436,6 +466,7 @@ pub(crate) fn ordered_claim_candidate(
                     params![
                         subtask_kind_name(kind),
                         subtask_state_name(candidate_state),
+                        routing_key,
                         meta_task_state_name(MetaTaskState::Completed),
                         meta_task_state_name(MetaTaskState::Cancelled)
                     ],
@@ -474,7 +505,14 @@ pub(crate) fn subtask_dependencies_satisfied(
             FROM subtask_dependencies d
             JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
             WHERE d.subtask_id = ?1
-              AND dep.state NOT IN (?2, ?3, ?4, ?5)
+              AND NOT (
+                  (dep.kind = 'review' AND dep.state = 'decided')
+                  OR (dep.completion_policy = 'canonical_apply' AND dep.state = 'applied')
+                  OR (
+                      dep.completion_policy IN ('direct', 'reviewed')
+                      AND dep.state = 'completed'
+                  )
+              )
               AND NOT EXISTS (
                   WITH RECURSIVE followup_chain(followup_subtask_id) AS (
                       SELECT f.followup_subtask_id
@@ -490,18 +528,20 @@ pub(crate) fn subtask_dependencies_satisfied(
                   FROM followup_chain chain
                   JOIN subtasks followup
                     ON followup.subtask_id = chain.followup_subtask_id
-                  WHERE followup.state IN (?2, ?3, ?4, ?5)
+                  WHERE (followup.kind = 'review' AND followup.state = 'decided')
+                     OR (
+                         followup.completion_policy = 'canonical_apply'
+                         AND followup.state = 'applied'
+                     )
+                     OR (
+                         followup.completion_policy IN ('direct', 'reviewed')
+                         AND followup.state = 'completed'
+                     )
               )
             LIMIT 1
         )
         "#,
-        params![
-            subtask_id,
-            subtask_state_name(SubtaskState::Approved),
-            subtask_state_name(SubtaskState::ReadyForApply),
-            subtask_state_name(SubtaskState::Applied),
-            subtask_state_name(SubtaskState::Decided)
-        ],
+        params![subtask_id],
         |row| row.get::<_, i64>(0),
     )?;
     Ok(has_unsatisfied == 0)
@@ -549,7 +589,7 @@ pub(crate) fn refresh_meta_task_state(
                 SELECT 1
                 FROM subtasks
                 WHERE meta_task_id = ?1
-                  AND state NOT IN ('applied', 'abandoned', 'decided')
+                  AND state NOT IN ('applied', 'completed', 'failed', 'abandoned', 'decided')
                 LIMIT 1
             )
             "#,

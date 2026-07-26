@@ -11,16 +11,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::{
     AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId, ApplyGateBlockerKind,
     ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState, ArtifactDigest, ArtifactKind,
-    ArtifactManifestPath, BaseRev, ChangedPathsDigest, ClaimId, CommandTranscriptDigest,
-    ConflictId, ConflictResolutionState, CoveyTypeValidationError, FenceSeq, FindingsDigest,
-    IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
+    ArtifactManifestPath, AttemptEvidenceDigest, AttemptFailureCode, AttemptSummary, BaseRev,
+    ChangedPathsDigest, ClaimId, CommandTranscriptDigest, CompletionPolicy, ConflictId,
+    ConflictResolutionState, CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey,
+    LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
     OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
     OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerTargetKind,
     PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId, ProseTasksetId, ProviderId,
     ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope,
-    ReviewId, ReviewVerdict, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionRole,
-    SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason, SettlementTarget,
-    SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VcsPacketStackEntryId,
+    ReviewId, ReviewVerdict, RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass,
+    SessionRole, SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason,
+    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VcsPacketStackEntryId,
     VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind, VcsPrPublicationStatus,
     VcsWorkspaceCleanliness, VcsWorkspaceId, VcsWorkspaceKind, VcsWorkspaceObservationReason,
     VcsWorkspacePath, VcsWorkspaceRef, VcsWorkspaceState, VerifierId,
@@ -576,6 +577,50 @@ impl CreateSubtaskRequest {
     }
 }
 
+/// Request to create work with an explicit completion policy and routing key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateWorkSubtaskReq {
+    pub session_token: SessionToken,
+    pub meta_task_id: MetaTaskId,
+    pub subtask_id: Option<SubtaskId>,
+    pub title: SubtaskTitle,
+    pub priority: SubtaskPriority,
+    pub completion_policy: CompletionPolicy,
+    pub routing_key: RoutingKey,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl CreateWorkSubtaskReq {
+    /// Builds an explicit work-subtask creation request from raw values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, title, priority, routing key, or
+    /// idempotency key is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        subtask_id: Option<String>,
+        title: impl Into<String>,
+        priority: i64,
+        completion_policy: CompletionPolicy,
+        routing_key: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
+            subtask_id: subtask_id.map(SubtaskId::parse).transpose()?,
+            title: SubtaskTitle::parse(title.into())?,
+            priority: SubtaskPriority::parse(priority)?,
+            completion_policy,
+            routing_key: RoutingKey::parse(routing_key.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
 /// Request to claim the next available subtask.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimNextReq {
@@ -621,6 +666,41 @@ impl ClaimNextReq {
         Ok(Self {
             session_token: SessionToken::parse(session_token.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
+            meta_task_id: meta_task_id.map(MetaTaskId::parse).transpose()?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to claim the next work subtask from one exact routing lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimNextRoutedReq {
+    pub session_token: SessionToken,
+    pub lease_duration_ms: LeaseDurationMs,
+    pub routing_key: RoutingKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_task_id: Option<MetaTaskId>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl ClaimNextRoutedReq {
+    /// Builds a routed claim-next request from raw values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session, lease, routing key, optional meta
+    /// task, or idempotency key is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        lease_duration_ms: impl Into<i64>,
+        routing_key: impl Into<String>,
+        meta_task_id: Option<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
+            routing_key: RoutingKey::parse(routing_key.into())?,
             meta_task_id: meta_task_id.map(MetaTaskId::parse).transpose()?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
@@ -692,6 +772,125 @@ impl StartSubtaskReq {
             session_token: SessionToken::parse(session_token.into())?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to finish direct work with one immutable result digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishSubtaskReq {
+    pub session_token: SessionToken,
+    pub claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub evidence_digest: AttemptEvidenceDigest,
+    pub summary: AttemptSummary,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl FinishSubtaskReq {
+    /// Builds a direct finish request from raw values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identity, digest, summary, or idempotency key
+    /// is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        evidence_digest: impl Into<String>,
+        summary: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            evidence_digest: AttemptEvidenceDigest::parse(evidence_digest.into())?,
+            summary: AttemptSummary::parse(summary.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record a retryable failure for the current attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrySubtaskReq {
+    pub session_token: SessionToken,
+    pub claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub evidence_digest: AttemptEvidenceDigest,
+    pub failure_code: AttemptFailureCode,
+    pub summary: AttemptSummary,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RetrySubtaskReq {
+    /// Builds a retryable-failure request from raw values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identity, digest, failure code, summary, or
+    /// idempotency key is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        evidence_digest: impl Into<String>,
+        failure_code: impl Into<String>,
+        summary: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            evidence_digest: AttemptEvidenceDigest::parse(evidence_digest.into())?,
+            failure_code: AttemptFailureCode::parse(failure_code.into())?,
+            summary: AttemptSummary::parse(summary.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// Request to record a terminal failure for the current attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailSubtaskReq {
+    pub session_token: SessionToken,
+    pub claim_id: ClaimId,
+    pub fence_seq: FenceSeq,
+    pub evidence_digest: AttemptEvidenceDigest,
+    pub failure_code: AttemptFailureCode,
+    pub summary: AttemptSummary,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl FailSubtaskReq {
+    /// Builds a terminal-failure request from raw values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identity, digest, failure code, summary, or
+    /// idempotency key is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        claim_id: impl Into<String>,
+        fence_seq: impl Into<i64>,
+        evidence_digest: impl Into<String>,
+        failure_code: impl Into<String>,
+        summary: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            claim_id: ClaimId::parse(claim_id.into())?,
+            fence_seq: FenceSeq::parse(fence_seq.into())?,
+            evidence_digest: AttemptEvidenceDigest::parse(evidence_digest.into())?,
+            failure_code: AttemptFailureCode::parse(failure_code.into())?,
+            summary: AttemptSummary::parse(summary.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }

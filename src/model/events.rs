@@ -37,8 +37,16 @@ impl EventPayload {
                 Self::MetaTaskCancelled(serde_json::from_str(payload_json)?)
             }
             EventType::SubtaskCreated => Self::SubtaskCreated(serde_json::from_str(payload_json)?),
+            EventType::WorkSubtaskCreated => {
+                Self::WorkSubtaskCreated(serde_json::from_str(payload_json)?)
+            }
             EventType::SubtaskClaimed => Self::SubtaskClaimed(serde_json::from_str(payload_json)?),
             EventType::SubtaskStarted => Self::SubtaskStarted(serde_json::from_str(payload_json)?),
+            EventType::SubtaskFinished => {
+                Self::SubtaskFinished(serde_json::from_str(payload_json)?)
+            }
+            EventType::SubtaskRetried => Self::SubtaskRetried(serde_json::from_str(payload_json)?),
+            EventType::SubtaskFailed => Self::SubtaskFailed(serde_json::from_str(payload_json)?),
             EventType::SubtaskAbandoned => {
                 Self::SubtaskAbandoned(serde_json::from_str(payload_json)?)
             }

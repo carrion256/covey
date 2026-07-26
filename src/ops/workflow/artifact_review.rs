@@ -8,8 +8,8 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ArtifactKind, ChangesRequestedFollowupReconcileResult, ClaimState, DecideReviewReq,
-        EventType, FailedReviewVerdict, ObjectType, PublishArtifactReq,
+        ArtifactKind, ChangesRequestedFollowupReconcileResult, ClaimState, CompletionPolicy,
+        DecideReviewReq, EventType, FailedReviewVerdict, ObjectType, PublishArtifactReq,
         ReconcileChangesRequestedFollowupsReq, RecordPermissiveLandingReceiptReq,
         ReviewDecisionResult, ReviewState, ReviewVerdict, SessionRole, SubtaskId, SubtaskKind,
         SubtaskState, SubtaskTitle, review_state_name, review_verdict_name, subtask_kind_name,
@@ -18,9 +18,9 @@ use crate::{
     ops::queue::{
         enqueue_approved_subtask_for_apply_tx, record_direct_applied_openspec_archive_blocker_tx,
     },
-    queries::{load_artifact_tx, load_review_tx, load_session_tx, load_subtask_tx},
+    queries::{load_artifact_tx, load_claim_tx, load_review_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
-    store::append_session_event,
+    store::{append_session_event, refresh_meta_task_state},
     validators::{
         MAX_BASE_REV_LEN, MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, MAX_PATH_LEN,
         clear_session_active_subtask, close_claim_and_detach, ensure_artifact_digest_unused,
@@ -46,6 +46,36 @@ const fn is_applyable_artifact_kind(kind: ArtifactKind) -> bool {
         kind,
         ArtifactKind::PatchBundle | ArtifactKind::IsolatedCommitRef | ArtifactKind::TreeBundle
     )
+}
+
+fn ensure_artifact_allowed_for_policy(
+    policy: CompletionPolicy,
+    artifact_kind: ArtifactKind,
+) -> Result<()> {
+    let allowed = match policy {
+        CompletionPolicy::Direct => false,
+        CompletionPolicy::Reviewed => !is_applyable_artifact_kind(artifact_kind),
+        CompletionPolicy::CanonicalApply => true,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(CoveyError::CompletionPolicyViolation {
+            operation: format!("publish_artifact:{artifact_kind}"),
+            policy,
+        })
+    }
+}
+
+fn require_review_policy(policy: CompletionPolicy, operation: &str) -> Result<()> {
+    if policy == CompletionPolicy::Direct {
+        Err(CoveyError::CompletionPolicyViolation {
+            operation: operation.to_owned(),
+            policy,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 impl Covey {
@@ -85,6 +115,10 @@ impl Covey {
                     if subtask.kind() != SubtaskKind::Work {
                         return Err(CoveyError::ReviewKindMismatch);
                     }
+                    ensure_artifact_allowed_for_policy(
+                        subtask.completion_policy(),
+                        req.artifact_kind,
+                    )?;
                     if let Some(existing) = load_artifact_tx(tx, req.artifact_digest.as_str())
                         .map(Some)
                         .or_else(|error| match error {
@@ -244,6 +278,7 @@ impl Covey {
                     if subtask.kind() != SubtaskKind::Work {
                         return Err(CoveyError::ReviewKindMismatch);
                     }
+                    require_review_policy(subtask.completion_policy(), "request_review")?;
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
                     if subtask.artifact_digest() != Some(&req.artifact_digest) {
                         return Err(CoveyError::UnknownArtifactDigest {
@@ -276,8 +311,8 @@ impl Covey {
                         INSERT INTO subtasks (
                             subtask_id, meta_task_id, title, kind, review_target_subtask_id,
                             review_target_artifact_digest, state, current_claim_id, artifact_digest,
-                            priority, created_at, updated_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)
+                            priority, completion_policy, routing_key, created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?11)
                         "#,
                         params![
                             review_subtask_id.as_str(),
@@ -288,6 +323,8 @@ impl Covey {
                             req.artifact_digest.as_str(),
                             subtask_state_name(SubtaskState::Available),
                             req.priority.get(),
+                            crate::model::completion_policy_name(CompletionPolicy::CanonicalApply),
+                            "mutai",
                             now
                         ],
                     )?;
@@ -476,10 +513,14 @@ impl Covey {
                     clear_session_active_subtask(tx, &req.session_token, now)?;
 
                     let artifact = load_artifact_tx(tx, review.artifact_digest())?;
+                    require_review_policy(work_subtask.completion_policy(), "decide_review")?;
                     let work_state = match req.verdict {
                         ReviewVerdict::Approve
-                            if is_applyable_artifact_kind(artifact.artifact_kind) =>
+                            if work_subtask.completion_policy() == CompletionPolicy::Reviewed =>
                         {
+                            SubtaskState::Completed
+                        }
+                        ReviewVerdict::Approve if is_applyable_artifact_kind(artifact.artifact_kind) => {
                             SubtaskState::Approved
                         }
                         ReviewVerdict::Approve => SubtaskState::Applied,
@@ -487,14 +528,41 @@ impl Covey {
                         ReviewVerdict::Blocked => SubtaskState::Blocked,
                     };
                     ensure_subtask_transition(work_subtask.kind(), work_subtask.state(), work_state)?;
+                    if work_state == SubtaskState::Completed {
+                        let producer_claim = work_subtask
+                            .current_claim_id()
+                            .map(|producer_claim_id| {
+                                load_claim_tx(tx, producer_claim_id.as_str())
+                            })
+                            .transpose()?;
+                        if let Some(producer_claim) = producer_claim {
+                            close_claim_and_detach(
+                                tx,
+                                &producer_claim,
+                                ClaimState::Released,
+                                now,
+                            )?;
+                            clear_session_active_subtask(
+                                tx,
+                                producer_claim.owner_session_token.as_str(),
+                                now,
+                            )?;
+                        }
+                        super::completion::release_active_reservations(
+                            tx,
+                            work_subtask.subtask_id.as_str(),
+                            now,
+                        )?;
+                    }
                     let work_updated = tx.execute(
-                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
+                        "UPDATE subtasks SET state = ?2, current_claim_id = CASE WHEN ?6 THEN NULL ELSE current_claim_id END, updated_at = ?3 WHERE subtask_id = ?1 AND artifact_digest = ?4 AND state = ?5",
                         params![
                             review.subtask_id(),
                             subtask_state_name(work_state),
                             now,
                             review.artifact_digest(),
-                            subtask_state_name(work_subtask.state())
+                            subtask_state_name(work_subtask.state()),
+                            work_state == SubtaskState::Completed,
                         ],
                     )?;
                     if work_updated != 1 {
@@ -541,6 +609,7 @@ impl Covey {
                     )?;
 
                     if matches!(req.verdict, ReviewVerdict::Approve)
+                        && work_subtask.completion_policy() == CompletionPolicy::CanonicalApply
                         && is_applyable_artifact_kind(artifact.artifact_kind)
                     {
                         enqueue_approved_subtask_for_apply_tx(
@@ -552,7 +621,9 @@ impl Covey {
                             now,
                             format!("auto-enqueue-approved-review:{}", req.review_id),
                         )?;
-                    } else if matches!(req.verdict, ReviewVerdict::Approve) {
+                    } else if matches!(req.verdict, ReviewVerdict::Approve)
+                        && work_subtask.completion_policy() == CompletionPolicy::CanonicalApply
+                    {
                         record_direct_applied_openspec_archive_blocker_tx(
                             tx,
                             &req.session_token,
@@ -562,6 +633,7 @@ impl Covey {
                             format!("auto-openspec-archive-blocker-review:{}", req.review_id),
                         )?;
                     }
+                    refresh_meta_task_state(tx, work_subtask.meta_task_id.as_str(), now)?;
 
                     Ok(decision)
                 },
@@ -648,6 +720,12 @@ impl Covey {
                         });
                     }
                     let work_subtask = load_subtask_tx(tx, review.subtask_id())?;
+                    if work_subtask.completion_policy() != CompletionPolicy::CanonicalApply {
+                        return Err(CoveyError::CompletionPolicyViolation {
+                            operation: "record_permissive_landing_receipt".to_owned(),
+                            policy: work_subtask.completion_policy(),
+                        });
+                    }
                     if work_subtask.artifact_digest().map(AsRef::as_ref)
                         != Some(review.artifact_digest())
                     {
@@ -785,6 +863,7 @@ impl Covey {
                         &req,
                         now,
                     )?;
+                    refresh_meta_task_state(tx, work_subtask.meta_task_id.as_str(), now)?;
 
                     Ok(ReviewDecisionResult::Approved {
                         review_id: req.review_id.clone(),
@@ -875,8 +954,8 @@ fn create_review_followup_subtask_tx(
         INSERT INTO subtasks (
             subtask_id, meta_task_id, title, kind, review_target_subtask_id,
             review_target_artifact_digest, state, current_claim_id, artifact_digest,
-            priority, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, ?6, ?7, ?7)
+            priority, completion_policy, routing_key, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, ?6, ?7, ?8, ?9, ?9)
         "#,
         params![
             followup_subtask_id.as_str(),
@@ -885,6 +964,8 @@ fn create_review_followup_subtask_tx(
             subtask_kind_name(SubtaskKind::Work),
             subtask_state_name(SubtaskState::Available),
             source_subtask.priority.get(),
+            crate::model::completion_policy_name(source_subtask.completion_policy()),
+            source_subtask.routing_key().as_str(),
             now,
         ],
     )?;

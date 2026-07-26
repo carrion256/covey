@@ -10,12 +10,12 @@ use crate::{
     model::{
         ApplyQueueReconcileResult, ApplyWorktree, ApplyWorktreeState, ArtifactKind,
         BeginOpenSpecArchiveCleanupReq, ClaimId, ClaimReadyQueueReq, ClaimResult, ClaimState,
-        EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest, FinishOpenSpecArchiveCleanupReq,
-        LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkApplyWorktreeStateReq,
-        MarkInFlightReq, MetaTaskState, ObjectType, OpenSpecArchiveCleanupClaim,
-        OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility, OpenSpecArchiveStatus,
-        OpenSpecArchiveStatusState, OpenSpecChangeId, QueueId, ReadyQueueCandidate,
-        ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
+        CompletionPolicy, EnqueueForApplyReq, EventType, FenceSeq, FindingsDigest,
+        FinishOpenSpecArchiveCleanupReq, LandingAuthorizationStatus, LeaseDeadlineMs,
+        MarkAppliedReq, MarkApplyWorktreeStateReq, MarkInFlightReq, MetaTaskState, ObjectType,
+        OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility,
+        OpenSpecArchiveStatus, OpenSpecArchiveStatusState, OpenSpecChangeId, QueueId,
+        ReadyQueueCandidate, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
         ReconcileApplyQueueReq, RecordApplyGateBlockerReq, RecordApplyVerificationReq,
         RecordApplyWorktreeReq, RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
         RecordSettlementReconcileBlockerReq, ReleaseClaimReq, ReservationState, ReviewId,
@@ -51,6 +51,20 @@ const fn settlement_target_name(target: SettlementTarget) -> &'static str {
     }
 }
 
+fn require_canonical_apply_policy(
+    subtask: &crate::model::SubtaskRow,
+    operation: &str,
+) -> Result<()> {
+    if subtask.completion_policy() == CompletionPolicy::CanonicalApply {
+        Ok(())
+    } else {
+        Err(CoveyError::CompletionPolicyViolation {
+            operation: operation.to_owned(),
+            policy: subtask.completion_policy(),
+        })
+    }
+}
+
 const OPENSPEC_SCOPE_WITH_FOLLOWUPS_CTE: &str = r#"
         WITH RECURSIVE openspec_scope(subtask_id) AS (
             SELECT subtask_id
@@ -82,6 +96,7 @@ impl Covey {
                     ensure_length("artifact_digest", &req.artifact_digest, MAX_DIGEST_LEN)?;
                     ensure_length("subtask_id", &req.subtask_id, MAX_OBJECT_ID_LEN)?;
                     let subtask = load_subtask_tx(tx, &req.subtask_id)?;
+                    require_canonical_apply_policy(&subtask, "enqueue_for_apply")?;
                     ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
                     if subtask.artifact_digest().map(AsRef::as_ref)
                         != Some(req.artifact_digest.as_str())
@@ -882,6 +897,7 @@ impl Covey {
                         });
                     }
                     let subtask = load_subtask_tx(tx, item.subtask_id())?;
+                    require_canonical_apply_policy(&subtask, "mark_applied")?;
                     ensure_subtask_transition(
                         subtask.kind(),
                         subtask.state(),
@@ -2579,6 +2595,8 @@ pub(crate) fn enqueue_approved_subtask_for_apply_tx(
     now: i64,
     idempotency_key: impl Into<String>,
 ) -> Result<Option<String>> {
+    let subtask = load_subtask_tx(tx, subtask_id)?;
+    require_canonical_apply_policy(&subtask, "enqueue_for_apply")?;
     ensure_applyable_artifact_tx(tx, artifact_digest)?;
 
     tx.execute(

@@ -257,6 +257,31 @@ fn validate_subtask_title(
     Ok(())
 }
 
+fn validate_attempt_summary(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > 4096 {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 4096 bytes"));
+    }
+    if value.trim() != value {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not include leading or trailing whitespace",
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_idempotency_key(
     field: &'static str,
     value: &str,
@@ -663,6 +688,7 @@ string_newtype!(
 string_newtype!(PromptText, "prompt_text", validate_prompt_text);
 string_newtype!(SubtaskId, "subtask_id", validate_tokenish);
 string_newtype!(SubtaskTitle, "title", validate_subtask_title);
+string_newtype!(RoutingKey, "routing_key", validate_tokenish);
 string_newtype!(ClaimId, "claim_id", validate_tokenish);
 string_newtype!(RepoopsClaimRef, "repoops_claim_ref", validate_tokenish);
 string_newtype!(QueueId, "queue_id", validate_tokenish);
@@ -697,6 +723,9 @@ string_newtype!(
 );
 string_newtype!(EventObjectId, "event_object_id", validate_tokenish);
 string_newtype!(ArtifactDigest, "artifact_digest", validate_digest);
+string_newtype!(AttemptEvidenceDigest, "evidence_digest", validate_digest);
+string_newtype!(AttemptFailureCode, "failure_code", validate_tokenish);
+string_newtype!(AttemptSummary, "summary", validate_attempt_summary);
 string_newtype!(
     OpenSpecArchiveBlockedReason,
     "blocked_reason",

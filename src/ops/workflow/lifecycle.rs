@@ -3,16 +3,16 @@
 use std::time::Instant;
 
 use rusqlite::{Transaction, params};
+use serde::Serialize;
 
 use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        AbandonSubtaskReq, ClaimNextReq, ClaimResult, ClaimState, ClaimSubtaskReq,
-        CreateSubtaskRequest, EventType, ObjectType, ReservationState, ReviewState, Session,
-        SessionRole, SessionState, StartSubtaskReq, SubtaskId, SubtaskKind, SubtaskState,
-        claim_state_name, reservation_state_name, review_state_name, session_state_name,
-        subtask_kind_name, subtask_state_name,
+        AbandonSubtaskReq, ClaimNextReq, ClaimNextRoutedReq, ClaimResult, ClaimState,
+        ClaimSubtaskReq, EventType, ObjectType, ReservationState, ReviewState, RoutingKey, Session,
+        SessionRole, SessionState, StartSubtaskReq, SubtaskKind, SubtaskState, claim_state_name,
+        reservation_state_name, review_state_name, session_state_name, subtask_state_name,
     },
     queries::load_subtask_tx,
     schema::advance_lease_clock,
@@ -21,115 +21,33 @@ use crate::{
         refresh_meta_task_state, subtask_dependencies_satisfied,
     },
     validators::{
-        MAX_OBJECT_ID_LEN, MAX_TITLE_LEN, clear_session_active_subtask, close_claim_and_detach,
-        ensure_length, ensure_meta_task_exists, ensure_meta_task_is_schedulable,
-        ensure_positive_lease_duration, ensure_subtask_transition, ensure_transition,
-        held_claim_owner, issue_fence_seq, require_active_session, require_current_claim,
-        require_session_can_claim_kind, subtask_exists,
+        MAX_OBJECT_ID_LEN, clear_session_active_subtask, close_claim_and_detach, ensure_length,
+        ensure_meta_task_is_schedulable, ensure_positive_lease_duration, ensure_subtask_transition,
+        ensure_transition, held_claim_owner, issue_fence_seq, require_active_session,
+        require_current_claim, require_session_can_claim_kind, subtask_exists,
     },
 };
 
 use super::artifact_review::ensure_changes_requested_followup_blocks_tx;
 
-impl Covey {
-    /// Creates a new work or review subtask under an existing meta-task.
-    pub fn create_subtask(&self, req: CreateSubtaskRequest) -> Result<String> {
-        let started_at = Instant::now();
-        let result = self.with_write_tx(|tx, now| {
-            crate::store::with_idempotent_mutation(
-                tx,
-                req.session_token.as_str(),
-                "create_subtask",
-                &req.idempotency_key,
-                &req,
-                crate::model::TimestampMs::parse(now)?,
-                || create_subtask_tx(tx, &req, now),
-            )
-        });
-        self.log_operation(
-            "create_subtask",
-            req.session_token.as_str(),
-            started_at,
-            &result,
-            |subtask_id| vec![format!("subtask:{subtask_id}")],
-        );
-        result
-    }
+const LEGACY_ROUTING_KEY: &str = "mutai";
 
+impl Covey {
     /// Claims the next available subtask according to priority and creation order.
     pub fn claim_next_subtask(&self, req: ClaimNextReq) -> Result<Option<ClaimResult>> {
         let started_at = Instant::now();
-        let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
-            crate::store::with_idempotent_mutation(
-                tx,
-                req.session_token.as_str(),
-                "claim_next_subtask",
-                &req.idempotency_key,
-                &req,
-                crate::model::TimestampMs::parse(now)?,
-                || {
-                    let session = require_active_session(tx, req.session_token.as_str())?;
-                    ensure_positive_lease_duration(
-                        "lease_duration_ms",
-                        req.lease_duration_ms.get(),
-                    )?;
-                    if let Some(active_subtask_id) = session.active_subtask_id().cloned() {
-                        return Err(CoveyError::SessionAlreadyHasActiveSubtask {
-                            session_token: session.session_token,
-                            active_subtask_id,
-                        });
-                    }
-                    let (kind, candidate_state) = match session.role {
-                        SessionRole::Executor => (SubtaskKind::Work, SubtaskState::Available),
-                        SessionRole::Reviewer => (SubtaskKind::Review, SubtaskState::Available),
-                        other => {
-                            return Err(CoveyError::WrongRole {
-                                expected: vec![SessionRole::Executor, SessionRole::Reviewer],
-                                actual: other,
-                            });
-                        }
-                    };
-                    if session.role == SessionRole::Executor {
-                        ensure_changes_requested_followup_blocks_tx(
-                            tx,
-                            req.session_token.as_str(),
-                            now,
-                        )?;
-                    }
-
-                    let Some(subtask_id) = ordered_claim_candidate(
-                        tx,
-                        kind,
-                        candidate_state,
-                        req.meta_task_id.as_deref(),
-                        now,
-                    )?
-                    else {
-                        return Ok(None);
-                    };
-                    match claim_selected_subtask_tx(
-                        tx,
-                        &session,
-                        req.session_token.as_str(),
-                        &subtask_id,
-                        req.lease_duration_ms,
-                        lease_now,
-                        now,
-                    ) {
-                        Ok(result) => Ok(Some(result)),
-                        Err(CoveyError::SubtaskAlreadyClaimed { .. }) => Ok(None),
-                        Err(CoveyError::IllegalTransition { to, object, .. })
-                            if to == SubtaskState::Claimed.into()
-                                && object == ObjectType::Subtask =>
-                        {
-                            Ok(None)
-                        }
-                        Err(err) => Err(err),
-                    }
-                },
-            )
-        });
+        let routing_key = RoutingKey::parse(LEGACY_ROUTING_KEY)
+            .expect("the legacy mutAI routing key is a valid routing key");
+        let result = self.claim_next_for_route(
+            req.session_token.as_str(),
+            req.lease_duration_ms,
+            &routing_key,
+            req.meta_task_id.as_ref(),
+            "claim_next_subtask",
+            &req.idempotency_key,
+            &req,
+            &[SessionRole::Executor, SessionRole::Reviewer],
+        );
         self.log_operation(
             "claim_next_subtask",
             req.session_token.as_str(),
@@ -148,6 +66,129 @@ impl Covey {
             },
         );
         result
+    }
+
+    /// Claims the next executor subtask from one exact routing lane.
+    pub fn claim_next_routed_subtask(
+        &self,
+        req: ClaimNextRoutedReq,
+    ) -> Result<Option<ClaimResult>> {
+        let started_at = Instant::now();
+        let result = self.claim_next_for_route(
+            req.session_token.as_str(),
+            req.lease_duration_ms,
+            &req.routing_key,
+            req.meta_task_id.as_ref(),
+            "claim_next_routed_subtask",
+            &req.idempotency_key,
+            &req,
+            &[SessionRole::Executor],
+        );
+        self.log_operation(
+            "claim_next_routed_subtask",
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |claim| {
+                claim
+                    .as_ref()
+                    .map(|claim| {
+                        vec![
+                            format!("claim:{}", claim.claim_id),
+                            format!("subtask:{}", claim.subtask_id),
+                        ]
+                    })
+                    .unwrap_or_default()
+            },
+        );
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_next_for_route<Req: Serialize>(
+        &self,
+        session_token: &str,
+        lease_duration_ms: crate::model::LeaseDurationMs,
+        routing_key: &RoutingKey,
+        meta_task_id: Option<&crate::model::MetaTaskId>,
+        operation: &'static str,
+        idempotency_key: &crate::model::IdempotencyKey,
+        request: &Req,
+        allowed_roles: &[SessionRole],
+    ) -> Result<Option<ClaimResult>> {
+        self.with_write_tx(|tx, now| {
+            let lease_now = advance_lease_clock(tx, now)?;
+            crate::store::with_idempotent_mutation(
+                tx,
+                session_token,
+                operation,
+                idempotency_key,
+                request,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    let session = require_active_session(tx, session_token)?;
+                    ensure_positive_lease_duration("lease_duration_ms", lease_duration_ms.get())?;
+                    if let Some(active_subtask_id) = session.active_subtask_id().cloned() {
+                        return Err(CoveyError::SessionAlreadyHasActiveSubtask {
+                            session_token: session.session_token,
+                            active_subtask_id,
+                        });
+                    }
+                    if !allowed_roles.contains(&session.role) {
+                        return Err(CoveyError::WrongRole {
+                            expected: allowed_roles.to_vec(),
+                            actual: session.role,
+                        });
+                    }
+                    let (kind, candidate_state) = match session.role {
+                        SessionRole::Executor => (SubtaskKind::Work, SubtaskState::Available),
+                        SessionRole::Reviewer => (SubtaskKind::Review, SubtaskState::Available),
+                        other => {
+                            return Err(CoveyError::WrongRole {
+                                expected: allowed_roles.to_vec(),
+                                actual: other,
+                            });
+                        }
+                    };
+                    if session.role == SessionRole::Executor
+                        && routing_key.as_str() == LEGACY_ROUTING_KEY
+                    {
+                        ensure_changes_requested_followup_blocks_tx(tx, session_token, now)?;
+                    }
+
+                    let Some(subtask_id) = ordered_claim_candidate(
+                        tx,
+                        kind,
+                        candidate_state,
+                        routing_key.as_str(),
+                        meta_task_id.map(crate::model::MetaTaskId::as_str),
+                        now,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    match claim_selected_subtask_tx(
+                        tx,
+                        &session,
+                        session_token,
+                        &subtask_id,
+                        lease_duration_ms,
+                        lease_now,
+                        now,
+                    ) {
+                        Ok(result) => Ok(Some(result)),
+                        Err(CoveyError::SubtaskAlreadyClaimed { .. }) => Ok(None),
+                        Err(CoveyError::IllegalTransition { to, object, .. })
+                            if to == SubtaskState::Claimed.into()
+                                && object == ObjectType::Subtask =>
+                        {
+                            Ok(None)
+                        }
+                        Err(err) => Err(err),
+                    }
+                },
+            )
+        })
     }
 
     /// Claims a specific known subtask.
@@ -334,7 +375,10 @@ impl Covey {
                         ObjectType::Subtask,
                         !matches!(
                             subtask.state(),
-                            SubtaskState::Applied | SubtaskState::Abandoned
+                            SubtaskState::Applied
+                                | SubtaskState::Completed
+                                | SubtaskState::Failed
+                                | SubtaskState::Abandoned
                         ),
                     )?;
                     close_claim_and_detach(tx, &claim, ClaimState::Released, now)?;
@@ -634,62 +678,4 @@ fn claim_selected_subtask_tx(
         now,
     )?;
     Ok(result)
-}
-
-pub(crate) fn create_subtask_tx(
-    tx: &rusqlite::Transaction<'_>,
-    req: &CreateSubtaskRequest,
-    now: i64,
-) -> Result<String> {
-    crate::validators::require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
-    ensure_length("title", &req.title, MAX_TITLE_LEN)?;
-    ensure_length("meta_task_id", &req.meta_task_id, MAX_OBJECT_ID_LEN)?;
-    ensure_meta_task_exists(tx, req.meta_task_id.as_str())?;
-    ensure_meta_task_is_schedulable(tx, req.meta_task_id.as_str())?;
-
-    let subtask_id = req.subtask_id.clone().unwrap_or_else(|| {
-        SubtaskId::parse(crate::model::make_id("subtask")).expect("generated subtask ids are valid")
-    });
-    ensure_length("subtask_id", &subtask_id, MAX_OBJECT_ID_LEN)?;
-    if subtask_exists(tx, &subtask_id)? {
-        return Err(CoveyError::DuplicateSubtaskId {
-            subtask_id: subtask_id.clone(),
-        });
-    }
-
-    tx.execute(
-        r#"
-        INSERT INTO subtasks (
-            subtask_id, meta_task_id, title, kind, review_target_subtask_id,
-            review_target_artifact_digest, state, current_claim_id, artifact_digest,
-            priority, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9)
-        "#,
-        params![
-            subtask_id.as_str(),
-            req.meta_task_id.as_str(),
-            req.title.as_str(),
-            subtask_kind_name(SubtaskKind::Work),
-            Option::<String>::None,
-            Option::<String>::None,
-            subtask_state_name(SubtaskState::Available),
-            req.priority.get(),
-            now,
-        ],
-    )?;
-    tx.execute(
-        "INSERT INTO subtask_fence_counter (subtask_id, next_fence_seq) VALUES (?1, 1)",
-        params![subtask_id.as_str()],
-    )?;
-    append_session_event(
-        tx,
-        EventType::SubtaskCreated,
-        ObjectType::Subtask,
-        subtask_id.as_str(),
-        req.session_token.as_str(),
-        req,
-        now,
-    )?;
-    refresh_meta_task_state(tx, req.meta_task_id.as_str(), now)?;
-    Ok(String::from(subtask_id))
 }

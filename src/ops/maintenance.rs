@@ -39,6 +39,8 @@ fn subtask_state_name(state: SubtaskState) -> &'static str {
         SubtaskState::Decided => "decided",
         SubtaskState::ReadyForApply => "ready_for_apply",
         SubtaskState::Applied => "applied",
+        SubtaskState::Completed => "completed",
+        SubtaskState::Failed => "failed",
         SubtaskState::Abandoned => "abandoned",
     }
 }
