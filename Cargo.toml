@@ -3,13 +3,16 @@ name = "covey"
 version = "0.1.0"
 edition = "2024"
 autobins = false
+description = "Embedded-first, evidence-bearing local task tracker with typed completion policies"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/carrion256/covey"
 
 [[bin]]
 name = "covey"
 path = "src/bin/covey.rs"
 
 [dependencies]
-better-droid = { path = "../better-droid" }
+better-droid = { path = "vendor/better-droid" }
 blake3 = "1.8.2"
 clap = { version = "4.5.50", features = ["derive"] }
 derive-new = "0.7.0"
@@ -29,3 +32,6 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 proptest = "1.9.0"
 rstest = "0.25.0"
 tempfile = "3.23.0"
+
+[workspace]
+members = [".", "vendor/better-droid"]

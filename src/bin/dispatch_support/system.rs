@@ -62,6 +62,7 @@ struct TypedEventList {
 
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 enum TypedEventListItem {
     Typed { event: covey::TypedEvent },
     DecodeError { event: covey::Event, error: String },

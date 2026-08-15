@@ -1,0 +1,83 @@
+name: better-droid
+version: 1
+description: Mission-grade OpenSpec workflow for Better Droid / Covey / mutAI executable work-packet artifacts.
+planning_classes:
+  work_packet: Required for every Better Droid OpenSpec change. Importable only when the change is source-scoped, narrow, and bounded enough for one Covey execution packet. Missing metadata, roadmap, discovery, strategy, phase, and any other planning_class value are invalid; phase, roadmap, discovery, and strategy material belongs outside openspec/changes.
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Mission proposal defining why, scope, capabilities, boundaries, impact, and success criteria
+    template: proposal.md
+    instruction: >
+      Create a mission-grade proposal. It must explain the observed problem,
+      why now, what changes, what stays out of scope, affected capabilities,
+      operator/reviewer expectations, and authority boundaries. If the change
+      feeds autonomous workers, Covey import, Authority evidence, or Better Droid
+      workflows, do not write a lightweight proposal. OpenSpec owns work-packet
+      artifacts only; do not assign it live claims, leases, worker scheduling,
+      review queues, apply queues, runtime authority, or settlement authority.
+      Agents must not create openspec/changes entries for phase/sequence,
+      roadmap, discovery, or strategy plans. Put planning in docs/plans or
+      operator notes. Every Better Droid OpenSpec change must declare
+      planning_class=work_packet and be a small, source-scoped execution
+      packet; work packets must not be titled or shaped as Phase 1/2/3 work.
+    requires: []
+  - id: specs
+    generates: specs/**/*.md
+    description: Behavior-facing requirements and scenarios with traceability-ready acceptance semantics
+    template: spec.md
+    instruction: >
+      Create one delta spec per capability listed in proposal.md. Preserve
+      OpenSpec syntax exactly: delta headings use ##, requirements use ###,
+      and scenarios use ####. Use normative SHALL/MUST language. Every
+      requirement needs concrete scenarios with triggers, outcomes, error cases
+      where relevant, and validation intent. Scenarios should be traceable to
+      implementation tasks and evidence or explicitly deferred with a reason.
+      For MODIFIED requirements, copy the full existing requirement block and
+      edit it; partial modified requirements lose behavior during archive.
+    requires:
+      - proposal
+  - id: design
+    generates: design.md
+    description: Technical design covering current state, decisions, boundaries, artifacts, failure modes, and verification strategy
+    template: design.md
+    instruction: >
+      Create a design document detailed enough for a senior engineer or
+      autonomous worker to implement without reconstructing intent from chat.
+      Include current-state evidence, goals/non-goals, chosen approach,
+      alternatives rejected, component responsibilities, no-dual-writer rules,
+      artifact/data shapes, lifecycle and stale-state behavior, validation
+      strategy, review gates, rollout/rollback, risks, and open questions.
+      Separate current verified behavior from desired future wrapper/API
+      behavior. Preserve the OpenSpec/Covey/mutAI boundary.
+    requires:
+      - proposal
+      - specs
+  - id: tasks
+    generates: tasks.md
+    description: Mission-ready implementation checklist with stable task IDs, acceptance criteria, path policy, validation, evidence, and review expectations
+    template: tasks.md
+    instruction: >
+      Create a task list that can be imported into Covey without producing weak
+      autonomous work packets. Preserve checkbox syntax exactly: '- [ ] X.Y Task
+      title'. Each executable task must include type, purpose, scope, exact or
+      bounded paths, dependencies, acceptance criteria, validation commands or
+      manual evidence, expected artifact kind, review checklist, traceability
+      refs, and stale-if conditions. Separate discovery, implementation,
+      testing, docs, review, apply, and verification tasks. Do not leave vague
+      verbs such as improve/support/handle/update/refactor/clean up/wire up
+      unless acceptance and validation are concrete.
+      Do not group executable work by Phase 1/2/3. If sequencing is needed,
+      keep the sequence outside openspec/changes and create smaller
+      work_packet changes whose task dependencies are shallow and
+      blocker-scoped.
+    requires:
+      - specs
+      - design
+apply:
+  requires:
+    - proposal
+    - specs
+    - design
+    - tasks
+  tracks: tasks.md

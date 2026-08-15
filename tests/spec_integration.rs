@@ -528,7 +528,7 @@ fn seed_changes_requested_work_subtask(rig: &Rig) -> String {
         .subtask_status(&subtask_id)
         .expect("work status")
         .reviews()
-        .into_iter()
+        .iter()
         .find(|review| review.review_id() == review_id)
         .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask id");
@@ -2433,7 +2433,7 @@ fn claim_subtask_rejects_wrong_role_for_work_and_review_targets() {
         .subtask_status(&work_subtask_id)
         .expect("work status")
         .reviews()
-        .into_iter()
+        .iter()
         .find(|review| review.review_id() == review_id)
         .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask id");
@@ -3388,7 +3388,7 @@ fn pending_reviews_are_superseded_when_new_artifact_is_published() {
     );
     let review = status
         .reviews()
-        .into_iter()
+        .iter()
         .find(|review| review.review_id() == review_id)
         .expect("review exists");
     assert_eq!(review.state(), covey::ReviewState::Superseded);
@@ -3486,7 +3486,7 @@ fn deciding_review_for_old_artifact_does_not_bless_new_artifact() {
         .subtask_status(&subtask_id)
         .expect("status")
         .reviews()
-        .into_iter()
+        .iter()
         .find(|review| review.review_id() == review_id)
         .map(|review| review.review_subtask_id().to_owned())
         .expect("review subtask");

@@ -142,7 +142,6 @@ impl SessionHandle {
     ///
     /// Panics if any identity field is not token-shaped. Use
     /// [`SessionHandle::try_from_raw_parts`] when parsing untrusted input.
-    #[must_use]
     pub fn new(
         session_token: impl Into<String>,
         agent_principal_id: impl Into<String>,

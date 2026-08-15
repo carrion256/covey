@@ -3108,6 +3108,7 @@ trait ReviewFollowupEnum: Sized {
 macro_rules! claim_dependency_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[allow(clippy::enum_variant_names)]
         enum $name {
             $($variant),+
         }
@@ -3126,6 +3127,7 @@ macro_rules! claim_dependency_enum {
 macro_rules! ready_queue_metrics_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[allow(clippy::enum_variant_names)]
         enum $name {
             $($variant),+
         }
@@ -3144,6 +3146,7 @@ macro_rules! ready_queue_metrics_enum {
 macro_rules! ready_queue_claim_selection_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[allow(clippy::enum_variant_names)]
         enum $name {
             $($variant),+
         }
@@ -3162,6 +3165,7 @@ macro_rules! ready_queue_claim_selection_enum {
 macro_rules! review_followup_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[allow(clippy::enum_variant_names)]
         enum $name {
             $($variant),+
         }
@@ -3967,12 +3971,12 @@ fn replay_session_request_shape_trace(trace: &SessionRequestShapeItfTrace) -> Ve
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: session request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: session request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4065,12 +4069,12 @@ fn replay_session_handle_shape_trace(trace: &SessionHandleShapeItfTrace) -> Vec<
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: session handle scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: session handle scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4208,12 +4212,12 @@ fn replay_session_status_view_shape_trace(trace: &SessionStatusViewShapeItfTrace
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: session status scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: session status scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4331,12 +4335,12 @@ fn replay_meta_task_status_view_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: meta-task status scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: meta-task status scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.scheduled_work || state.mutation_authority_granted {
@@ -4438,12 +4442,12 @@ fn replay_meta_task_request_shape_trace(trace: &MetaTaskRequestShapeItfTrace) ->
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: meta-task request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: meta-task request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4562,12 +4566,12 @@ fn replay_create_subtask_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: create-subtask request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: create-subtask request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4693,12 +4697,12 @@ fn replay_claim_acquisition_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: claim acquisition request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: claim acquisition request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4786,12 +4790,12 @@ fn replay_supersede_queue_item_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: supersede queue item request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: supersede queue item request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -4880,12 +4884,12 @@ fn replay_view_attachment_shape_trace(trace: &ViewAttachmentShapeItfTrace) -> Ve
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: view attachment scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: view attachment scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5043,12 +5047,12 @@ fn replay_runtime_attestation_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: runtime attestation request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: runtime attestation request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5191,12 +5195,12 @@ fn replay_publish_artifact_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: publish artifact request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: publish artifact request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5314,12 +5318,12 @@ fn replay_decide_review_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: decide review scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: decide review scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5418,12 +5422,12 @@ fn replay_review_decision_result_shape_trace(
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: review decision result scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: review decision result scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.apply_queued || state.landing_authorized {
@@ -5548,12 +5552,12 @@ fn replay_request_review_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: request review scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: request review scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5651,12 +5655,12 @@ fn replay_enqueue_for_apply_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: enqueue for apply scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: enqueue for apply scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5747,12 +5751,12 @@ fn replay_claim_ready_queue_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: claim ready queue scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: claim ready queue scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5871,12 +5875,12 @@ fn replay_claim_lifecycle_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: claim lifecycle scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: claim lifecycle scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -5966,12 +5970,12 @@ fn replay_mark_in_flight_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: mark in flight scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: mark in flight scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6058,12 +6062,12 @@ fn replay_mark_applied_request_shape_trace(trace: &MarkAppliedRequestShapeItfTra
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: mark applied scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: mark applied scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6184,12 +6188,12 @@ fn replay_apply_verification_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: apply verification scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: apply verification scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6314,12 +6318,12 @@ fn replay_landing_authorization_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: landing authorization scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: landing authorization scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6422,12 +6426,12 @@ fn replay_landing_receipt_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: landing receipt scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: landing receipt scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6578,12 +6582,12 @@ fn replay_reservation_request_shape_trace(trace: &ReservationRequestShapeItfTrac
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: reservation request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: reservation request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6714,12 +6718,12 @@ fn replay_reservation_lifecycle_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: reservation lifecycle request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: reservation lifecycle request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -6873,12 +6877,12 @@ fn replay_reservation_record_shape_trace(trace: &ReservationRecordShapeItfTrace)
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: reservation record scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: reservation record scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -7031,12 +7035,12 @@ fn replay_conflict_record_shape_trace(trace: &ConflictRecordShapeItfTrace) -> Ve
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: conflict record scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: conflict record scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -7242,12 +7246,12 @@ fn replay_landing_authorization_status_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: landing authorization status scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: landing authorization status scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -7369,12 +7373,12 @@ fn replay_conflict_resolution_request_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: conflict resolution scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: conflict resolution scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -7528,13 +7532,15 @@ fn replay_stale_claim_recovery_trace(trace: &StaleClaimRecoveryItfTrace) -> Vec<
                 "state[{index}]: inactive old session retained active subtask"
             ));
         }
-        if recovered && state.owner != "NewSession" {
-            if state.old_active_subtask || state.owner != "NoOwner" || state.subtask != "Available"
-            {
-                violations.push(format!(
-                    "state[{index}]: recovered old claim did not detach session and subtask"
-                ));
-            }
+        if recovered
+            && state.owner != "NewSession"
+            && (state.old_active_subtask
+                || state.owner != "NoOwner"
+                || state.subtask != "Available")
+        {
+            violations.push(format!(
+                "state[{index}]: recovered old claim did not detach session and subtask"
+            ));
         }
         if recovered && state.expired_fence <= 0 {
             violations.push(format!(
@@ -7618,12 +7624,12 @@ fn replay_stale_session_maintenance_shape_trace(
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: stale-session maintenance scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: stale-session maintenance scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.executor_claim_created {
@@ -7814,12 +7820,12 @@ fn replay_reservation_expiry_maintenance_shape_trace(
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: reservation-expiry maintenance scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: reservation-expiry maintenance scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.executor_claim_created {
@@ -7887,12 +7893,12 @@ fn replay_ready_queue_claim_selection_trace(
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: ready-queue claim-selection scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: ready-queue claim-selection scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -8030,12 +8036,12 @@ fn replay_ready_queue_metrics_trace(trace: &ReadyQueueMetricsItfTrace) -> Vec<St
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: ready-queue metrics scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: ready-queue metrics scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -8104,12 +8110,12 @@ fn replay_reservation_overlap_trace(trace: &ReservationOverlapItfTrace) -> Vec<S
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: reservation overlap scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: reservation overlap scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -8127,15 +8133,15 @@ fn replay_reservation_overlap_trace(trace: &ReservationOverlapItfTrace) -> Vec<S
                 "state[{index}]: reservation overlap result disagrees with scope semantics"
             ));
         }
-        if matches!(state.candidate_scope.as_str(), "RepoGlobal")
-            || matches!(state.existing_scope.as_str(), "RepoGlobal")
+        if (matches!(state.candidate_scope.as_str(), "RepoGlobal")
+            || matches!(state.existing_scope.as_str(), "RepoGlobal"))
+            && state.reject_reason == "NoReject"
+            && state.existing_active
+            && !state.overlap_returned
         {
-            if state.reject_reason == "NoReject" && state.existing_active && !state.overlap_returned
-            {
-                violations.push(format!(
-                    "state[{index}]: repo-global scope did not overlap an active reservation"
-                ));
-            }
+            violations.push(format!(
+                "state[{index}]: repo-global scope did not overlap an active reservation"
+            ));
         }
         if !state.existing_active && state.overlap_returned {
             violations.push(format!(
@@ -8261,12 +8267,12 @@ fn replay_repoops_snapshot_trace(trace: &RepoopsSnapshotItfTrace) -> Vec<String>
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: repoops snapshot scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.outcome == "NotEvaluated" {
@@ -8369,12 +8375,12 @@ fn replay_current_claim_fence_trace(trace: &CurrentClaimFenceItfTrace) -> Vec<St
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: current-claim fence scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: current-claim fence scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.state_mutated || state.mutation_authority_granted {
@@ -8496,12 +8502,12 @@ fn replay_repoops_snapshot_request_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: repoops snapshot request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: repoops snapshot request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -8614,12 +8620,12 @@ fn replay_transition_matrix_trace(trace: &TransitionMatrixItfTrace) -> Vec<Strin
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: transition matrix scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: transition matrix scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -8754,12 +8760,12 @@ fn replay_role_gate_policy_trace(trace: &RoleGatePolicyItfTrace) -> Vec<String> 
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: role-gate policy scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: role-gate policy scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -8988,12 +8994,12 @@ fn replay_subtask_domain_lifecycle_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: subtask domain lifecycle scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: subtask domain lifecycle scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -9102,12 +9108,12 @@ fn replay_artifact_proof_row_shape_trace(trace: &ArtifactProofRowShapeItfTrace) 
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: artifact proof row scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: artifact proof row scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -9271,12 +9277,12 @@ fn replay_apply_proof_row_lifecycle_trace(trace: &ApplyProofRowLifecycleItfTrace
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: apply-proof row lifecycle scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: apply-proof row lifecycle scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -9400,12 +9406,12 @@ fn replay_apply_verification_proof_row_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: apply verification proof row scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: apply verification proof row scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -9499,12 +9505,12 @@ fn replay_session_proof_row_shape_trace(trace: &SessionProofRowShapeItfTrace) ->
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: session proof row scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: session proof row scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -9641,12 +9647,12 @@ fn replay_runtime_attestation_proof_row_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: runtime-attestation proof row scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: runtime-attestation proof row scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -9857,12 +9863,12 @@ fn replay_record_lifecycle_shape_trace(trace: &RecordLifecycleShapeItfTrace) -> 
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: record lifecycle scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: record lifecycle scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -10031,12 +10037,12 @@ fn replay_runtime_attestation_record_shape_trace(
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: runtime attestation record scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: runtime attestation record scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -10176,12 +10182,12 @@ fn replay_review_record_shape_trace(trace: &ReviewRecordShapeItfTrace) -> Vec<St
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: review record scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: review record scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -10212,19 +10218,21 @@ fn replay_review_record_shape_trace(trace: &ReviewRecordShapeItfTrace) -> Vec<St
                     "state[{index}]: review record lifecycle projection disagrees with model"
                 ));
             }
-            if expected_accepted && state.lifecycle == "Decided" {
-                if review.verdict().is_none() || review.findings_digest().is_none() {
-                    violations.push(format!(
-                        "state[{index}]: decided review lost decision evidence"
-                    ));
-                }
+            if expected_accepted
+                && state.lifecycle == "Decided"
+                && (review.verdict().is_none() || review.findings_digest().is_none())
+            {
+                violations.push(format!(
+                    "state[{index}]: decided review lost decision evidence"
+                ));
             }
-            if expected_accepted && state.lifecycle != "Decided" {
-                if review.verdict().is_some() || review.findings_digest().is_some() {
-                    violations.push(format!(
-                        "state[{index}]: non-decided review retained decision evidence"
-                    ));
-                }
+            if expected_accepted
+                && state.lifecycle != "Decided"
+                && (review.verdict().is_some() || review.findings_digest().is_some())
+            {
+                violations.push(format!(
+                    "state[{index}]: non-decided review retained decision evidence"
+                ));
             }
         }
     }
@@ -10355,12 +10363,12 @@ fn replay_ready_queue_record_shape_trace(trace: &ReadyQueueRecordShapeItfTrace) 
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: ready-queue record scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: ready-queue record scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -10505,12 +10513,12 @@ fn replay_apply_gate_evidence_trace(trace: &ApplyGateEvidenceItfTrace) -> Vec<St
     let mut previous_case_index = None;
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "state[{index}]: apply-gate evidence scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "state[{index}]: apply-gate evidence scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.outcome == "NotEvaluated" {
@@ -10902,12 +10910,12 @@ fn replay_openspec_import_request_shape_trace(
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: OpenSpec import request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: OpenSpec import request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.covey_state_mutated || state.scheduler_action {
@@ -11072,12 +11080,12 @@ fn replay_bd_import_request_shape_trace(trace: &BdImportRequestShapeItfTrace) ->
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: BD import request scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: BD import request scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if state.covey_state_mutated || state.scheduler_action {
@@ -11340,12 +11348,12 @@ fn replay_bd_import_item_outcome_shape_trace(
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: BD import item scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: BD import item scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {
@@ -11474,12 +11482,12 @@ fn replay_claim_dependency_gate_trace(trace: &ClaimDependencyGateItfTrace) -> Ve
     for (index, wrapped_state) in trace.states.iter().enumerate() {
         let state = &wrapped_state.s;
         let prefix = format!("state[{index}]");
-        if let Some(previous_case_index) = previous_case_index {
-            if state.case_index < previous_case_index {
-                violations.push(format!(
-                    "{prefix}: claim dependency scenario index moved backward"
-                ));
-            }
+        if let Some(previous_case_index) = previous_case_index
+            && state.case_index < previous_case_index
+        {
+            violations.push(format!(
+                "{prefix}: claim dependency scenario index moved backward"
+            ));
         }
         previous_case_index = Some(state.case_index);
         if !state.evaluated {

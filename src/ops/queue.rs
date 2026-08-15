@@ -107,14 +107,14 @@ impl Covey {
                             object: ObjectType::Subtask,
                         });
                     }
-                    if subtask.state() == SubtaskState::ReadyForApply {
-                        if let Some(queue_id) = active_queue_id_for_artifact_tx(
+                    if subtask.state() == SubtaskState::ReadyForApply
+                        && let Some(queue_id) = active_queue_id_for_artifact_tx(
                             tx,
                             req.subtask_id.as_str(),
                             req.artifact_digest.as_str(),
-                        )? {
-                            return Ok(queue_id);
-                        }
+                        )?
+                    {
+                        return Ok(queue_id);
                     }
                     ensure_subtask_transition(
                         subtask.kind(),
@@ -3371,6 +3371,46 @@ fn mark_apply_worktrees_for_queue_tx(
     Ok(())
 }
 
+fn require_recorded_apply_verification(
+    tx: &Transaction<'_>,
+    item: &ReadyQueueItem,
+    evidence: &LiveApplyGateEvidence,
+    claim_fence_seq: FenceSeq,
+) -> Result<()> {
+    let queue_id = QueueId::parse(item.queue_id())?;
+    let exists = tx
+        .query_row(
+            r#"
+            SELECT 1
+            FROM apply_verifications
+            WHERE queue_id = ?1
+              AND artifact_digest = ?2
+              AND review_id = ?3
+              AND findings_digest = ?4
+              AND claim_fence_seq = ?5
+            LIMIT 1
+            "#,
+            params![
+                item.queue_id(),
+                item.artifact_digest(),
+                evidence.review_id.as_str(),
+                evidence.findings_digest.as_str(),
+                claim_fence_seq.get()
+            ],
+            |_| Ok(()),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(CoveyError::ApplyGateEvidenceMissing {
+            queue_id,
+            reason:
+                "accepted apply verifier verdict not recorded for queue artifact review and fence"
+                    .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3433,44 +3473,4 @@ mod tests {
                 .contains("provider run ids are not separated")
         );
     }
-}
-
-fn require_recorded_apply_verification(
-    tx: &Transaction<'_>,
-    item: &ReadyQueueItem,
-    evidence: &LiveApplyGateEvidence,
-    claim_fence_seq: FenceSeq,
-) -> Result<()> {
-    let queue_id = QueueId::parse(item.queue_id())?;
-    let exists = tx
-        .query_row(
-            r#"
-            SELECT 1
-            FROM apply_verifications
-            WHERE queue_id = ?1
-              AND artifact_digest = ?2
-              AND review_id = ?3
-              AND findings_digest = ?4
-              AND claim_fence_seq = ?5
-            LIMIT 1
-            "#,
-            params![
-                item.queue_id(),
-                item.artifact_digest(),
-                evidence.review_id.as_str(),
-                evidence.findings_digest.as_str(),
-                claim_fence_seq.get()
-            ],
-            |_| Ok(()),
-        )
-        .optional()?;
-    if exists.is_none() {
-        return Err(CoveyError::ApplyGateEvidenceMissing {
-            queue_id,
-            reason:
-                "accepted apply verifier verdict not recorded for queue artifact review and fence"
-                    .to_owned(),
-        });
-    }
-    Ok(())
 }

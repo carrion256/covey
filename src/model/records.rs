@@ -4612,6 +4612,7 @@ impl Event {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_stored_row(
         seq: i64,
         event_type: EventType,

@@ -428,6 +428,7 @@ impl ImportBdV1Result {
         Self::from_raw_parts(meta_task_id, None, items)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_raw_parts(
         meta_task_id: impl Into<String>,
         expected_tally: Option<ImportBdV1ResultTally>,
@@ -1354,7 +1355,6 @@ struct RawImportOpenSpecItemResult {
 
 impl ImportOpenSpecItemResult {
     /// Builds an OpenSpec import item for the destination meta-task.
-    #[must_use]
     pub fn meta_task(
         object_id: impl Into<String>,
         title: impl Into<String>,
@@ -1373,7 +1373,6 @@ impl ImportOpenSpecItemResult {
     }
 
     /// Builds an OpenSpec import item for one work subtask.
-    #[must_use]
     pub fn subtask(
         object_id: impl Into<String>,
         openspec_task_id: impl Into<String>,
@@ -1679,7 +1678,6 @@ struct RawImportOpenSpecConflict {
 
 impl ImportOpenSpecConflict {
     /// Builds a subtask-scoped OpenSpec import conflict.
-    #[must_use]
     pub fn subtask(
         object_id: impl Into<String>,
         openspec_task_id: impl Into<String>,
@@ -1949,6 +1947,7 @@ impl OpenSpecImportProvenanceCommon {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_raw_parts(
         planning_format: String,
         openspec_change_id: String,
@@ -2027,7 +2026,6 @@ impl OpenSpecImportProvenanceCommon {
 
 impl OpenSpecImportProvenance {
     /// Builds MetaTask provenance from validated object-specific evidence.
-    #[must_use]
     pub fn meta_task(
         common: OpenSpecImportProvenanceCommon,
         object_id: impl Into<String>,
@@ -2049,7 +2047,6 @@ impl OpenSpecImportProvenance {
     }
 
     /// Builds Subtask provenance from validated task evidence.
-    #[must_use]
     pub fn subtask(
         common: OpenSpecImportProvenanceCommon,
         object_id: impl Into<String>,

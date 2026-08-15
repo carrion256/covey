@@ -148,6 +148,7 @@ impl SubtaskView {
 }
 
 impl SubtaskViewKind {
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         kind: SubtaskKind,
         review_target: Option<ReviewTarget>,
@@ -631,7 +632,6 @@ impl SubtaskStatus {
     }
 
     /// Returns the subtask view.
-    #[must_use]
     pub const fn subtask(&self) -> &SubtaskView {
         &self.subtask
     }
@@ -874,7 +874,6 @@ impl MetaTaskStatus {
     }
 
     /// Returns subtasks attached to this meta-task.
-    #[must_use]
     pub fn subtasks(&self) -> &[SubtaskView] {
         &self.subtasks
     }
@@ -1197,7 +1196,6 @@ pub struct OpenSpecArchiveEligibility {
 
 impl OpenSpecArchiveEligibility {
     /// Builds archive eligibility facts.
-    #[must_use]
     pub fn new(
         openspec_change_id: OpenSpecChangeId,
         scoped_subtasks: Vec<SubtaskView>,
@@ -1231,7 +1229,6 @@ pub struct OpenSpecArchiveCleanupClaim {
 
 impl OpenSpecArchiveCleanupClaim {
     /// Builds cleanup claim facts.
-    #[must_use]
     pub fn new(
         openspec_change_id: OpenSpecChangeId,
         cleanup_subtask_id: SubtaskId,
@@ -1451,7 +1448,6 @@ pub struct OpenSpecCurrentWorkBlocker {
 
 impl OpenSpecCurrentWorkBlocker {
     /// Builds a missing-import blocker.
-    #[must_use]
     pub fn missing_import(openspec_change_id: &OpenSpecChangeId) -> Self {
         let evidence_id = format!(
             "openspec_current_work:missing_import:{}",
@@ -1486,7 +1482,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker for an applied queue item that still needs archive cleanup.
-    #[must_use]
     pub fn applied_but_unarchived(status: &OpenSpecArchiveStatus) -> Self {
         let evidence_id = format!(
             "openspec_current_work:applied_but_unarchived:{}:{}",
@@ -1525,7 +1520,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker for an applied queue item that has no archive status row yet.
-    #[must_use]
     pub fn applied_queue_unarchived(queue_item: &ReadyQueueItem) -> Self {
         let evidence_id = format!(
             "openspec_current_work:applied_but_unarchived:{}:{}",
@@ -1569,7 +1563,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker for a direct-applied artifact that has no archive status row yet.
-    #[must_use]
     pub fn direct_applied_unarchived(subtask: &SubtaskView) -> Self {
         let artifact_digest = subtask
             .artifact_digest()
@@ -1608,7 +1601,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker for an applied queue item that lacks a durable landing receipt.
-    #[must_use]
     pub fn applied_without_landing_receipt(queue_item: &ReadyQueueItem) -> Self {
         let evidence_id = format!(
             "openspec_current_work:landing_receipt_missing:{}:{}",
@@ -1652,7 +1644,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker from native apply-gate evidence.
-    #[must_use]
     pub fn apply_gate_blocked(
         blocker: &ApplyGateBlocker,
         queue_item: Option<&ReadyQueueItem>,
@@ -1706,7 +1697,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker from native Authority settlement reconcile evidence.
-    #[must_use]
     pub fn settlement_reconcile_blocked(
         blocker: &SettlementReconcileBlocker,
         queue_item: Option<&ReadyQueueItem>,
@@ -1764,7 +1754,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker for a terminal blocked or changes-requested subtask.
-    #[must_use]
     pub fn subtask_blocked(subtask: &SubtaskView) -> Self {
         let evidence_id = format!(
             "openspec_current_work:subtask_blocked:{}:{}",
@@ -1800,7 +1789,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker for a scoped held claim whose lease has expired.
-    #[must_use]
     pub fn expired_claim(claim: &Claim, lease_now_ms: i64) -> Self {
         let evidence_id = format!(
             "openspec_current_work:expired_claim:{}:{}",
@@ -1842,7 +1830,6 @@ impl OpenSpecCurrentWorkBlocker {
 
     /// Builds a blocker for a scoped held claim that has exceeded the caller's
     /// explicit current-work idleness threshold but has not expired.
-    #[must_use]
     pub fn stale_claim(stale: &OpenSpecCurrentWorkStaleClaim) -> Self {
         let evidence_id = format!(
             "openspec_current_work:stale_claim:{}:{}:{}",
@@ -1885,7 +1872,6 @@ impl OpenSpecCurrentWorkBlocker {
 
     /// Builds a blocker for a registered scheduler workspace/cache that cannot
     /// safely be treated as an invisible execution detail.
-    #[must_use]
     pub fn vcs_workspace_unusable(workspace: &VcsWorkspace) -> Self {
         let evidence_id = format!(
             "openspec_current_work:vcs_workspace_unusable:{}:{}",
@@ -1947,7 +1933,6 @@ impl OpenSpecCurrentWorkBlocker {
     }
 
     /// Builds a blocker from a durable operator-blocker row.
-    #[must_use]
     pub fn operator_blocked(blocker: &OperatorBlocker) -> Self {
         let kind = operator_blocker_kind(blocker.reason.as_str());
         let evidence_id = blocker.source_evidence_id.as_ref().map_or_else(
@@ -2181,7 +2166,7 @@ pub struct OpenSpecCurrentWork {
 
 impl OpenSpecCurrentWork {
     /// Builds the current-work projection from Covey-owned lifecycle facts.
-    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         openspec_change_id: OpenSpecChangeId,
         subtasks: Vec<SubtaskView>,
@@ -2345,6 +2330,7 @@ fn current_work_next_owner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn current_work_blockers(
     openspec_change_id: &OpenSpecChangeId,
     subtasks: &[SubtaskView],
@@ -2434,15 +2420,21 @@ fn current_work_blockers(
                 .map(OpenSpecCurrentWorkBlocker::direct_applied_unarchived),
         );
     }
-    blockers.extend(subtasks.iter().filter_map(|subtask| {
-        (matches!(
-            subtask.state(),
-            SubtaskState::Blocked | SubtaskState::ChangesRequested | SubtaskState::Abandoned
-        ) && !repaired_source_subtask_ids
+    blockers.extend(
+        subtasks
             .iter()
-            .any(|repaired| repaired == &subtask.subtask_id))
-        .then(|| OpenSpecCurrentWorkBlocker::subtask_blocked(subtask))
-    }));
+            .filter(|&subtask| {
+                (matches!(
+                    subtask.state(),
+                    SubtaskState::Blocked
+                        | SubtaskState::ChangesRequested
+                        | SubtaskState::Abandoned
+                ) && !repaired_source_subtask_ids
+                    .iter()
+                    .any(|repaired| repaired == &subtask.subtask_id))
+            })
+            .map(OpenSpecCurrentWorkBlocker::subtask_blocked),
+    );
     blockers.extend(
         operator_blockers
             .iter()
@@ -2465,17 +2457,21 @@ fn current_work_blockers(
         .map(OpenSpecCurrentWorkBlocker::stale_claim)
         .collect::<Vec<_>>();
     blockers.extend(stale_blockers);
-    blockers.extend(vcs_workspaces.iter().filter_map(|workspace| {
-        (workspace.state == VcsWorkspaceState::Active
-            && matches!(
-                workspace.last_cleanliness,
-                VcsWorkspaceCleanliness::Dirty
-                    | VcsWorkspaceCleanliness::Missing
-                    | VcsWorkspaceCleanliness::Stale
-                    | VcsWorkspaceCleanliness::Unusable
-            ))
-        .then(|| OpenSpecCurrentWorkBlocker::vcs_workspace_unusable(workspace))
-    }));
+    blockers.extend(
+        vcs_workspaces
+            .iter()
+            .filter(|&workspace| {
+                workspace.state == VcsWorkspaceState::Active
+                    && matches!(
+                        workspace.last_cleanliness,
+                        VcsWorkspaceCleanliness::Dirty
+                            | VcsWorkspaceCleanliness::Missing
+                            | VcsWorkspaceCleanliness::Stale
+                            | VcsWorkspaceCleanliness::Unusable
+                    )
+            })
+            .map(OpenSpecCurrentWorkBlocker::vcs_workspace_unusable),
+    );
     blockers
 }
 
@@ -2549,6 +2545,7 @@ pub struct StuckSubtask {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 enum StuckSubtaskAttachment {
     Unclaimed,
     Claimed { claim: Claim, session: Session },
@@ -2642,7 +2639,6 @@ impl StuckSubtask {
     }
 
     /// Returns the idle subtask view.
-    #[must_use]
     pub const fn subtask(&self) -> &SubtaskView {
         &self.subtask
     }
@@ -2788,7 +2784,6 @@ impl ExpiringClaim {
     }
 
     /// Returns the subtask owned by the expiring claim.
-    #[must_use]
     pub const fn subtask(&self) -> &SubtaskView {
         &self.subtask
     }
@@ -4249,7 +4244,6 @@ impl RepoopsAuthorityLockFact {
     }
 
     /// Returns whether this lock is owned by the current claim or by a foreign owner.
-    #[must_use]
     pub const fn status(&self) -> RepoopsAuthorityLockStatus {
         self.fact.status()
     }
@@ -4446,7 +4440,6 @@ impl RepoopsAuthorityGitContextFact {
     }
 
     /// Builds git context facts when Covey has no concrete project paths.
-    #[must_use]
     pub const fn unknown(ownership_token_required: bool) -> Self {
         Self {
             context: RepoopsAuthorityGitContext::Unknown,
@@ -4937,13 +4930,11 @@ impl RepoopsAuthoritySnapshot {
     }
 
     /// Returns policy facts bound into this authority snapshot.
-    #[must_use]
     pub const fn policy(&self) -> &RepoopsAuthorityPolicyFact {
         &self.policy
     }
 
     /// Returns requested-scope facts bound into this authority snapshot.
-    #[must_use]
     pub const fn scope(&self) -> &RepoopsAuthorityScopeFact {
         &self.scope
     }
@@ -4960,7 +4951,6 @@ impl RepoopsAuthoritySnapshot {
     }
 
     /// Returns lock facts bound into this authority snapshot.
-    #[must_use]
     pub fn locks(&self) -> &[RepoopsAuthorityLockFact] {
         &self.locks
     }

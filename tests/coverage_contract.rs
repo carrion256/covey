@@ -366,6 +366,7 @@ fn apply_queue_item(rig: &Rig, queue_id: &str, gate_principal: &str) -> FenceSeq
     claim.claim_fence_seq
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_archive_status_req(
     session_token: impl Into<String>,
     queue_id: impl Into<String>,
