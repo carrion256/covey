@@ -1,6 +1,9 @@
 # Covey AGENTS.md
 
-This file adds Covey-specific binding rules on top of the parent instructions in [../AGENTS.md](../AGENTS.md). The parent rules still apply unless this file narrows them for this Rust crate.
+This file defines the binding repository rules for the `covey` crate, the
+`covey` CLI binary, the forward-only migration suite under `src/migrations`,
+and the vendored `better-droid` compile crate under `vendor/better-droid`
+(see `vendor/better-droid/README.md` for provenance and refresh guidance).
 
 These rules are mandatory for agents working in this repository. Treat this file as the crate policy and dependency rulebook, not as informal guidance.
 

@@ -343,3 +343,32 @@ not importable live Covey work.
 ## Project Standard
 
 Covey should stay boring. If it becomes interesting, it is probably taking on responsibilities that belong in the orchestrator, the apply gate, or the execution wrapper.
+
+
+## Building
+
+This repository builds and tests standalone; there are no workspace or
+git-dependency links to other repositories.
+
+```bash
+cargo build --workspace --all-targets
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+The single binary is `covey` (`cargo run --bin covey -- --help`).
+
+### Vendored dependency: `vendor/better-droid`
+
+`vendor/better-droid` is a snapshot of the Better Droid compiler crate that
+produces the compiled mission packets `covey import openspec` consumes. It is
+vendored so this repository has no external path or git dependencies. See
+`vendor/better-droid/README.md` for the source commit and refresh procedure.
+
+## License
+
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
+
+The vendored `vendor/better-droid` snapshot is distributed under the same
+license terms as the rest of this repository.
