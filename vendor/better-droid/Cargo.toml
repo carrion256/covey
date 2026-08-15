@@ -1,7 +1,12 @@
 [package]
-name = "better-droid"
+name = "better-droid-vendored"
 version = "0.1.0"
 edition = "2024"
+description = "Vendored snapshot of the mutAI Better Droid compiler crate"
+license = "AGPL-3.0-or-later"
+
+[lib]
+name = "better_droid"
 
 [[bin]]
 name = "better-droid"
