@@ -338,6 +338,7 @@ fn load_current_work_subtasks_tx(
         SELECT s.subtask_id, s.meta_task_id, s.title, s.kind,
                s.review_target_subtask_id, s.review_target_artifact_digest,
                s.state, s.current_claim_id, s.artifact_digest, s.priority,
+               s.completion_policy, s.routing_key,
                s.created_at, s.updated_at
         FROM current_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id

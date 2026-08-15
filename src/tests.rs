@@ -129,8 +129,8 @@ fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_bl
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('dep-work', 'meta-availability', 'dependency', 'work', NULL, NULL, 'available', NULL, NULL, 1, 1, 1)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('dep-work', 'meta-availability', 'dependency', 'work', NULL, NULL, 'available', NULL, NULL, 1, 'reviewed', 'default', 1, 1)",
             [],
         )
         .expect("insert dependency work");
@@ -146,8 +146,8 @@ fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_bl
         )
         .expect("mark dependency changes_requested");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('blocked-work', 'meta-availability', 'blocked work', 'work', NULL, NULL, 'available', NULL, NULL, 2, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('blocked-work', 'meta-availability', 'blocked work', 'work', NULL, NULL, 'available', NULL, NULL, 2, 'direct', 'default', 2, 2)",
             [],
         )
         .expect("insert blocked available work");
@@ -158,8 +158,8 @@ fn claimable_subtask_availability_reports_reviewer_lane_when_executor_work_is_bl
         )
         .expect("insert dependency edge");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-work', 'meta-availability', 'review blake3:dep', 'review', 'dep-work', 'blake3:dep', 'available', NULL, NULL, 1, 3, 3)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-work', 'meta-availability', 'review blake3:dep', 'review', 'dep-work', 'blake3:dep', 'available', NULL, NULL, 1, 'reviewed', 'default', 3, 3)",
             [],
         )
         .expect("insert available review");
@@ -196,8 +196,8 @@ fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('work-candidate', 'meta-candidates', 'work candidate', 'work', NULL, NULL, 'available', NULL, NULL, 5, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('work-candidate', 'meta-candidates', 'work candidate', 'work', NULL, NULL, 'available', NULL, NULL, 5, 'direct', 'default', 2, 2)",
             [],
         )
         .expect("insert work candidate");
@@ -213,8 +213,8 @@ fn scheduler_candidate_apis_are_read_only_and_return_exact_ids() {
         )
         .expect("insert artifact");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-candidate', 'meta-candidates', 'review candidate', 'review', 'work-candidate', 'blake3:reviewartifact', 'available', NULL, NULL, 1, 3, 3)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-candidate', 'meta-candidates', 'review candidate', 'review', 'work-candidate', 'blake3:reviewartifact', 'available', NULL, NULL, 1, 'reviewed', 'default', 3, 3)",
             [],
         )
         .expect("insert review candidate");
@@ -283,8 +283,8 @@ fn reconcile_apply_queue_requeues_expired_in_flight_claims() {
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('work-reconcile-queue', 'meta-reconcile-queue', 'work reconcile queue', 'work', NULL, NULL, 'available', NULL, NULL, 1, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('work-reconcile-queue', 'meta-reconcile-queue', 'work reconcile queue', 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'mutai', 2, 2)",
             [],
         )
         .expect("insert subtask");
@@ -300,8 +300,8 @@ fn reconcile_apply_queue_requeues_expired_in_flight_claims() {
         )
         .expect("approve subtask");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-reconcile-queue-subtask', 'meta-reconcile-queue', 'review reconcile queue', 'review', 'work-reconcile-queue', 'blake3:reconcile_queue_artifact', 'decided', NULL, NULL, 1, 4, 4)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-reconcile-queue-subtask', 'meta-reconcile-queue', 'review reconcile queue', 'review', 'work-reconcile-queue', 'blake3:reconcile_queue_artifact', 'decided', NULL, NULL, 1, 'canonical_apply', 'mutai', 4, 4)",
             [],
         )
         .expect("insert review subtask");
@@ -375,8 +375,8 @@ fn seed_archive_scoped_subtask(
         state
     };
     conn.execute(
-        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'work', NULL, NULL, ?4, NULL, ?5, 1, ?6, ?6)",
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'work', NULL, NULL, ?4, NULL, ?5, 1, 'canonical_apply', 'mutai', ?6, ?6)",
         params![
             subtask_id,
             format!("openspec:{change_id}"),
@@ -480,8 +480,8 @@ fn apply_worktree_registry_marks_cleanup_allowed_after_archive_receipt() {
     {
         let conn = covey.conn.lock().expect("covey connection mutex");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('worktree-cleanup-work', 'openspec:change-worktree-cleanup', 'worktree cleanup work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('worktree-cleanup-work', 'openspec:change-worktree-cleanup', 'worktree cleanup work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'mutai', 2, 2)",
             [],
         )
         .expect("insert worktree cleanup subtask");
@@ -580,8 +580,8 @@ fn seed_current_work_scoped_subtask(
 ) {
     let conn = covey.conn.lock().expect("covey connection mutex");
     conn.execute(
-        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'work', NULL, NULL, 'available', NULL, NULL, 1, ?4, ?4)",
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'mutai', ?4, ?4)",
         params![
             subtask_id,
             format!("openspec:{change_id}"),
@@ -736,8 +736,8 @@ fn seed_current_work_repair_followup(
     let review_id = format!("review-{source_subtask_id}");
     let findings_digest = format!("blake3:findings-{source_subtask_id}");
     conn.execute(
-        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'review', ?4, ?5, 'decided', NULL, NULL, 1, ?6, ?6)",
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'review', ?4, ?5, 'decided', NULL, NULL, 1, 'canonical_apply', 'mutai', ?6, ?6)",
         params![
             review_subtask_id,
             format!("openspec:{change_id}"),
@@ -762,8 +762,8 @@ fn seed_current_work_repair_followup(
     )
     .expect("insert current-work repair review");
     conn.execute(
-        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'work', NULL, NULL, 'available', NULL, NULL, 1, ?4, ?4)",
+        "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'mutai', ?4, ?4)",
         params![
             followup_subtask_id,
             format!("openspec:{change_id}"),
@@ -835,8 +835,8 @@ fn seed_apply_gate_blocker(
 ) {
     let conn = covey.conn.lock().expect("covey connection mutex");
     conn.execute(
-        "INSERT OR IGNORE INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-         SELECT ?1, subtask.meta_task_id, ?2, 'review', queue.subtask_id, queue.artifact_digest, 'decided', NULL, NULL, 1, ?3, ?3
+        "INSERT OR IGNORE INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+         SELECT ?1, subtask.meta_task_id, ?2, 'review', queue.subtask_id, queue.artifact_digest, 'decided', NULL, NULL, 1, 'canonical_apply', 'mutai', ?3, ?3
          FROM ready_queue queue
          JOIN subtasks subtask ON subtask.subtask_id = queue.subtask_id
          WHERE queue.queue_id = ?4",
@@ -890,8 +890,8 @@ fn seed_settlement_reconcile_blocker(
 ) {
     let conn = covey.conn.lock().expect("covey connection mutex");
     conn.execute(
-        "INSERT OR IGNORE INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-         SELECT ?1, subtask.meta_task_id, ?2, 'review', queue.subtask_id, queue.artifact_digest, 'decided', NULL, NULL, 1, ?3, ?3
+        "INSERT OR IGNORE INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+         SELECT ?1, subtask.meta_task_id, ?2, 'review', queue.subtask_id, queue.artifact_digest, 'decided', NULL, NULL, 1, 'canonical_apply', 'mutai', ?3, ?3
          FROM ready_queue queue
          JOIN subtasks subtask ON subtask.subtask_id = queue.subtask_id
          WHERE queue.queue_id = ?4",
@@ -3129,8 +3129,8 @@ fn changes_requested_reconciliation_creates_claimable_repair_followup() {
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('source-work', 'meta-followup', 'source work', 'work', NULL, NULL, 'available', NULL, NULL, 5, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('source-work', 'meta-followup', 'source work', 'work', NULL, NULL, 'available', NULL, NULL, 5, 'reviewed', 'default', 2, 2)",
             [],
         )
         .expect("insert source work");
@@ -3151,8 +3151,8 @@ fn changes_requested_reconciliation_creates_claimable_repair_followup() {
         )
         .expect("mark source work changes requested");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-source-work', 'meta-followup', 'review source work', 'review', 'source-work', ?1, 'decided', NULL, NULL, 1, 3, 3)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-source-work', 'meta-followup', 'review source work', 'review', 'source-work', ?1, 'decided', NULL, NULL, 1, 'reviewed', 'default', 3, 3)",
             params![artifact_digest],
         )
         .expect("insert decided review subtask");
@@ -3227,8 +3227,8 @@ fn failed_review_reconciliation_creates_claimable_blocked_repair_followup() {
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('blocked-work', 'meta-blocked-followup', 'blocked work', 'work', NULL, NULL, 'available', NULL, NULL, 5, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('blocked-work', 'meta-blocked-followup', 'blocked work', 'work', NULL, NULL, 'available', NULL, NULL, 5, 'reviewed', 'default', 2, 2)",
             [],
         )
         .expect("insert blocked work");
@@ -3249,8 +3249,8 @@ fn failed_review_reconciliation_creates_claimable_blocked_repair_followup() {
         )
         .expect("mark blocked work blocked");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-blocked-work', 'meta-blocked-followup', 'review blocked work', 'review', 'blocked-work', ?1, 'decided', NULL, NULL, 1, 3, 3)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-blocked-work', 'meta-blocked-followup', 'review blocked work', 'review', 'blocked-work', ?1, 'decided', NULL, NULL, 1, 'reviewed', 'default', 3, 3)",
             params![artifact_digest],
         )
         .expect("insert decided review subtask");
@@ -3317,8 +3317,8 @@ fn recursive_review_followup_chain_satisfies_work_dependencies() {
             ("dependent-work", "available", 2, 4),
         ] {
             conn.execute(
-                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-                 VALUES (?1, 'meta-chain', ?1, 'work', NULL, NULL, ?2, NULL, NULL, ?3, ?4, ?4)",
+                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+                 VALUES (?1, 'meta-chain', ?1, 'work', NULL, NULL, ?2, NULL, NULL, ?3, 'canonical_apply', 'default', ?4, ?4)",
                 params![subtask_id, state, priority, updated_at],
             )
             .expect("insert work subtask");
@@ -3360,8 +3360,8 @@ fn recursive_review_followup_chain_satisfies_work_dependencies() {
             ),
         ] {
             conn.execute(
-                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-                 VALUES (?1, 'meta-chain', ?1, 'review', ?2, ?3, 'decided', NULL, NULL, 1, 1, 1)",
+                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+                 VALUES (?1, 'meta-chain', ?1, 'review', ?2, ?3, 'decided', NULL, NULL, 1, 'reviewed', 'default', 1, 1)",
                 params![review_subtask_id, source_subtask_id, artifact_digest],
             )
             .expect("insert review subtask");
@@ -3439,8 +3439,8 @@ fn stuck_subtasks_exclude_failed_work_superseded_by_followup_chain() {
             ("unresolved-leaf", "changes_requested", leaf_digest, 4),
         ] {
             conn.execute(
-                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-                 VALUES (?1, 'meta-stuck-chain', ?1, 'work', NULL, NULL, 'available', NULL, NULL, 1, ?2, ?2)",
+                "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+                 VALUES (?1, 'meta-stuck-chain', ?1, 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'default', ?2, ?2)",
                 params![subtask_id, created_at],
             )
             .expect("insert work subtask");
@@ -3462,8 +3462,8 @@ fn stuck_subtasks_exclude_failed_work_superseded_by_followup_chain() {
             .expect("publish work artifact state");
         }
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-source', 'meta-stuck-chain', 'review source', 'review', 'source-work', ?1, 'decided', NULL, NULL, 1, 3, 3)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-source', 'meta-stuck-chain', 'review source', 'review', 'source-work', ?1, 'decided', NULL, NULL, 1, 'reviewed', 'default', 3, 3)",
             params![source_digest],
         )
         .expect("insert review subtask");
@@ -3531,8 +3531,8 @@ fn observability_queries_skip_invalid_claim_session_attachments() {
                 "INSERT INTO subtasks (
                     subtask_id, meta_task_id, title, kind, review_target_subtask_id,
                     review_target_artifact_digest, state, current_claim_id, artifact_digest,
-                    priority, created_at, updated_at
-                ) VALUES (?1, 'meta-observe', ?1, 'work', NULL, NULL, 'in_progress', NULL, NULL, 1, ?2, ?2)",
+                    priority, completion_policy, routing_key, created_at, updated_at
+                ) VALUES (?1, 'meta-observe', ?1, 'work', NULL, NULL, 'in_progress', NULL, NULL, 1, 'direct', 'default', ?2, ?2)",
                 params![subtask_id, now - 10_000],
             )
             .expect("insert subtask");
@@ -3602,8 +3602,8 @@ fn apply_gate_requeues_orphaned_ready_for_apply_item_before_claiming() {
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('ready-work', 'meta-apply', 'ready work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 1, 1)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('ready-work', 'meta-apply', 'ready work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'mutai', 1, 1)",
             [],
         )
         .expect("insert ready work");
@@ -3614,8 +3614,8 @@ fn apply_gate_requeues_orphaned_ready_for_apply_item_before_claiming() {
         )
         .expect("insert artifact");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-subtask', 'meta-apply', 'review ready work', 'review', 'ready-work', ?1, 'decided', NULL, NULL, 1, 1, 1)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-subtask', 'meta-apply', 'review ready work', 'review', 'ready-work', ?1, 'decided', NULL, NULL, 1, 'canonical_apply', 'mutai', 1, 1)",
             params![digest],
         )
         .expect("insert review subtask");

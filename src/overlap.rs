@@ -1115,9 +1115,9 @@ mod tests {
             "INSERT INTO subtasks (
                 subtask_id, meta_task_id, title, kind, review_target_subtask_id,
                 review_target_artifact_digest, state, current_claim_id, artifact_digest,
-                priority, created_at, updated_at
+                priority, completion_policy, routing_key, created_at, updated_at
             ) VALUES ('subtask-owner', 'meta-task', 'work', 'work', NULL, NULL, 'available',
-                NULL, NULL, 100, 1, 1)",
+                NULL, NULL, 100, 'direct', 'default', 1, 1)",
             [],
         )
         .expect("insert subtask");

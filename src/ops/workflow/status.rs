@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-const LEGACY_ROUTING_KEY: &str = "mutai";
+const DEFAULT_ROUTING_KEY: &str = "default";
 
 impl Covey {
     /// Returns the current persisted status for a subtask and its related rows.
@@ -56,13 +56,13 @@ impl Covey {
         result
     }
 
-    /// Returns read-only counts for currently claimable executor and reviewer subtasks.
+    /// Returns claimable counts on the generic default route.
     pub fn claimable_subtask_availability(
         &self,
         meta_task_id: Option<&str>,
     ) -> Result<ClaimableSubtaskAvailability> {
         let routing_key =
-            RoutingKey::parse(LEGACY_ROUTING_KEY).expect("the legacy mutAI routing key is valid");
+            RoutingKey::parse(DEFAULT_ROUTING_KEY).expect("the default routing key is valid");
         self.claimable_subtask_availability_routed(&routing_key, meta_task_id)
     }
 
@@ -93,7 +93,7 @@ impl Covey {
         result
     }
 
-    /// Returns read-only, ordered subtask candidates for deterministic scheduling.
+    /// Returns ordered scheduler candidates on the generic default route.
     pub fn subtask_candidates(
         &self,
         role: SessionRole,
@@ -101,7 +101,7 @@ impl Covey {
         meta_task_id: Option<&str>,
     ) -> Result<Vec<SubtaskCandidate>> {
         let routing_key =
-            RoutingKey::parse(LEGACY_ROUTING_KEY).expect("the legacy mutAI routing key is valid");
+            RoutingKey::parse(DEFAULT_ROUTING_KEY).expect("the default routing key is valid");
         self.subtask_candidates_routed(role, &routing_key, limit, meta_task_id)
     }
 

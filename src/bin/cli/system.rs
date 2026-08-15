@@ -20,6 +20,14 @@ pub(crate) enum MaintCommand {
     ExpireClaims,
     #[command(name = "expire-reservations")]
     ExpireReservations,
+    #[command(name = "backup")]
+    /// Write a consistent snapshot of the database to a fresh SQLite file.
+    Backup(BackupArgs),
+}
+#[derive(Args, Debug)]
+pub(crate) struct BackupArgs {
+    #[arg(long)]
+    pub(crate) output: std::path::PathBuf,
 }
 #[derive(Args, Debug)]
 pub(crate) struct ListEventsArgs {

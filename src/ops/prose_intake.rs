@@ -8,12 +8,12 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ArtifactDigest, CreateSubtaskRequest, EventType, ImportProseReq, ImportProseResult,
-        MetaTaskId, ObjectType, ProseCurrentWork, ProseCurrentWorkBlocker, ProseCurrentWorkOwner,
-        ProseCurrentWorkState, ProseTasksetId, QueueId, ReadyQueueState,
-        RecordProseApplyBlockerReq, ReviewId, ReviewState, SubtaskId, SubtaskState,
+        ArtifactDigest, CompletionPolicy, CreateWorkSubtaskReq, EventType, ImportProseReq,
+        ImportProseResult, MetaTaskId, ObjectType, ProseCurrentWork, ProseCurrentWorkBlocker,
+        ProseCurrentWorkOwner, ProseCurrentWorkState, ProseTasksetId, QueueId, ReadyQueueState,
+        RecordProseApplyBlockerReq, ReviewId, ReviewState, RoutingKey, SubtaskId, SubtaskState,
     },
-    ops::{meta_task::submit_meta_task_tx, workflow::create_subtask_tx},
+    ops::{meta_task::submit_meta_task_tx, workflow::create_work_subtask_tx},
     queries::collect_rows,
     schema::append_event,
     validators::require_role,
@@ -196,18 +196,20 @@ fn import_prose_tx(
 
     let mut subtask_ids = Vec::with_capacity(req.tasks.len());
     for (index, task) in req.tasks.iter().enumerate() {
-        let create_req = CreateSubtaskRequest {
+        let create_req = CreateWorkSubtaskReq {
             session_token: req.session_token.clone(),
             meta_task_id: meta_task_id.clone(),
             subtask_id: None,
             title: task.title.clone(),
             priority: crate::model::SubtaskPriority::parse(100)?,
+            completion_policy: CompletionPolicy::CanonicalApply,
+            routing_key: RoutingKey::parse("default")?,
             idempotency_key: crate::model::IdempotencyKey::parse(format!(
                 "{}:create-subtask:{index}",
                 req.idempotency_key.as_str()
             ))?,
         };
-        let subtask_id = SubtaskId::parse(create_subtask_tx(tx, &create_req, now)?)?;
+        let subtask_id = SubtaskId::parse(create_work_subtask_tx(tx, &create_req, now)?)?;
         tx.execute(
             r#"
             INSERT INTO prose_subtask_scope (subtask_id, taskset_id, item_index, updated_at)

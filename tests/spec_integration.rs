@@ -14,16 +14,16 @@ mod support;
 
 use covey::{
     AbandonSubtaskReq, ActorKind, ArtifactKind, CancelMetaTaskReq, ClaimNextReq,
-    ClaimReadyQueueReq, ClaimResult, ClaimSubtaskReq, Covey, CoveyError, CreateSubtaskRequest,
-    DecideReviewReq, EnqueueForApplyReq, EventPayload, EventType, ExitSessionReq, FenceSeq,
-    HeartbeatReq, IdempotencyKey, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result,
-    ImportBdV1SkipReason, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq,
-    MetaTaskState, ObjectType, OverlapQueryReq, PublishArtifactReq, ReadyQueueState,
-    RecordApplyVerificationReq, RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    ClaimReadyQueueReq, ClaimResult, ClaimSubtaskReq, Covey, CoveyError, DecideReviewReq,
+    EnqueueForApplyReq, EventPayload, EventType, ExitSessionReq, FenceSeq, HeartbeatReq,
+    IdempotencyKey, ImportBdV1ItemResult, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason,
+    LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq, MetaTaskState, ObjectType,
+    OverlapQueryReq, PublishArtifactReq, ReadyQueueState, RecordApplyVerificationReq,
+    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq,
+    ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RequestReservationReq, RequestReviewReq, ReservationOverlapConflictPayload, ResolveConflictReq,
     ScopeClass, SessionRole, SessionState, SessionToken, SettlementTarget, StartSubtaskReq,
-    StateValue, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState, SubtaskTitle,
+    StateValue, SubmitMetaTaskReq, SubtaskId, SubtaskKind, SubtaskState,
 };
 use rusqlite::ffi::{SQLITE_TESTCTRL_FAULT_INSTALL, sqlite3_test_control};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -48,8 +48,33 @@ fn subtask_id(value: &str) -> SubtaskId {
     SubtaskId::parse(value).expect("test subtask id must be valid")
 }
 
-fn parse_subtask_id(value: &str) -> SubtaskId {
-    SubtaskId::parse(value).expect("test subtask id must be valid")
+/// Creates canonical_apply work on Covey's default routing lane; the spec
+/// integration harness drives mutAI apply/review flows that require the
+/// canonical policy (patch-bundle publish and approval gates).
+fn create_canonical_work(
+    covey: &covey::Covey,
+    orch: &str,
+    meta_task_id: &str,
+    subtask_id: Option<&str>,
+    title: &str,
+    priority: i64,
+    idempotency_key: &str,
+) -> String {
+    covey
+        .create_work_subtask(
+            covey::CreateWorkSubtaskReq::try_from_raw_parts(
+                orch.to_owned(),
+                meta_task_id.to_owned(),
+                subtask_id.map(str::to_owned),
+                title.to_owned(),
+                priority,
+                covey::CompletionPolicy::CanonicalApply,
+                "default",
+                idempotency_key.to_owned(),
+            )
+            .expect("valid create-work-subtask request"),
+        )
+        .expect("create work subtask")
 }
 
 struct Rig {
@@ -131,17 +156,15 @@ fn seed_work_subtask(rig: &Rig) -> (String, String) {
         )
         .expect("submit meta task");
     rig.tick(1);
-    let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("work_1")),
-            title: SubtaskTitle::parse("implement covey").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("create subtask");
+    let subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("work_1"),
+        "implement covey",
+        1,
+        id_key("create-subtask").as_str(),
+    );
     (meta_task_id, subtask_id)
 }
 
@@ -1129,7 +1152,7 @@ fn import_repeat_is_deterministic() {
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
         .iter()
-        .filter(|event| event.event_type() == EventType::SubtaskCreated)
+        .filter(|event| event.event_type() == EventType::WorkSubtaskCreated)
         .count();
     let meta_submitted_events = event_log
         .iter()
@@ -1226,7 +1249,7 @@ fn import_bd_reimport_allowed_non_task_types_is_deterministic() {
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
         .iter()
-        .filter(|event| event.event_type() == EventType::SubtaskCreated)
+        .filter(|event| event.event_type() == EventType::WorkSubtaskCreated)
         .count();
     let meta_submitted_events = event_log
         .iter()
@@ -1300,7 +1323,7 @@ fn import_bd_reimport_allowed_non_task_type_into_different_meta_task_conflicts()
     let event_log = covey.fetch_events(0, 100).expect("event log");
     let subtask_created_events = event_log
         .iter()
-        .filter(|event| event.event_type() == EventType::SubtaskCreated)
+        .filter(|event| event.event_type() == EventType::WorkSubtaskCreated)
         .count();
     let meta_submitted_events = event_log
         .iter()
@@ -1539,17 +1562,15 @@ fn import_bd_into_existing_non_terminal_meta_task_preserves_existing_work_and_no
             .expect("valid submit-meta-task request"),
         )
         .expect("submit meta task");
-    let manual_subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("manual_existing_work")),
-            title: SubtaskTitle::parse("manual existing work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("create manual subtask");
+    let manual_subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("manual_existing_work"),
+        "manual existing work",
+        1,
+        id_key("create-subtask").as_str(),
+    );
 
     let beads_dir = TempDir::new().expect("tempdir");
     let beads_db = beads_dir.path().join("beads.db");
@@ -2474,16 +2495,15 @@ fn claim_subtask_rejects_session_occupancy() {
         "orch-occupancy",
         SessionRole::Orchestrator,
     );
-    let second_subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("work_2")),
-            title: SubtaskTitle::parse("second work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("create second subtask");
+    let second_subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("work_2"),
+        "second work",
+        2,
+        id_key("create-subtask").as_str(),
+    );
     let worker = register(
         &covey,
         "worker-occupancy",
@@ -2966,19 +2986,15 @@ fn claim_next_treats_applied_review_followup_as_satisfying_source_dependency() {
         "orchestrator-followup-unblocks-dependent",
         SessionRole::Orchestrator,
     );
-    let dependent_subtask_id = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
-                orchestrator.clone(),
-                meta_task_id,
-                Some("dependent_after_review_followup".into()),
-                "dependent after review follow-up",
-                100,
-                id_key("create-dependent"),
-            )
-            .expect("valid dependent create request"),
-        )
-        .expect("create dependent");
+    let dependent_subtask_id = create_canonical_work(
+        &covey,
+        &orchestrator,
+        &meta_task_id,
+        Some("dependent_after_review_followup"),
+        "dependent after review follow-up",
+        100,
+        id_key("create-dependent").as_str(),
+    );
     let conn = Connection::open(&rig.db_path).expect("open db");
     conn.execute(
         "INSERT INTO subtask_dependencies (subtask_id, depends_on_subtask_id, source_ref, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -3533,27 +3549,24 @@ fn ready_queue_orders_items_and_applies_in_order() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta task");
-    let first = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("ready_1")),
-            title: SubtaskTitle::parse("first").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask1");
-    let second = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("ready_2")),
-            title: SubtaskTitle::parse("second").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask2");
+    let first = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("ready_1"),
+        "first",
+        1,
+        id_key("create-subtask").as_str(),
+    );
+    let second = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("ready_2"),
+        "second",
+        2,
+        id_key("create-subtask").as_str(),
+    );
 
     let mut review_records = Vec::new();
     for (subtask_id, digest, created_at) in
@@ -3742,16 +3755,15 @@ fn expired_ready_queue_claims_are_requeued_for_the_next_apply_gate() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta");
-    let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("queue_reclaim")),
-            title: SubtaskTitle::parse("queue reclaim").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask");
+    let subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("queue_reclaim"),
+        "queue reclaim",
+        1,
+        id_key("create-subtask").as_str(),
+    );
     let claim = covey
         .claim_next_subtask(
             ClaimNextReq::try_from_raw_parts(
@@ -4068,16 +4080,15 @@ fn overlapping_reservations_surface_open_typed_conflicts() {
         "orch_extra",
         SessionRole::Orchestrator,
     );
-    let second_subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("shadow_work")),
-            title: SubtaskTitle::parse("shadow work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("create second subtask");
+    let second_subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("shadow_work"),
+        "shadow work",
+        2,
+        id_key("create-subtask").as_str(),
+    );
 
     let first_reservation = covey
         .request_reservation(
@@ -4151,18 +4162,15 @@ fn concurrent_pool_claims_distribute_exactly_once() {
         .expect("meta task");
     let mut session_tokens = Vec::new();
     for idx in 0..10 {
-        covey
-            .create_subtask(CreateSubtaskRequest {
-                session_token: covey::SessionToken::parse(orch.clone())
-                    .expect("valid session token"),
-                meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                    .expect("valid meta-task id"),
-                subtask_id: Some(parse_subtask_id(&format!("task_{idx}"))),
-                title: SubtaskTitle::parse(format!("task {idx}")).expect("valid subtask title"),
-                priority: covey::SubtaskPriority::parse(idx).expect("valid subtask priority"),
-                idempotency_key: id_key("create-subtask"),
-            })
-            .expect("create subtask");
+        create_canonical_work(
+            &covey,
+            &orch,
+            &meta_task_id,
+            Some(format!("task_{idx}").as_str()),
+            &format!("task {idx}"),
+            idx,
+            id_key("create-subtask").as_str(),
+        );
         let session = format!("worker_{idx}");
         session_tokens.push(register(&covey, &session, &session, SessionRole::Executor));
     }
@@ -4624,27 +4632,24 @@ fn reservation_overlap_conflicts_resolve_when_reservations_release_or_expire() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta");
-    let subtask_a = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("reservation_a")),
-            title: SubtaskTitle::parse("reservation a").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask a");
-    let subtask_b = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("reservation_b")),
-            title: SubtaskTitle::parse("reservation b").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask b");
+    let subtask_a = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("reservation_a"),
+        "reservation a",
+        1,
+        id_key("create-subtask").as_str(),
+    );
+    let subtask_b = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("reservation_b"),
+        "reservation b",
+        2,
+        id_key("create-subtask").as_str(),
+    );
 
     let reservation_a = covey
         .request_reservation(
@@ -4823,16 +4828,15 @@ fn queued_items_reject_direct_apply_and_missing_queue_items_are_typed_errors() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta task");
-    let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("queue_target")),
-            title: SubtaskTitle::parse("queue target").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask");
+    let subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("queue_target"),
+        "queue target",
+        1,
+        id_key("create-subtask").as_str(),
+    );
 
     let claim = covey
         .claim_next_subtask(
@@ -4988,16 +4992,15 @@ fn mark_applied_rejects_queue_items_when_subtask_digest_has_drifted() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta task");
-    let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("queue_drift_target")),
-            title: SubtaskTitle::parse("queue drift target").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask");
+    let subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("queue_drift_target"),
+        "queue drift target",
+        1,
+        id_key("create-subtask").as_str(),
+    );
 
     let claim = covey
         .claim_next_subtask(
@@ -5202,16 +5205,15 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta");
-    covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(second_meta).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("work_2")),
-            title: SubtaskTitle::parse("second work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("second subtask");
+    create_canonical_work(
+        &covey,
+        &orch,
+        &second_meta,
+        Some("work_2"),
+        "second work",
+        2,
+        id_key("create-subtask").as_str(),
+    );
 
     assert!(matches!(
         covey.claim_next_subtask(
@@ -5274,15 +5276,19 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
         Err(CoveyError::ConflictNotFound)
     ));
     assert!(matches!(
-        covey.create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse("meta_does_not_exist")
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("review_bad")),
-            title: SubtaskTitle::parse("bad review").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        }),
+        covey.create_work_subtask(
+            covey::CreateWorkSubtaskReq::try_from_raw_parts(
+                orch.clone(),
+                "meta_does_not_exist",
+                Some("review_bad".into()),
+                "bad review",
+                1,
+                covey::CompletionPolicy::CanonicalApply,
+                "default",
+                id_key("create-subtask").as_str(),
+            )
+            .expect("valid create-work-subtask request"),
+        ),
         Err(CoveyError::MetaTaskNotFound)
     ));
 
@@ -5311,27 +5317,30 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             .expect("valid submit-meta-task request"),
         )
         .expect("meta");
-    covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("dup")),
-            title: SubtaskTitle::parse("dup").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("first subtask");
+    create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("dup"),
+        "dup",
+        1,
+        id_key("create-subtask").as_str(),
+    );
 
     assert!(matches!(
-        covey.create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone()).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("dup")),
-            title: SubtaskTitle::parse("dup").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-        idempotency_key: id_key("create-subtask"),
-        }),
+        covey.create_work_subtask(
+            covey::CreateWorkSubtaskReq::try_from_raw_parts(
+                orch.clone(),
+                meta_task_id.clone(),
+                Some("dup".into()),
+                "dup",
+                1,
+                covey::CompletionPolicy::CanonicalApply,
+                "default",
+                id_key("create-subtask").as_str(),
+            )
+            .expect("valid create-work-subtask request"),
+        ),
         Err(CoveyError::DuplicateSubtaskId { subtask_id }) if subtask_id == "dup"
     ));
 
@@ -5378,17 +5387,15 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             .expect("valid artifact publication request"),
         )
         .expect("publish");
-    covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("other_work")),
-            title: SubtaskTitle::parse("other work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(3).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("other work subtask");
+    create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("other_work"),
+        "other work",
+        3,
+        id_key("create-subtask").as_str(),
+    );
     assert!(matches!(
         covey.request_review(
             RequestReviewReq::try_from_raw_parts(
@@ -5417,16 +5424,15 @@ fn mismatch_and_missing_domain_errors_are_reachable() {
             .expect("valid review request"),
         )
         .expect("request review");
-    covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("wrong_claim_subtask")),
-            title: SubtaskTitle::parse("wrong claim subtask").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(0).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("wrong claim subtask");
+    create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("wrong_claim_subtask"),
+        "wrong claim subtask",
+        0,
+        id_key("create-subtask").as_str(),
+    );
     covey
         .release_claim(
             ReleaseClaimReq::try_from_raw_parts(
@@ -5781,27 +5787,24 @@ fn end_to_end_flow_tracks_work_review_apply_and_abandon() {
             .expect("valid submit-meta-task request"),
         )
         .expect("submit");
-    let apply_subtask = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("apply_me")),
-            title: SubtaskTitle::parse("apply me").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask a");
-    let abandon_subtask = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("abandon_me")),
-            title: SubtaskTitle::parse("abandon me").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(2).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("subtask b");
+    let apply_subtask = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("apply_me"),
+        "apply me",
+        1,
+        id_key("create-subtask").as_str(),
+    );
+    let abandon_subtask = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("abandon_me"),
+        "abandon me",
+        2,
+        id_key("create-subtask").as_str(),
+    );
 
     let claim_a = covey
         .claim_next_subtask(
@@ -6038,17 +6041,15 @@ fn meta_task_state_moves_from_planning_to_active_to_completed() {
         MetaTaskState::Planning
     );
 
-    let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id.clone())
-                .expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("meta_flow_work")),
-            title: SubtaskTitle::parse("meta flow work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("create subtask");
+    let subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("meta_flow_work"),
+        "meta flow work",
+        1,
+        id_key("create-subtask").as_str(),
+    );
     assert_eq!(
         covey
             .meta_task_status(&meta_task_id)
@@ -6250,13 +6251,15 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
             .expect("valid submit-meta-task request"),
         )
         .expect("submit meta");
-    let oversized_subtask_id = CreateSubtaskRequest::try_from_raw_parts(
+    let oversized_subtask_id = covey::CreateWorkSubtaskReq::try_from_raw_parts(
         orch.clone(),
         meta_task_id.clone(),
         Some(long.clone()),
         "too long",
         1,
-        id_key("create-subtask"),
+        covey::CompletionPolicy::CanonicalApply,
+        "default",
+        id_key("create-subtask").as_str(),
     )
     .expect_err("oversized subtask id should be rejected before operation execution");
     assert!(
@@ -6264,16 +6267,15 @@ fn oversized_identity_and_artifact_fields_are_rejected() {
         "unexpected error: {oversized_subtask_id}"
     );
 
-    let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(parse_subtask_id("bounds_work")),
-            title: SubtaskTitle::parse("bounds work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
-        .expect("create subtask");
+    let subtask_id = create_canonical_work(
+        &covey,
+        &orch,
+        &meta_task_id,
+        Some("bounds_work"),
+        "bounds work",
+        1,
+        id_key("create-subtask").as_str(),
+    );
     let worker = register(&covey, "worker", "worker", SessionRole::Executor);
     let reviewer = register(&covey, "reviewer", "reviewer", SessionRole::Reviewer);
 

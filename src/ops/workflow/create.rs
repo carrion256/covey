@@ -20,10 +20,10 @@ use crate::{
     },
 };
 
-const LEGACY_ROUTING_KEY: &str = "mutai";
+const DEFAULT_ROUTING_KEY: &str = "default";
 
 impl Covey {
-    /// Creates legacy work using the canonical mutAI assurance and routing defaults.
+    /// Creates direct work on Covey's generic default route.
     pub fn create_subtask(&self, req: CreateSubtaskRequest) -> Result<String> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
@@ -77,8 +77,8 @@ pub(crate) fn create_subtask_tx(
     req: &CreateSubtaskRequest,
     now: i64,
 ) -> Result<String> {
-    let routing_key = RoutingKey::parse(LEGACY_ROUTING_KEY)
-        .expect("the legacy mutAI routing key is a valid routing key");
+    let routing_key = RoutingKey::parse(DEFAULT_ROUTING_KEY)
+        .expect("the default routing key is a valid routing key");
     insert_work_subtask_tx(
         tx,
         req.session_token.as_str(),
@@ -86,7 +86,7 @@ pub(crate) fn create_subtask_tx(
         req.subtask_id.as_ref(),
         &req.title,
         req.priority,
-        CompletionPolicy::CanonicalApply,
+        CompletionPolicy::Direct,
         &routing_key,
         EventType::SubtaskCreated,
         req,
@@ -94,7 +94,7 @@ pub(crate) fn create_subtask_tx(
     )
 }
 
-fn create_work_subtask_tx(
+pub(crate) fn create_work_subtask_tx(
     tx: &Transaction<'_>,
     req: &CreateWorkSubtaskReq,
     now: i64,

@@ -10,10 +10,10 @@ mod workflow;
 use clap::ValueEnum;
 use covey::{
     AbandonSubtaskReq, ClaimNextReq, ClaimNextRoutedReq, ClaimReadyQueueReq, ClaimSubtaskReq,
-    Covey, CreateSubtaskRequest, CreateWorkSubtaskReq, DecideReviewReq, EnqueueForApplyReq,
-    ExitSessionReq, FailSubtaskReq, FinishSubtaskReq, HeartbeatReq, ImportBdV1Req,
-    ImportOpenSpecReq, MarkAppliedReq, MarkInFlightReq, OpenSpecArchiveStatusState,
-    OverlapQueryReq, PublishArtifactReq, ReconcileApplyQueueReq, RecordApplyGateBlockerReq,
+    Covey, CreateWorkSubtaskReq, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq,
+    FailSubtaskReq, FinishSubtaskReq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq,
+    MarkAppliedReq, MarkInFlightReq, OpenSpecArchiveStatusState, OverlapQueryReq,
+    PublishArtifactReq, ReconcileApplyQueueReq, RecordApplyGateBlockerReq,
     RecordApplyVerificationReq, RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,
     RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq,
     RecordSettlementReconcileBlockerReq, RegisterSessionReq, ReleaseClaimReq,

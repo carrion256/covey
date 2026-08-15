@@ -10,12 +10,12 @@ use crate::{
     Covey, SessionRole,
     error::{CoveyError, Result},
     model::{
-        CreateSubtaskRequest, IdempotencyKey, ImportBdV1ItemResult, ImportBdV1Req,
-        ImportBdV1Result, ImportBdV1SkipReason, MetaTaskId, SessionToken, SourceIssueId, SubtaskId,
-        SubtaskPriority, SubtaskTitle, bd_import_v1_subtask_id,
+        CompletionPolicy, CreateWorkSubtaskReq, ImportBdV1ItemResult, ImportBdV1Req,
+        ImportBdV1Result, ImportBdV1SkipReason, SessionToken, SourceIssueId,
+        bd_import_v1_subtask_id,
     },
     ops::meta_task::submit_meta_task_tx,
-    ops::workflow::create_subtask_tx,
+    ops::workflow::create_work_subtask_tx,
     queries::load_subtask_tx,
     validators::{
         MAX_OBJECT_ID_LEN, MAX_PATH_LEN, MAX_PROMPT_LEN, MAX_TITLE_LEN, ensure_length,
@@ -218,16 +218,18 @@ fn import_bd_v1_work_subtask_tx(
         return Ok(subtask_id);
     }
 
-    let create_req = CreateSubtaskRequest {
-        session_token: req.session_token.clone(),
-        meta_task_id: MetaTaskId::parse(destination_meta_task_id.clone())?,
-        subtask_id: Some(SubtaskId::parse(subtask_id.clone())?),
-        title: SubtaskTitle::parse(req.title.clone())?,
-        priority: SubtaskPriority::parse(req.priority)?,
-        idempotency_key: IdempotencyKey::parse(req.idempotency_key.clone())?,
-    };
+    let create_req = CreateWorkSubtaskReq::try_from_raw_parts(
+        req.session_token.clone(),
+        destination_meta_task_id.clone(),
+        Some(subtask_id.clone()),
+        req.title.clone(),
+        req.priority,
+        CompletionPolicy::CanonicalApply,
+        "default",
+        req.idempotency_key.clone(),
+    )?;
 
-    create_subtask_tx(tx, &create_req, now)
+    create_work_subtask_tx(tx, &create_req, now)
 }
 
 fn import_bd_v1_source_rows_tx(

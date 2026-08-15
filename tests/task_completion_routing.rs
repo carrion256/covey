@@ -25,7 +25,7 @@ fn register(covey: &Covey, principal: &str, role: SessionRole) -> String {
 }
 
 #[test]
-fn explicit_routing_isolated_from_legacy_mutai_claim_next() {
+fn explicit_routing_isolated_from_unrouted_claim_next() {
     let dir = TempDir::new().expect("temporary directory");
     let db_path = dir.path().join("covey.db");
     let covey = Covey::open_with_clock(&db_path, Arc::new(ManualClock::new(1_700_000_000_000)))
@@ -139,19 +139,17 @@ fn explicit_routing_isolated_from_legacy_mutai_claim_next() {
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .expect("load legacy facts");
-    assert_eq!(
-        legacy_facts,
-        ("canonical_apply".to_owned(), "mutai".to_owned())
-    );
+    assert_eq!(legacy_facts, ("direct".to_owned(), "default".to_owned()));
 }
 
 #[test]
-fn routed_claim_next_is_executor_only() {
+fn routed_claims_are_role_scoped_without_executor_exclusivity() {
     let dir = TempDir::new().expect("temporary directory");
     let covey = Covey::open(dir.path().join("covey.db")).expect("open Covey");
     let reviewer = register(&covey, "reviewer", SessionRole::Reviewer);
+    let orchestrator = register(&covey, "orchestrator", SessionRole::Orchestrator);
 
-    let error = covey
+    let claimed = covey
         .claim_next_routed_subtask(
             ClaimNextRoutedReq::try_from_raw_parts(
                 reviewer,
@@ -162,6 +160,23 @@ fn routed_claim_next_is_executor_only() {
             )
             .expect("valid routed request"),
         )
-        .expect_err("reviewers cannot claim executor routing lanes");
+        .expect("routed claim succeeds for reviewers");
+    assert!(
+        claimed.is_none(),
+        "a reviewer does not seize a work-only lane when no review is pending"
+    );
+
+    let error = covey
+        .claim_next_routed_subtask(
+            ClaimNextRoutedReq::try_from_raw_parts(
+                orchestrator,
+                30_000,
+                "hermes",
+                None,
+                "orchestrator-routed-claim",
+            )
+            .expect("valid routed request"),
+        )
+        .expect_err("orchestrators cannot claim routing lanes");
     assert!(matches!(error, covey::CoveyError::WrongRole { .. }));
 }

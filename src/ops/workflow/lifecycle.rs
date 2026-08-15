@@ -30,14 +30,14 @@ use crate::{
 
 use super::artifact_review::ensure_changes_requested_followup_blocks_tx;
 
-const LEGACY_ROUTING_KEY: &str = "mutai";
+const DEFAULT_ROUTING_KEY: &str = "default";
 
 impl Covey {
-    /// Claims the next available subtask according to priority and creation order.
+    /// Claims the next available subtask on the generic default route.
     pub fn claim_next_subtask(&self, req: ClaimNextReq) -> Result<Option<ClaimResult>> {
         let started_at = Instant::now();
-        let routing_key = RoutingKey::parse(LEGACY_ROUTING_KEY)
-            .expect("the legacy mutAI routing key is a valid routing key");
+        let routing_key = RoutingKey::parse(DEFAULT_ROUTING_KEY)
+            .expect("the default routing key is a valid routing key");
         let result = self.claim_next_for_route(
             req.session_token.as_str(),
             req.lease_duration_ms,
@@ -68,7 +68,7 @@ impl Covey {
         result
     }
 
-    /// Claims the next executor subtask from one exact routing lane.
+    /// Claims the next subtask from one exact routing lane.
     pub fn claim_next_routed_subtask(
         &self,
         req: ClaimNextRoutedReq,
@@ -82,7 +82,7 @@ impl Covey {
             "claim_next_routed_subtask",
             &req.idempotency_key,
             &req,
-            &[SessionRole::Executor],
+            &[SessionRole::Executor, SessionRole::Reviewer],
         );
         self.log_operation(
             "claim_next_routed_subtask",
@@ -150,9 +150,7 @@ impl Covey {
                             });
                         }
                     };
-                    if session.role == SessionRole::Executor
-                        && routing_key.as_str() == LEGACY_ROUTING_KEY
-                    {
+                    if session.role == SessionRole::Executor {
                         ensure_changes_requested_followup_blocks_tx(tx, session_token, now)?;
                     }
 

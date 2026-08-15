@@ -255,12 +255,6 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
         )?;
         if kind.kind() == SubtaskKind::Work {
             lifecycle.ensure_allowed_for_completion_policy(raw.completion_policy)?;
-        } else if raw.completion_policy != CompletionPolicy::CanonicalApply
-            || raw.routing_key.as_str() != "mutai"
-        {
-            return Err(invalid_subtask_view(
-                "review and cleanup views require canonical_apply policy and mutai routing",
-            ));
         }
         Self::new(
             raw.subtask_id,
@@ -1005,7 +999,7 @@ impl SubtaskCandidate {
             state,
             artifact_digest,
             priority,
-            CompletionPolicy::CanonicalApply,
+            CompletionPolicy::Direct,
             default_routing_key(),
             effective_priority,
             is_repair_followup,
@@ -1081,11 +1075,11 @@ impl SubtaskCandidate {
 }
 
 fn default_routing_key() -> RoutingKey {
-    RoutingKey::parse("mutai").expect("the built-in mutai routing key is valid")
+    RoutingKey::parse("default").expect("the built-in default routing key is valid")
 }
 
 const fn default_completion_policy() -> CompletionPolicy {
-    CompletionPolicy::CanonicalApply
+    CompletionPolicy::Direct
 }
 
 /// Read-only scheduler candidate for the apply queue lane.

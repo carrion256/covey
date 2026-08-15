@@ -1184,12 +1184,6 @@ impl SubtaskRow {
         )?;
         if subtask_kind == SubtaskKind::Work {
             lifecycle.ensure_allowed_for_completion_policy(completion_policy)?;
-        } else if completion_policy != CompletionPolicy::CanonicalApply
-            || routing_key.as_str() != "mutai"
-        {
-            return Err(invalid_subtask_row(
-                "review and cleanup subtasks require canonical_apply policy and mutai routing",
-            ));
         }
         let timestamps = SubtaskTimestamps::new(created_at, updated_at)?;
         Ok(Self {
@@ -2264,11 +2258,11 @@ fn invalid_subtask_row(reason: &str) -> rusqlite::Error {
 }
 
 fn default_routing_key() -> RoutingKey {
-    RoutingKey::parse("mutai").expect("the built-in mutai routing key is valid")
+    RoutingKey::parse("default").expect("the built-in default routing key is valid")
 }
 
 const fn default_completion_policy() -> CompletionPolicy {
-    CompletionPolicy::CanonicalApply
+    CompletionPolicy::Direct
 }
 
 /// Persisted claim row.

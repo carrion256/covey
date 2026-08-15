@@ -12,30 +12,19 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             let idempotency_key = args
                 .idempotency_key
                 .unwrap_or_else(|| new_idempotency_key("create-subtask"));
-            let subtask_id = match (args.completion_policy, args.routing_key) {
-                (None, None) => store.create_subtask(CreateSubtaskRequest::try_from_raw_parts(
+            let subtask_id =
+                store.create_work_subtask(CreateWorkSubtaskReq::try_from_raw_parts(
                     args.session_token,
                     args.meta_task_id,
                     args.subtask_id,
                     args.title,
                     args.priority,
+                    args.completion_policy
+                        .map(Into::into)
+                        .unwrap_or(covey::CompletionPolicy::Direct),
+                    args.routing_key.unwrap_or_else(|| "default".to_owned()),
                     idempotency_key,
-                )?)?,
-                (completion_policy, routing_key) => {
-                    store.create_work_subtask(CreateWorkSubtaskReq::try_from_raw_parts(
-                        args.session_token,
-                        args.meta_task_id,
-                        args.subtask_id,
-                        args.title,
-                        args.priority,
-                        completion_policy
-                            .map(Into::into)
-                            .unwrap_or(covey::CompletionPolicy::CanonicalApply),
-                        routing_key.unwrap_or_else(|| "mutai".to_owned()),
-                        idempotency_key,
-                    )?)?
-                }
-            };
+                )?)?;
             Ok(Rendered::summary(
                 SubtaskRef {
                     subtask_id: subtask_id.clone(),
@@ -43,6 +32,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 format!("subtask {}", subtask_id),
             ))
         }
+
         SubtaskCommand::ClaimNext(args) => {
             let idempotency_key = args
                 .idempotency_key
@@ -382,10 +372,10 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
 mod tests {
     use super::*;
     use crate::cli::{
-        AbandonSubtaskArgs, ArtifactKindArg, ClaimNextArgs, ClaimSubtaskArgs, CreateSubtaskArgs,
-        DecideReviewArgs, ExpiringClaimsArgs, PublishArtifactArgs, ReleaseClaimArgs,
-        RenewClaimArgs, RequestReviewArgs, ReviewVerdictArg, StartSubtaskArgs, StuckSubtasksArgs,
-        SubtaskAvailabilityArgs, SubtaskKindArg, SubtaskStatusArgs,
+        AbandonSubtaskArgs, ArtifactKindArg, ClaimNextArgs, ClaimSubtaskArgs, CompletionPolicyArg,
+        CreateSubtaskArgs, DecideReviewArgs, ExpiringClaimsArgs, PublishArtifactArgs,
+        ReleaseClaimArgs, RenewClaimArgs, RequestReviewArgs, ReviewVerdictArg, StartSubtaskArgs,
+        StuckSubtasksArgs, SubtaskAvailabilityArgs, SubtaskKindArg, SubtaskStatusArgs,
     };
     use covey::SessionRole;
 
@@ -409,11 +399,9 @@ mod tests {
             )
             .expect("submit meta task");
 
-        for (subtask_id, title, priority) in [
-            ("work-a", "first work", 10),
-            ("work-b", "second work", 20),
-            ("work-review", "reviewed work", 30),
-        ] {
+        for (subtask_id, title, priority) in
+            [("work-a", "first work", 10), ("work-b", "second work", 20)]
+        {
             let rendered = dispatch_subtask(
                 &store,
                 SubtaskCommand::Create(CreateSubtaskArgs {
@@ -433,6 +421,24 @@ mod tests {
             .expect("create subtask through dispatcher");
             assert!(rendered.human.contains("subtask"));
         }
+        let rendered = dispatch_subtask(
+            &store,
+            SubtaskCommand::Create(CreateSubtaskArgs {
+                session_token: orchestrator.clone(),
+                meta_task_id: meta_task_id.clone(),
+                title: "reviewed work".to_owned(),
+                kind: SubtaskKindArg::Work,
+                priority: 30,
+                subtask_id: Some("work-review".to_owned()),
+                review_target_subtask_id: None,
+                review_target_artifact_digest: None,
+                idempotency_key: None,
+                completion_policy: Some(CompletionPolicyArg::CanonicalApply),
+                routing_key: Some("mutai".to_owned()),
+            }),
+        )
+        .expect("create canonical work through dispatcher");
+        assert!(rendered.human.contains("subtask"));
 
         let status = dispatch_subtask(
             &store,
@@ -450,7 +456,7 @@ mod tests {
             }),
         )
         .expect("availability should render");
-        assert_eq!(availability.data["executor_claimable_count"], 3);
+        assert_eq!(availability.data["executor_claimable_count"], 2);
         assert_eq!(availability.data["reviewer_claimable_count"], 0);
         let stuck = dispatch_subtask(
             &store,

@@ -484,8 +484,8 @@ mod tests {
         )
         .expect("insert meta task");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('subtask-vcs-projection-1', 'openspec:vcs-projection-change', 'vcs projection work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 2, 2)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('subtask-vcs-projection-1', 'openspec:vcs-projection-change', 'vcs projection work', 'work', NULL, NULL, 'available', NULL, NULL, 1, 'canonical_apply', 'mutai', 2, 2)",
             [],
         )
         .expect("insert work subtask");
@@ -513,8 +513,8 @@ mod tests {
         )
         .expect("attach artifact to work subtask");
         conn.execute(
-            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, created_at, updated_at)
-             VALUES ('review-vcs-projection-1', 'openspec:vcs-projection-change', 'vcs projection review', 'review', 'subtask-vcs-projection-1', 'blake3:vcsprojectionartifact', 'decided', NULL, NULL, 1, 5, 5)",
+            "INSERT INTO subtasks (subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at)
+             VALUES ('review-vcs-projection-1', 'openspec:vcs-projection-change', 'vcs projection review', 'review', 'subtask-vcs-projection-1', 'blake3:vcsprojectionartifact', 'decided', NULL, NULL, 1, 'canonical_apply', 'mutai', 5, 5)",
             [],
         )
         .expect("insert review subtask");

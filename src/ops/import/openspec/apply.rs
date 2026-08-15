@@ -7,10 +7,10 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::{
     error::{CoveyError, Result},
     model::{
-        CreateSubtaskRequest, ImportOpenSpecAction, MetaTaskState, ObjectType, SubtaskId,
-        SubtaskState, meta_task_state_name, subtask_state_name,
+        CompletionPolicy, CreateWorkSubtaskReq, ImportOpenSpecAction, MetaTaskState, ObjectType,
+        SubtaskId, SubtaskState, meta_task_state_name, subtask_state_name,
     },
-    ops::workflow::create_subtask_tx,
+    ops::workflow::create_work_subtask_tx,
 };
 
 use super::{
@@ -64,14 +64,16 @@ pub(super) fn apply_openspec_import_diff_tx(
             }
             (ObjectType::Subtask, ImportOpenSpecAction::Created) => {
                 let title = record.title().to_owned();
-                create_subtask_tx(
+                create_work_subtask_tx(
                     tx,
-                    &CreateSubtaskRequest::try_from_raw_parts(
+                    &CreateWorkSubtaskReq::try_from_raw_parts(
                         session_token.to_owned(),
                         meta_task_id.clone(),
                         Some(record.object_id().to_owned()),
                         title,
                         100,
+                        CompletionPolicy::CanonicalApply,
+                        "default",
                         format!("import-openspec:{}", record.object_id()),
                     )?,
                     now,

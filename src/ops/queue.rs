@@ -1311,8 +1311,9 @@ impl Covey {
                             subtask_id, meta_task_id, title, kind,
                             review_target_subtask_id, review_target_artifact_digest,
                             state, current_claim_id, artifact_digest, priority,
-                            created_at, updated_at
-                        ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, 1000, ?6, ?6)
+                            completion_policy, routing_key, created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, NULL, 1000,
+                            'canonical_apply', 'mutai', ?6, ?6)
                         ON CONFLICT(subtask_id) DO NOTHING
                         "#,
                         params![
@@ -2106,6 +2107,7 @@ fn load_openspec_scoped_subtasks_tx(
         SELECT s.subtask_id, s.meta_task_id, s.title, s.kind,
                s.review_target_subtask_id, s.review_target_artifact_digest,
                s.state, s.current_claim_id, s.artifact_digest, s.priority,
+               s.completion_policy, s.routing_key,
                s.created_at, s.updated_at
         FROM openspec_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id

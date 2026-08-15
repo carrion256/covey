@@ -131,5 +131,12 @@ pub(super) fn dispatch_maint(store: &Covey, command: MaintCommand) -> covey::Res
                 format!("expired_reservations={}", result.expired_count),
             ))
         }
+        MaintCommand::Backup(args) => {
+            store.backup_database(&args.output)?;
+            Ok(Rendered::summary(
+                (),
+                format!("backup_written={}", args.output.display()),
+            ))
+        }
     }
 }

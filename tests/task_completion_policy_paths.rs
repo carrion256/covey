@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use covey::{
-    ArtifactKind, ClaimNextReq, ClaimNextRoutedReq, CompletionPolicy, Covey, CreateWorkSubtaskReq,
+    ArtifactKind, ClaimNextRoutedReq, CompletionPolicy, Covey, CreateWorkSubtaskReq,
     DecideReviewReq, ManualClock, PublishArtifactReq, RegisterSessionReq, RequestReservationReq,
     RequestReviewReq, ReviewVerdict, RoutingKey, ScopeClass, SessionRole, StartSubtaskReq,
     SubmitMetaTaskReq, SubtaskState,
@@ -132,13 +132,18 @@ fn reviewed_approval_completes_without_apply_and_closes_producer_claim() {
     let review_status = covey
         .subtask_status("reviewed-work-review")
         .expect("read generated review status");
+    let hermes_route = RoutingKey::parse("hermes").expect("valid Hermes route");
     assert_eq!(
         review_status.subtask().completion_policy(),
-        CompletionPolicy::CanonicalApply
+        CompletionPolicy::Reviewed,
+        "generated review inherits the source completion policy"
     );
-    assert_eq!(review_status.subtask().routing_key().as_str(), "mutai");
-    let hermes_route = RoutingKey::parse("hermes").expect("valid Hermes route");
-    assert!(
+    assert_eq!(
+        review_status.subtask().routing_key().as_str(),
+        "hermes",
+        "generated review inherits the source routing lane"
+    );
+    assert_eq!(
         covey
             .subtask_candidates_routed(
                 SessionRole::Reviewer,
@@ -147,14 +152,16 @@ fn reviewed_approval_completes_without_apply_and_closes_producer_claim() {
                 Some(&meta_task_id),
             )
             .expect("read Hermes reviewer candidates")
-            .is_empty()
+            .len(),
+        1,
+        "inherited review is claimable on the source route"
     );
-    assert_eq!(
+    assert!(
         covey
             .subtask_candidates(SessionRole::Reviewer, 10, Some(&meta_task_id))
-            .expect("read shared reviewer candidates")
-            .len(),
-        1
+            .expect("read default-route reviewer candidates")
+            .is_empty(),
+        "inherited review is not on the default route"
     );
 
     clock.advance(11);
@@ -167,10 +174,11 @@ fn reviewed_approval_completes_without_apply_and_closes_producer_claim() {
     );
 
     let review_claim = covey
-        .claim_next_subtask(
-            ClaimNextReq::try_from_raw_parts_scoped(
+        .claim_next_routed_subtask(
+            ClaimNextRoutedReq::try_from_raw_parts(
                 reviewer.clone(),
                 30_000,
+                "hermes",
                 Some(meta_task_id.clone()),
                 "claim-reviewed-review",
             )

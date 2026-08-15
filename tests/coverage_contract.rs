@@ -7,11 +7,12 @@ mod support;
 
 use covey::{
     ArtifactKind, ClaimNextReq, ClaimReadyQueueReq, ClaimSubtaskReq, ConflictResolutionState,
-    Covey, CoveyError, CreateSubtaskRequest, DecideReviewReq, EnqueueForApplyReq, EventPayload,
-    FenceSeq, IdempotencyKey, LeaseDurationMs, ManualClock, MarkAppliedReq, MarkInFlightReq,
-    OpenSpecArchiveStatusState, OverlapQueryReq, PublishArtifactReq, RecordApplyVerificationReq,
-    RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq, RecordRuntimeAttestationReq,
-    RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    Covey, CoveyError, CreateSubtaskRequest, CreateWorkSubtaskReq, DecideReviewReq,
+    EnqueueForApplyReq, EventPayload, FenceSeq, IdempotencyKey, LeaseDurationMs, ManualClock,
+    MarkAppliedReq, MarkInFlightReq, OpenSpecArchiveStatusState, OverlapQueryReq,
+    PublishArtifactReq, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordOpenSpecArchiveStatusReq, RecordRuntimeAttestationReq, RegisterSessionReq,
+    ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RequestReservationReq, RequestReviewReq, ResolveConflictReq, ReviewState, ReviewVerdict,
     ScopeClass, SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
     SubtaskTitle, SupersedeQueueItemReq, VerifyLandingAuthorizationReq,
@@ -198,14 +199,19 @@ fn seed_work(covey: &Covey, subtask_id: &str) -> (String, String) {
         )
         .expect("submit meta task");
     let actual_subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orch.clone()).expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(covey::SubtaskId::parse(subtask_id).expect("valid subtask id")),
-            title: SubtaskTitle::parse(format!("work {subtask_id}")).expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
+                orch.clone(),
+                meta_task_id.clone(),
+                Some(subtask_id.to_owned()),
+                format!("work {subtask_id}"),
+                1,
+                covey::CompletionPolicy::CanonicalApply,
+                "default",
+                id_key("create-subtask"),
+            )
+            .expect("valid create-work-subtask request"),
+        )
         .expect("create subtask");
     (orch, actual_subtask_id)
 }

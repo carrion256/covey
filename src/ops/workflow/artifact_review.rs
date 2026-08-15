@@ -323,8 +323,8 @@ impl Covey {
                             req.artifact_digest.as_str(),
                             subtask_state_name(SubtaskState::Available),
                             req.priority.get(),
-                            crate::model::completion_policy_name(CompletionPolicy::CanonicalApply),
-                            "mutai",
+                            crate::model::completion_policy_name(subtask.completion_policy()),
+                            subtask.routing_key().as_str(),
                             now
                         ],
                     )?;

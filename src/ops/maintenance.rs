@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::params;
@@ -189,5 +190,16 @@ impl Covey {
             |_| Vec::<String>::new(),
         );
         result
+    }
+    /// Backs up the database to a fresh SQLite file via VACUUM INTO.
+    ///
+    /// The backup is a consistent snapshot produced without writing to the
+    /// source database; the destination must not exist yet.
+    pub fn backup_database(&self, output_path: &Path) -> Result<()> {
+        let escaped = output_path.display().to_string().replace('\'', "''");
+        self.with_read_conn(|conn| {
+            conn.execute_batch(&format!("VACUUM INTO '{escaped}'"))?;
+            Ok(())
+        })
     }
 }

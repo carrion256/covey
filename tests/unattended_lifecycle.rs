@@ -6,13 +6,14 @@ use std::sync::{
 mod support;
 
 use covey::{
-    ArtifactKind, BeginOpenSpecArchiveCleanupReq, ClaimNextReq, Covey, CreateSubtaskRequest,
-    DecideReviewReq, EnqueueForApplyReq, FinishOpenSpecArchiveCleanupReq, HeartbeatReq,
-    IdempotencyKey, ManualClock, MarkAppliedReq, MarkInFlightReq, OpenSpecCurrentWorkBlockerKind,
-    OpenSpecCurrentWorkState, PublishArtifactReq, ReconcileApplyQueueReq,
-    RecordApplyVerificationReq, RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq,
-    RequestReservationReq, RequestReviewReq, ReviewVerdict, ScopeClass, SessionRole, SessionState,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState, SubtaskTitle,
+    ArtifactKind, BeginOpenSpecArchiveCleanupReq, ClaimNextReq, CompletionPolicy, Covey,
+    CreateWorkSubtaskReq, DecideReviewReq, EnqueueForApplyReq, FinishOpenSpecArchiveCleanupReq,
+    HeartbeatReq, IdempotencyKey, ManualClock, MarkAppliedReq, MarkInFlightReq,
+    OpenSpecCurrentWorkBlockerKind, OpenSpecCurrentWorkState, PublishArtifactReq,
+    ReconcileApplyQueueReq, RecordApplyVerificationReq, RecordRuntimeAttestationReq,
+    RegisterSessionReq, ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReviewVerdict,
+    ScopeClass, SessionRole, SessionState, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq,
+    SubtaskState,
 };
 use rusqlite::params;
 use tempfile::TempDir;
@@ -102,13 +103,15 @@ fn approve_work_artifact(
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator.clone(),
                 meta_task_id,
                 Some(format!("{subtask_suffix}_work")),
                 format!("{subtask_suffix} work"),
                 1,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-subtask"),
             )
             .expect("valid create-subtask request"),
@@ -260,13 +263,15 @@ fn expired_review_claim_can_be_reclaimed_started_and_decided() {
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator,
                 meta_task_id,
                 Some("review_expiry_work".into()),
                 "review expiry work",
                 1,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-subtask"),
             )
             .expect("valid create-subtask request"),
@@ -561,13 +566,15 @@ fn reconcile_apply_queue_materializes_historical_approved_work() {
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator.clone(),
                 meta_task_id.clone(),
                 Some("historical_approved_work".into()),
                 "historical approved work",
                 1,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-subtask"),
             )
             .expect("valid create-subtask request"),
@@ -602,8 +609,8 @@ fn reconcile_apply_queue_materializes_historical_approved_work() {
         "INSERT INTO subtasks (
             subtask_id, meta_task_id, title, kind, review_target_subtask_id,
             review_target_artifact_digest, state, current_claim_id, artifact_digest,
-            priority, created_at, updated_at
-        ) VALUES ('review_historical_approved_subtask', ?1, 'historical approved review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, ?4, ?4)",
+            priority, completion_policy, routing_key, created_at, updated_at
+        ) VALUES ('review_historical_approved_subtask', ?1, 'historical approved review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, 'canonical_apply', 'default', ?4, ?4)",
         params![
             meta_task_id,
             &subtask_id,
@@ -679,13 +686,15 @@ fn reconcile_apply_queue_skips_historical_approved_findings_bundle() {
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator.clone(),
                 meta_task_id.clone(),
                 Some("historical_findings_work".into()),
                 "historical findings work",
                 1,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-subtask"),
             )
             .expect("valid create-subtask request"),
@@ -720,8 +729,8 @@ fn reconcile_apply_queue_skips_historical_approved_findings_bundle() {
         "INSERT INTO subtasks (
             subtask_id, meta_task_id, title, kind, review_target_subtask_id,
             review_target_artifact_digest, state, current_claim_id, artifact_digest,
-            priority, created_at, updated_at
-        ) VALUES ('review_historical_findings_subtask', ?1, 'historical findings review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, ?4, ?4)",
+            priority, completion_policy, routing_key, created_at, updated_at
+        ) VALUES ('review_historical_findings_subtask', ?1, 'historical findings review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, 'canonical_apply', 'default', ?4, ?4)",
         params![
             meta_task_id,
             &subtask_id,
@@ -816,13 +825,15 @@ fn reconcile_apply_queue_skips_historical_approved_verification_bundle() {
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator.clone(),
                 meta_task_id.clone(),
                 Some("historical_verification_work".into()),
                 "historical verification work",
                 1,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-subtask"),
             )
             .expect("valid create-subtask request"),
@@ -857,8 +868,8 @@ fn reconcile_apply_queue_skips_historical_approved_verification_bundle() {
         "INSERT INTO subtasks (
             subtask_id, meta_task_id, title, kind, review_target_subtask_id,
             review_target_artifact_digest, state, current_claim_id, artifact_digest,
-            priority, created_at, updated_at
-        ) VALUES ('review_historical_verification_subtask', ?1, 'historical verification review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, ?4, ?4)",
+            priority, completion_policy, routing_key, created_at, updated_at
+        ) VALUES ('review_historical_verification_subtask', ?1, 'historical verification review', 'review', ?2, ?3, 'decided', NULL, NULL, 1, 'canonical_apply', 'default', ?4, ?4)",
         params![
             meta_task_id,
             &subtask_id,
@@ -936,26 +947,30 @@ fn claim_next_skips_work_with_unsatisfied_dependencies() {
         )
         .expect("submit meta task");
     let prerequisite = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator.clone(),
                 meta_task_id.clone(),
                 Some("dependency_prerequisite".into()),
                 "dependency prerequisite",
                 100,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-prerequisite"),
             )
             .expect("valid create-subtask request"),
         )
         .expect("create prerequisite");
     let dependent = covey
-        .create_subtask(
-            CreateSubtaskRequest::try_from_raw_parts(
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
                 orchestrator,
                 meta_task_id,
                 Some("dependency_dependent".into()),
                 "dependency dependent",
                 1,
+                CompletionPolicy::CanonicalApply,
+                "default",
                 id_key("create-dependent"),
             )
             .expect("valid create-subtask request"),
@@ -1019,17 +1034,19 @@ fn disappeared_codex_session_is_reaped_and_work_is_reclaimed() {
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orchestrator.clone())
-                .expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(
-                covey::SubtaskId::parse("codex_disappears_work").expect("valid subtask id"),
-            ),
-            title: SubtaskTitle::parse("codex disappears work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
+                orchestrator.clone(),
+                meta_task_id,
+                Some("codex_disappears_work".to_owned()),
+                "codex disappears work",
+                1,
+                CompletionPolicy::CanonicalApply,
+                "default",
+                id_key("create-subtask"),
+            )
+            .expect("valid create-subtask request"),
+        )
         .expect("create subtask");
 
     let stale_claim = covey
@@ -1127,15 +1144,19 @@ fn unattended_claim_recovery_apply_gate_and_duplicate_completion_are_bounded() {
         )
         .expect("submit meta task");
     let subtask_id = covey
-        .create_subtask(CreateSubtaskRequest {
-            session_token: covey::SessionToken::parse(orchestrator.clone())
-                .expect("valid session token"),
-            meta_task_id: covey::MetaTaskId::parse(meta_task_id).expect("valid meta-task id"),
-            subtask_id: Some(covey::SubtaskId::parse("unattended_work").expect("valid subtask id")),
-            title: SubtaskTitle::parse("unattended work").expect("valid subtask title"),
-            priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
-            idempotency_key: id_key("create-subtask"),
-        })
+        .create_work_subtask(
+            CreateWorkSubtaskReq::try_from_raw_parts(
+                orchestrator.clone(),
+                meta_task_id,
+                Some("unattended_work".to_owned()),
+                "unattended work",
+                1,
+                CompletionPolicy::CanonicalApply,
+                "default",
+                id_key("create-subtask"),
+            )
+            .expect("valid create-subtask request"),
+        )
         .expect("create subtask");
 
     let dead_claim = covey

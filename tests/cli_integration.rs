@@ -489,6 +489,10 @@ fn queue_mark_in_flight_supersede_and_empty_claim_next_emit_json() {
             "1",
             "--subtask-id",
             "queue_seed_work",
+            "--completion-policy",
+            "canonical_apply",
+            "--routing-key",
+            "mutai",
         ],
     ))["subtask_id"]
         .as_str()
@@ -650,6 +654,10 @@ fn workflow_commands_emit_json() {
             "1",
             "--subtask-id",
             "work_1",
+            "--completion-policy",
+            "canonical_apply",
+            "--routing-key",
+            "mutai",
         ],
     ))["subtask_id"]
         .as_str()
@@ -665,6 +673,8 @@ fn workflow_commands_emit_json() {
             &exec,
             "--lease-duration-ms",
             "30000",
+            "--routing-key",
+            "mutai",
         ],
     ));
     let claim_id = claim["claim_id"].as_str().expect("claim id").to_owned();
@@ -750,6 +760,8 @@ fn workflow_commands_emit_json() {
             &reviewer,
             "--lease-duration-ms",
             "30000",
+            "--routing-key",
+            "mutai",
         ],
     ));
     let review_claim_id = review_claim["claim_id"]
@@ -1137,6 +1149,10 @@ fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
                 priority,
                 "--subtask-id",
                 subtask_id,
+                "--completion-policy",
+                "canonical_apply",
+                "--routing-key",
+                "mutai",
             ],
         ));
     }
@@ -1327,6 +1343,8 @@ fn blocked_review_decision_records_evidence_without_reclaiming_same_work() {
             &exec,
             "--lease-duration-ms",
             "30000",
+            "--routing-key",
+            "mutai",
         ],
     ));
     assert_eq!(next_claim["subtask_id"], followup_id);
@@ -3160,6 +3178,172 @@ fn maintenance_commands_emit_json() {
 
     let expired_reservations = success_data(&run_db(&db, &["maint", "expire-reservations"]));
     assert_eq!(expired_reservations["expired_count"], 0);
+}
+
+#[test]
+fn maintenance_backup_writes_consistent_snapshot() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let backup = tmp.path().join("covey.backup.db");
+
+    success_data(&run_db(
+        &db,
+        &[
+            "maint",
+            "backup",
+            "--output",
+            backup.to_str().expect("backup path"),
+        ],
+    ));
+    assert!(backup.is_file(), "backup file written");
+
+    let source_count = event_count(&db);
+    let backup_count = event_count(&backup);
+    assert_eq!(
+        backup_count, source_count,
+        "backup is a consistent snapshot with the same event rows"
+    );
+}
+
+#[test]
+fn direct_policy_work_rejects_artifact_publish_at_cli() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+
+    let orch = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "negative-orch",
+            "--agent-instance-id",
+            "negative-orch-1",
+            "--role",
+            "orchestrator",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("orch token")
+        .to_owned();
+    let exec = success_data(&run_db(
+        &db,
+        &[
+            "session",
+            "register",
+            "--agent-principal-id",
+            "negative-exec",
+            "--agent-instance-id",
+            "negative-exec-1",
+            "--role",
+            "executor",
+        ],
+    ))["session_token"]
+        .as_str()
+        .expect("exec token")
+        .to_owned();
+
+    let meta_task_id = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "direct work cannot carry artifacts",
+        ],
+    ))["meta_task_id"]
+        .as_str()
+        .expect("meta id")
+        .to_owned();
+
+    success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "create",
+            "--session-token",
+            &orch,
+            "--meta-task-id",
+            &meta_task_id,
+            "--title",
+            "direct work",
+            "--kind",
+            "work",
+            "--priority",
+            "1",
+            "--completion-policy",
+            "direct",
+        ],
+    ));
+
+    let claim = success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "claim-next",
+            "--session-token",
+            &exec,
+            "--lease-duration-ms",
+            "30000",
+        ],
+    ));
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_owned();
+    let fence_seq = claim["fence_seq"].as_i64().expect("fence").to_string();
+
+    success_data(&run_db(
+        &db,
+        &[
+            "subtask",
+            "start",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+        ],
+    ));
+
+    let publish = run_db(
+        &db,
+        &[
+            "artifact",
+            "publish",
+            "--session-token",
+            &exec,
+            "--claim-id",
+            &claim_id,
+            "--fence-seq",
+            &fence_seq,
+            "--artifact-digest",
+            "blake3:negative",
+            "--artifact-kind",
+            "patch-bundle",
+            "--base-rev",
+            "base",
+            "--manifest-path",
+            "negative.json",
+            "--changed-paths-digest",
+            "blake3:negative_paths",
+        ],
+    );
+
+    assert_eq!(
+        publish.status.code(),
+        Some(4),
+        "direct-policy artifact publish must hard-fail"
+    );
+    let payload = parse_stderr_json(&publish);
+    assert_eq!(payload["code"], "conflict");
+    assert!(
+        payload["message"]
+            .as_str()
+            .expect("error message")
+            .contains("publish_artifact"),
+        "error must name the failing policy-guarded operation"
+    );
 }
 
 #[test]
