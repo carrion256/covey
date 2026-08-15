@@ -72,7 +72,7 @@ Covey exists to make invalid states hard or impossible.
 - At most one held claim per subtask
 - Fence tokens increase monotonically per subtask claim lifecycle
 - Completion policy and routing key are immutable task facts
-- Candidate reads and `claim-next` match one exact routing key; the legacy API
+- Candidate reads and `claim-next` match one exact routing key; the retained API
   is the `mutai` route
 - Direct attempt outcomes require the current held claim, live lease, and exact
   fence, and close that claim in the same transaction
@@ -104,7 +104,7 @@ Every work subtask has one immutable completion policy:
   approval creates the apply-queue item, and authorized landing ends in
   `applied`.
 
-Existing canonical findings and verification artifacts retain the legacy
+Existing canonical findings and verification artifacts retain the prior
 review-to-`applied` compatibility path without an apply-queue item. That path
 does not grant direct completion and does not represent Authority settlement.
 
@@ -305,7 +305,7 @@ covey queue candidates --limit 50
 ```
 
 These commands expose exact claimable IDs and ordering facts. Without
-`--routing-key` they expose only the legacy `mutai` route; an explicit key reads
+`--routing-key` they expose only the `mutai` route; an explicit key reads
 only that exact route. They do not create claims, advance fences, lease queue
 items, append events, or perform lifecycle transitions.
 
