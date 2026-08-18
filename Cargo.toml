@@ -3,7 +3,7 @@ name = "covey"
 version = "0.1.0"
 edition = "2024"
 autobins = false
-description = "Embedded-first, evidence-bearing local task tracker with typed completion policies"
+description = "Embedded-first, evidence-bearing coordination substrate for agent cohorts: fenced claims, typed completion policies, digest-bound reviews, apply queue, event log"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/carrion256/covey"
 

@@ -12,6 +12,11 @@ changes. It can serve as a local agent work queue, but it does not plan work,
 supervise or spawn agents, apply patches, invoke models, or act as a
 general-purpose workflow engine.
 
+Covey is the transactional coordination substrate that higher-level agent-cohort
+stacks embed: schedulers, apply gates, and settlement/landing authorities all
+talk to Covey for the state that must never be ambiguous. It is intentionally
+not an orchestrator — it is the floor underneath one.
+
 Version: `0.1` draft.
 
 ## Scope
@@ -212,29 +217,66 @@ This crate should stay centered on the core coordination library. Wrapper-specif
 
 The current internal module map and dependency boundaries are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Codex Integration
+## Integration Model
 
-Codex lifecycle hooks for Covey live under `../integrations/codex-hooks/`.
-Install them into a target repository with that template's installer script.
+Covey is embedded by consumer repositories. Lifecycle/scheduler adapters live
+in the consuming stack, not in this crate. For example, the mutAI deployment
+context wraps Codex lifecycle and tool events into existing Covey CLI commands
+plus Authority evidence contracts; those hooks live outside this repository.
+Covey remains the owner of `claim-next`, queue `claim-next`, claims, leases,
+fences, sessions, reservations, artifacts, reviews, review/apply queue state,
+events, conflicts, and lifecycle transitions. Adapters may enforce before local
+Codex side effects, but they must not become scheduler, settlement, landing, or
+repoops authority.
 
-Covey and its CLI remain transport-thin by design. The
-`integrations/codex-hooks/` template is a separate local execution wrapper that
-adapts Codex lifecycle and tool events into existing Covey CLI commands plus
-Authority evidence contracts. Hooks may enforce before local Codex side
-effects, but they must not become scheduler, settlement, landing, or repoops
-authority. Covey remains the owner of `claim-next`, queue `claim-next`, claims,
-leases, fences, sessions, reservations, artifacts, reviews, review/apply queue
-state, events, conflicts, and lifecycle transitions.
+## Surface
+
+Covey's public surface goes beyond base task tracking. All of the following are
+part of the shipped crate today (`src/lib.rs` re-exports the types;
+`src/ops/mod.rs` is the operation inventory; `docs/ARCHITECTURE.md` has the
+module map):
+
+- **Sessions, meta-tasks, subtasks** with typed completion policies and exact
+  routing keys: `direct`, `reviewed`, and `canonical_apply` work, each with
+  fenced claims, leases, and attempt receipts
+- **Artifacts and digest-bound reviews**: immutable outputs, exact-digest
+  verdicts, review subtasks, and follow-up repair
+- **Apply queue**: ready-queue items, fenced queue claims, apply-worktree
+  state, apply-gate blockers, landing receipts and permissive landing
+- **Repoops authority snapshots** (`src/ops/repoops.rs`), runtime attestations,
+  and settlement reconcile blockers
+- **VCS workspace observation and OpenSpec packet stack projections**
+  (`src/ops/vcs_workspace.rs`, `src/ops/vcs_projection.rs`)
+- **Current-work projections** for OpenSpec changes (`src/ops/current_work.rs`),
+  operator blockers, and OpenSpec archive status/cleanup
+- **Reservations, conflicts, and an append-only event log**
+- **Import surface**: OpenSpec changes and Better Droid compiled mission packets
+  (`src/ops/import/`)
+- **Prose intake** for lightweight task ingestion (`src/ops/prose_intake.rs`)
+- **Apply-proof verification and sealing** (`src/proof_apply.rs`; CLI
+  `proof apply verify/verify-batch/print-contract`)
+
+Keep each area to what it does, not every type. This list is representative,
+not exhaustive; the authoritative full public surface is the `lib.rs` re-export
+list and `docs/ARCHITECTURE.md`. The library API is the primary interface; the
+CLI is transport-thin.
 
 ## Verification
 
-The minimum verification path for this repo is:
+The minimum verification path is the repo's standing gates, listed under
+[Building](#building): `cargo fmt`, clippy with `-D warnings`, and
+`cargo test`. The design is only credible if the suite proves the invariants
+above: legal and illegal state transitions, uniqueness constraints, fence
+checks, reservation overlap behavior, atomicity, and concurrency smoke.
 
-```bash
-cargo test
-```
-
-The design is only credible if the test suite proves the invariants above: legal and illegal state transitions, uniqueness constraints, fence checks, reservation overlap behavior, atomicity, and concurrency smoke.
+Covey also ships formal-methods artifacts. The `model/` directory contains
+Quint specifications that encode the state machine invariants; `tests/`
+replays traces generated from those specs (`tests/quint_trace_replay.rs`,
+fixtures under `tests/fixtures/quint/`), plus spec integration/property suites
+(`tests/spec_integration.rs`, `tests/spec_prop.rs`). `scripts/run_covey_actor_split_proof.py`
+exercises an apply proof end-to-end with worker/reviewer/apply/closer in
+separate processes. These are specification and model-check replay harnesses,
+not a claim that every production path is formally verified.
 
 ## Local CLI
 
