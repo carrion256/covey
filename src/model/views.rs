@@ -9,13 +9,13 @@ use strum::Display;
 use super::{
     AgentPrincipalId, ApplyGateBlocker, ApplyGateBlockerKind, Artifact, ArtifactDigest,
     ArtifactKind, ArtifactManifestPath, AttemptOutcome, BaseRev, ChangedPathsDigest, Claim,
-    ClaimId, CompletionPolicy, FailedReviewVerdict, FenceSeq, FindingsDigest, MetaTask, MetaTaskId,
-    OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker, ProseTasksetId, QueueId,
-    ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState,
-    ReviewTarget, ReviewVerdict, RoutingKey, Session, SessionToken, SettlementReconcileBlocker,
-    SettlementReconcileReason, SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
-    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VcsWorkspace,
-    VcsWorkspaceCleanliness, VcsWorkspaceState, VerifierId,
+    ClaimId, CompletionPolicy, EvidencePolicy, FailedReviewVerdict, FenceSeq, FindingsDigest,
+    MetaTask, MetaTaskId, OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker, ProseTasksetId,
+    QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, RepoopsPath, Review, ReviewId,
+    ReviewState, ReviewTarget, ReviewVerdict, RoutingKey, Session, SessionToken,
+    SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget, Subtask, SubtaskId,
+    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle,
+    TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness, VcsWorkspaceState, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -31,6 +31,7 @@ pub struct SubtaskView {
     pub priority: SubtaskPriority,
     completion_policy: CompletionPolicy,
     routing_key: RoutingKey,
+    evidence_policy: EvidencePolicy,
     timestamps: SubtaskViewTimestamps,
 }
 
@@ -62,6 +63,8 @@ struct RawSubtaskView {
     completion_policy: CompletionPolicy,
     #[serde(default = "default_routing_key")]
     routing_key: RoutingKey,
+    #[serde(default = "default_evidence_policy")]
+    evidence_policy: EvidencePolicy,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -77,6 +80,7 @@ impl SubtaskView {
         priority: SubtaskPriority,
         completion_policy: CompletionPolicy,
         routing_key: RoutingKey,
+        evidence_policy: EvidencePolicy,
         created_at: TimestampMs,
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
@@ -90,6 +94,7 @@ impl SubtaskView {
             priority,
             completion_policy,
             routing_key,
+            evidence_policy,
             timestamps,
         })
     }
@@ -132,6 +137,15 @@ impl SubtaskView {
     #[must_use]
     pub const fn routing_key(&self) -> &RoutingKey {
         &self.routing_key
+    }
+
+    /// Returns the evidence policy persisted for this subtask.
+    ///
+    /// The policy only governs direct attempt receipts; reviewed and
+    /// canonical-apply completion safeguards are compulsory regardless.
+    #[must_use]
+    pub const fn evidence_policy(&self) -> EvidencePolicy {
+        self.evidence_policy
     }
 
     /// Returns when this subtask view was created.
@@ -207,6 +221,7 @@ impl TryFrom<SubtaskRow> for SubtaskView {
         let updated_at = row.updated_at();
         let completion_policy = row.completion_policy();
         let routing_key = row.routing_key().clone();
+        let evidence_policy = row.evidence_policy();
 
         Self::new(
             row.subtask_id,
@@ -217,6 +232,7 @@ impl TryFrom<SubtaskRow> for SubtaskView {
             row.priority,
             completion_policy,
             routing_key,
+            evidence_policy,
             created_at,
             updated_at,
         )
@@ -237,6 +253,7 @@ impl From<&SubtaskView> for RawSubtaskView {
             priority: view.priority,
             completion_policy: view.completion_policy(),
             routing_key: view.routing_key().clone(),
+            evidence_policy: view.evidence_policy(),
             created_at: view.created_at(),
             updated_at: view.updated_at(),
         }
@@ -267,6 +284,7 @@ impl TryFrom<RawSubtaskView> for SubtaskView {
             raw.priority,
             raw.completion_policy,
             raw.routing_key,
+            raw.evidence_policy,
             raw.created_at,
             raw.updated_at,
         )
@@ -1079,6 +1097,10 @@ fn default_routing_key() -> RoutingKey {
 
 const fn default_completion_policy() -> CompletionPolicy {
     CompletionPolicy::Direct
+}
+
+const fn default_evidence_policy() -> EvidencePolicy {
+    EvidencePolicy::Required
 }
 
 /// Read-only scheduler candidate for the apply queue lane.

@@ -25,15 +25,16 @@ impl Covey {
     /// Imports a confirmed lightweight prose preview as a Covey meta-task with available work.
     pub fn import_prose(&self, req: ImportProseReq) -> Result<ImportProseResult> {
         let started_at = Instant::now();
+        let resolved = (&req, &self.workflow.routing_key);
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
                 "import_prose",
                 &req.idempotency_key,
-                &req,
+                &resolved,
                 crate::model::TimestampMs::parse(now)?,
-                || import_prose_tx(tx, &req, now),
+                || import_prose_tx(tx, &req, &self.workflow.routing_key, now),
             )
         });
         self.log_operation(
@@ -157,6 +158,7 @@ impl Covey {
 fn import_prose_tx(
     tx: &Transaction<'_>,
     req: &ImportProseReq,
+    routing_key: &RoutingKey,
     now: i64,
 ) -> Result<ImportProseResult> {
     if req.tasks.is_empty() {
@@ -203,7 +205,8 @@ fn import_prose_tx(
             title: task.title.clone(),
             priority: crate::model::SubtaskPriority::parse(100)?,
             completion_policy: CompletionPolicy::CanonicalApply,
-            routing_key: RoutingKey::parse("default")?,
+            routing_key: routing_key.clone(),
+            evidence_policy: crate::model::EvidencePolicy::Required,
             idempotency_key: crate::model::IdempotencyKey::parse(format!(
                 "{}:create-subtask:{index}",
                 req.idempotency_key.as_str()

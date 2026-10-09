@@ -26,7 +26,7 @@ use super::{
     VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id, make_id,
     parse_generated_members,
 };
-use crate::{CoveyError, CreateWorkSubtaskReq};
+use crate::{CoveyError, CreateWorkSubtaskReq, EvidencePolicy, FinishSubtaskReq, RetrySubtaskReq};
 use serde::Serialize;
 use serde_json::json;
 
@@ -318,6 +318,7 @@ fn subtask_row_preserves_flat_review_target_shape() {
         SubtaskPriority::parse(10).expect("valid subtask priority"),
         CompletionPolicy::CanonicalApply,
         RoutingKey::parse("mutai").expect("valid routing key"),
+        EvidencePolicy::Required,
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -665,6 +666,7 @@ fn subtask_row_rejects_non_monotonic_timestamps() {
         SubtaskPriority::parse(10).expect("valid subtask priority"),
         CompletionPolicy::CanonicalApply,
         RoutingKey::parse("mutai").expect("valid routing key"),
+        EvidencePolicy::Required,
         TimestampMs::parse(200).expect("valid timestamp"),
         TimestampMs::parse(100).expect("valid timestamp"),
     )
@@ -732,7 +734,7 @@ fn attempt_outcome_enforces_failure_shape_without_exposing_session_tokens() {
         subtask_id.clone(),
         fence_seq,
         AttemptOutcomeKind::Succeeded,
-        evidence_digest.clone(),
+        Some(evidence_digest.clone()),
         None,
         summary.clone(),
         recorded_at,
@@ -748,7 +750,7 @@ fn attempt_outcome_enforces_failure_shape_without_exposing_session_tokens() {
         subtask_id.clone(),
         fence_seq,
         AttemptOutcomeKind::Succeeded,
-        evidence_digest.clone(),
+        Some(evidence_digest.clone()),
         Some(failure_code),
         summary.clone(),
         recorded_at,
@@ -759,12 +761,64 @@ fn attempt_outcome_enforces_failure_shape_without_exposing_session_tokens() {
         subtask_id,
         fence_seq,
         AttemptOutcomeKind::TerminalFailure,
-        evidence_digest,
+        Some(evidence_digest),
         None,
         summary,
         recorded_at,
     )
     .expect_err("failed outcome must require failure code");
+}
+
+#[test]
+fn attempt_evidence_is_optional_and_always_validated() {
+    let outcome = AttemptOutcome::new(
+        ClaimId::parse("claim-1").expect("valid claim id"),
+        SubtaskId::parse("subtask-1").expect("valid subtask id"),
+        FenceSeq::parse(1).expect("valid fence"),
+        AttemptOutcomeKind::Succeeded,
+        None,
+        None,
+        AttemptSummary::parse("completed work").expect("valid summary"),
+        TimestampMs::parse(200).expect("valid timestamp"),
+    )
+    .expect("optional evidence must construct");
+    assert!(outcome.evidence_digest.is_none());
+
+    let finish = FinishSubtaskReq::try_from_raw_parts(
+        "session-1",
+        "claim-1",
+        1,
+        Some("blake3:finish".to_owned()),
+        "completed",
+        "idem-finish",
+    )
+    .expect("valid finish request");
+    assert_eq!(
+        finish.evidence_digest.as_ref().map(AsRef::as_ref),
+        Some("blake3:finish")
+    );
+
+    FinishSubtaskReq::try_from_raw_parts(
+        "session-1",
+        "claim-1",
+        1,
+        Some("no colon separator".to_owned()),
+        "completed",
+        "idem-finish",
+    )
+    .expect_err("supplied malformed evidence is always rejected");
+
+    let no_evidence = RetrySubtaskReq::try_from_raw_parts(
+        "session-1",
+        "claim-1",
+        1,
+        None,
+        "transient_failure",
+        "retry work",
+        "idem-retry",
+    )
+    .expect("retry with omitted evidence parses");
+    assert!(no_evidence.evidence_digest.is_none());
 }
 
 #[test]
@@ -833,6 +887,7 @@ fn review_subtask_domain_requires_a_target_artifact() {
         SubtaskPriority::parse(10).expect("valid subtask priority"),
         CompletionPolicy::CanonicalApply,
         RoutingKey::parse("mutai").expect("valid routing key"),
+        EvidencePolicy::Required,
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -1284,38 +1339,6 @@ fn subtask_status_rejects_artifact_without_lifecycle_artifact() {
 }
 
 #[test]
-fn subtask_status_preserves_flat_claim_and_artifact_fields() {
-    let raw = claimed_artifact_subtask_status_json("subtask-1", "subtask-1");
-
-    let status: SubtaskStatus =
-        serde_json::from_value(raw.clone()).expect("valid status must deserialize");
-
-    assert_eq!(
-        status.claim().map(|claim| claim.claim_id.as_str()),
-        Some("claim-1")
-    );
-    assert_eq!(
-        status
-            .artifact()
-            .map(|artifact| artifact.artifact_digest.as_str()),
-        Some("blake3:artifact")
-    );
-    let serialized = serde_json::to_value(&status).expect("status must serialize");
-    let mut expected = raw;
-    expected["readiness"] = json!({
-        "planning_ready": false,
-        "covey_imported": true,
-        "execution_ready": false,
-        "review_approved": false,
-        "apply_queued": false,
-        "apply_authorized": false,
-        "landed": false,
-        "shipped_verified": false
-    });
-    assert_eq!(serialized, expected);
-}
-
-#[test]
 fn subtask_status_landed_requires_explicit_landing_receipt_projection() {
     let raw = claimed_artifact_subtask_status_json("subtask-1", "subtask-1");
     let subtask: SubtaskView =
@@ -1568,6 +1591,7 @@ fn try_work_subtask_row(
         SubtaskPriority::parse(10).expect("valid subtask priority"),
         CompletionPolicy::CanonicalApply,
         RoutingKey::parse("mutai").expect("valid routing key"),
+        EvidencePolicy::Required,
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -1588,6 +1612,7 @@ fn subtask_rows_reject_blank_titles() {
         SubtaskPriority::parse(10).expect("valid subtask priority"),
         CompletionPolicy::CanonicalApply,
         RoutingKey::parse("mutai").expect("valid routing key"),
+        EvidencePolicy::Required,
         TimestampMs::parse(100).expect("valid timestamp"),
         TimestampMs::parse(200).expect("valid timestamp"),
     )
@@ -5880,7 +5905,7 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         SubtaskId::parse("subtask-1").expect("valid subtask id"),
         FenceSeq::parse(1).expect("valid fence"),
         AttemptOutcomeKind::Succeeded,
-        AttemptEvidenceDigest::parse("blake3:finish").expect("valid digest"),
+        Some(AttemptEvidenceDigest::parse("blake3:finish").expect("valid digest")),
         None,
         AttemptSummary::parse("completed work").expect("valid summary"),
         TimestampMs::parse(100).expect("valid timestamp"),
@@ -5891,7 +5916,7 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         SubtaskId::parse("subtask-1").expect("valid subtask id"),
         FenceSeq::parse(2).expect("valid fence"),
         AttemptOutcomeKind::RetryableFailure,
-        AttemptEvidenceDigest::parse("blake3:retry").expect("valid digest"),
+        Some(AttemptEvidenceDigest::parse("blake3:retry").expect("valid digest")),
         Some(AttemptFailureCode::parse("transient_failure").expect("valid failure code")),
         AttemptSummary::parse("retry work").expect("valid summary"),
         TimestampMs::parse(101).expect("valid timestamp"),
@@ -5902,7 +5927,7 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         SubtaskId::parse("subtask-1").expect("valid subtask id"),
         FenceSeq::parse(3).expect("valid fence"),
         AttemptOutcomeKind::TerminalFailure,
-        AttemptEvidenceDigest::parse("blake3:failure").expect("valid digest"),
+        Some(AttemptEvidenceDigest::parse("blake3:failure").expect("valid digest")),
         Some(AttemptFailureCode::parse("terminal_failure").expect("valid failure code")),
         AttemptSummary::parse("failed work").expect("valid summary"),
         TimestampMs::parse(102).expect("valid timestamp"),

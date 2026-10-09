@@ -32,6 +32,16 @@ pub(crate) struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_DB_PATH)]
     pub(crate) db: PathBuf,
 
+    /// Workflow profiles file (JSON). Profiles select creation completion
+    /// policy, routing key, and evidence policy as defaults for new tasks;
+    /// omitted profile fields mean the simple flow (direct completion,
+    /// default route, optional evidence applies to direct receipts only).
+    #[arg(long, global = true)]
+    pub(crate) config: Option<PathBuf>,
+
+    #[arg(long, global = true)]
+    pub(crate) profile: Option<String>,
+
     #[arg(long, global = true)]
     pub(crate) json: bool,
 

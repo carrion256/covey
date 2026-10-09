@@ -20,31 +20,23 @@ use crate::{
     },
 };
 
-const DEFAULT_ROUTING_KEY: &str = "default";
-
 impl Covey {
-    /// Creates direct work on Covey's generic default route.
+    /// Creates work using the opened workflow profile.
+    ///
+    /// Resolved policies are persisted and included in the idempotency request
+    /// and creation event, just as for explicit work creation.
     pub fn create_subtask(&self, req: CreateSubtaskRequest) -> Result<String> {
-        let started_at = Instant::now();
-        let result = self.with_write_tx(|tx, now| {
-            crate::store::with_idempotent_mutation(
-                tx,
-                req.session_token.as_str(),
-                "create_subtask",
-                &req.idempotency_key,
-                &req,
-                crate::model::TimestampMs::parse(now)?,
-                || create_subtask_tx(tx, &req, now),
-            )
-        });
-        self.log_operation(
-            "create_subtask",
-            req.session_token.as_str(),
-            started_at,
-            &result,
-            |subtask_id| vec![format!("subtask:{subtask_id}")],
-        );
-        result
+        self.create_work_subtask(CreateWorkSubtaskReq {
+            session_token: req.session_token,
+            meta_task_id: req.meta_task_id,
+            subtask_id: req.subtask_id,
+            title: req.title,
+            priority: req.priority,
+            completion_policy: self.workflow.completion_policy,
+            routing_key: self.workflow.routing_key.clone(),
+            evidence_policy: self.workflow.evidence_policy,
+            idempotency_key: req.idempotency_key,
+        })
     }
 
     /// Creates work with an explicit immutable completion policy and routing key.
@@ -72,28 +64,6 @@ impl Covey {
     }
 }
 
-pub(crate) fn create_subtask_tx(
-    tx: &Transaction<'_>,
-    req: &CreateSubtaskRequest,
-    now: i64,
-) -> Result<String> {
-    let routing_key = RoutingKey::parse(DEFAULT_ROUTING_KEY)
-        .expect("the default routing key is a valid routing key");
-    insert_work_subtask_tx(
-        tx,
-        req.session_token.as_str(),
-        &req.meta_task_id,
-        req.subtask_id.as_ref(),
-        &req.title,
-        req.priority,
-        CompletionPolicy::Direct,
-        &routing_key,
-        EventType::SubtaskCreated,
-        req,
-        now,
-    )
-}
-
 pub(crate) fn create_work_subtask_tx(
     tx: &Transaction<'_>,
     req: &CreateWorkSubtaskReq,
@@ -110,6 +80,7 @@ pub(crate) fn create_work_subtask_tx(
         &req.routing_key,
         EventType::WorkSubtaskCreated,
         req,
+        req.evidence_policy,
         now,
     )
 }
@@ -126,6 +97,7 @@ fn insert_work_subtask_tx<T: Serialize>(
     routing_key: &RoutingKey,
     event_type: EventType,
     event_payload: &T,
+    evidence_policy: crate::model::EvidencePolicy,
     now: i64,
 ) -> Result<String> {
     crate::validators::require_role(tx, session_token, &[SessionRole::Orchestrator])?;
@@ -149,8 +121,8 @@ fn insert_work_subtask_tx<T: Serialize>(
         INSERT INTO subtasks (
             subtask_id, meta_task_id, title, kind, review_target_subtask_id,
             review_target_artifact_digest, state, current_claim_id, artifact_digest,
-            priority, completion_policy, routing_key, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?11)
+            priority, completion_policy, routing_key, evidence_policy, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10, ?11, ?12, ?12)
         "#,
         params![
             subtask_id.as_str(),
@@ -163,6 +135,7 @@ fn insert_work_subtask_tx<T: Serialize>(
             priority.get(),
             completion_policy_name(completion_policy),
             routing_key.as_str(),
+            evidence_policy.as_ref(),
             now,
         ],
     )?;

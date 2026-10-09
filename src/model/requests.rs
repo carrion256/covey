@@ -13,8 +13,8 @@ use super::{
     ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState, ArtifactDigest, ArtifactKind,
     ArtifactManifestPath, AttemptEvidenceDigest, AttemptFailureCode, AttemptSummary, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, CompletionPolicy, ConflictId,
-    ConflictResolutionState, CoveyTypeValidationError, FenceSeq, FindingsDigest, IdempotencyKey,
-    LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
+    ConflictResolutionState, CoveyTypeValidationError, EvidencePolicy, FenceSeq, FindingsDigest,
+    IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
     OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
     OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerTargetKind,
     PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId, ProseTasksetId, ProviderId,
@@ -586,6 +586,10 @@ pub struct CreateWorkSubtaskReq {
     pub priority: SubtaskPriority,
     pub completion_policy: CompletionPolicy,
     pub routing_key: RoutingKey,
+    /// Immutable direct-receipt requirement, optional for new requests.
+    /// Older serialized requests without this field retain required evidence.
+    #[serde(default = "super::records::default_evidence_policy")]
+    pub evidence_policy: EvidencePolicy,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -615,6 +619,7 @@ impl CreateWorkSubtaskReq {
             priority: SubtaskPriority::parse(priority)?,
             completion_policy,
             routing_key: RoutingKey::parse(routing_key.into())?,
+            evidence_policy: EvidencePolicy::Optional,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
@@ -782,7 +787,7 @@ pub struct FinishSubtaskReq {
     pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub evidence_digest: AttemptEvidenceDigest,
+    pub evidence_digest: Option<AttemptEvidenceDigest>,
     pub summary: AttemptSummary,
     pub idempotency_key: IdempotencyKey,
 }
@@ -798,7 +803,7 @@ impl FinishSubtaskReq {
         session_token: impl Into<String>,
         claim_id: impl Into<String>,
         fence_seq: impl Into<i64>,
-        evidence_digest: impl Into<String>,
+        evidence_digest: Option<String>,
         summary: impl Into<String>,
         idempotency_key: impl Into<String>,
     ) -> Result<Self, CoveyTypeValidationError> {
@@ -806,7 +811,9 @@ impl FinishSubtaskReq {
             session_token: SessionToken::parse(session_token.into())?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
-            evidence_digest: AttemptEvidenceDigest::parse(evidence_digest.into())?,
+            evidence_digest: evidence_digest
+                .map(AttemptEvidenceDigest::parse)
+                .transpose()?,
             summary: AttemptSummary::parse(summary.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
@@ -819,7 +826,7 @@ pub struct RetrySubtaskReq {
     pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub evidence_digest: AttemptEvidenceDigest,
+    pub evidence_digest: Option<AttemptEvidenceDigest>,
     pub failure_code: AttemptFailureCode,
     pub summary: AttemptSummary,
     pub idempotency_key: IdempotencyKey,
@@ -837,7 +844,7 @@ impl RetrySubtaskReq {
         session_token: impl Into<String>,
         claim_id: impl Into<String>,
         fence_seq: impl Into<i64>,
-        evidence_digest: impl Into<String>,
+        evidence_digest: Option<String>,
         failure_code: impl Into<String>,
         summary: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -846,7 +853,9 @@ impl RetrySubtaskReq {
             session_token: SessionToken::parse(session_token.into())?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
-            evidence_digest: AttemptEvidenceDigest::parse(evidence_digest.into())?,
+            evidence_digest: evidence_digest
+                .map(AttemptEvidenceDigest::parse)
+                .transpose()?,
             failure_code: AttemptFailureCode::parse(failure_code.into())?,
             summary: AttemptSummary::parse(summary.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
@@ -860,7 +869,7 @@ pub struct FailSubtaskReq {
     pub session_token: SessionToken,
     pub claim_id: ClaimId,
     pub fence_seq: FenceSeq,
-    pub evidence_digest: AttemptEvidenceDigest,
+    pub evidence_digest: Option<AttemptEvidenceDigest>,
     pub failure_code: AttemptFailureCode,
     pub summary: AttemptSummary,
     pub idempotency_key: IdempotencyKey,
@@ -878,7 +887,7 @@ impl FailSubtaskReq {
         session_token: impl Into<String>,
         claim_id: impl Into<String>,
         fence_seq: impl Into<i64>,
-        evidence_digest: impl Into<String>,
+        evidence_digest: Option<String>,
         failure_code: impl Into<String>,
         summary: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -887,7 +896,9 @@ impl FailSubtaskReq {
             session_token: SessionToken::parse(session_token.into())?,
             claim_id: ClaimId::parse(claim_id.into())?,
             fence_seq: FenceSeq::parse(fence_seq.into())?,
-            evidence_digest: AttemptEvidenceDigest::parse(evidence_digest.into())?,
+            evidence_digest: evidence_digest
+                .map(AttemptEvidenceDigest::parse)
+                .transpose()?,
             failure_code: AttemptFailureCode::parse(failure_code.into())?,
             summary: AttemptSummary::parse(summary.into())?,
             idempotency_key: parse_idempotency_key(idempotency_key)?,

@@ -30,22 +30,19 @@ use crate::{
 
 use super::artifact_review::ensure_changes_requested_followup_blocks_tx;
 
-const DEFAULT_ROUTING_KEY: &str = "default";
-
 impl Covey {
-    /// Claims the next available subtask on the generic default route.
+    /// Claims the next available subtask on the opened workflow's route.
     pub fn claim_next_subtask(&self, req: ClaimNextReq) -> Result<Option<ClaimResult>> {
         let started_at = Instant::now();
-        let routing_key = RoutingKey::parse(DEFAULT_ROUTING_KEY)
-            .expect("the default routing key is a valid routing key");
+        let routing_key = &self.workflow.routing_key;
         let result = self.claim_next_for_route(
             req.session_token.as_str(),
             req.lease_duration_ms,
-            &routing_key,
+            routing_key,
             req.meta_task_id.as_ref(),
             "claim_next_subtask",
             &req.idempotency_key,
-            &req,
+            &(&req, routing_key),
             &[SessionRole::Executor, SessionRole::Reviewer],
         );
         self.log_operation(

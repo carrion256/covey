@@ -45,9 +45,9 @@ pub(crate) struct CreateSubtaskArgs {
     pub(crate) meta_task_id: String,
     #[arg(long)]
     pub(crate) title: String,
-    #[arg(long)]
+    #[arg(long, value_enum, default_value_t = SubtaskKindArg::Work)]
     pub(crate) kind: SubtaskKindArg,
-    #[arg(long)]
+    #[arg(long, default_value_t = 100)]
     pub(crate) priority: i64,
     #[arg(long)]
     pub(crate) subtask_id: Option<String>,
@@ -59,6 +59,8 @@ pub(crate) struct CreateSubtaskArgs {
     pub(crate) idempotency_key: Option<String>,
     #[arg(long, value_enum)]
     pub(crate) completion_policy: Option<CompletionPolicyArg>,
+    #[arg(long, value_enum)]
+    pub(crate) evidence_policy: Option<EvidencePolicyArg>,
     #[arg(long)]
     pub(crate) routing_key: Option<String>,
 }
@@ -67,7 +69,7 @@ pub(crate) struct CreateSubtaskArgs {
 pub(crate) struct ClaimNextArgs {
     #[arg(long)]
     pub(crate) session_token: String,
-    #[arg(long)]
+    #[arg(long, default_value_t = 30_000)]
     pub(crate) lease_duration_ms: i64,
     #[arg(long)]
     pub(crate) meta_task_id: Option<String>,
@@ -83,7 +85,7 @@ pub(crate) struct ClaimSubtaskArgs {
     pub(crate) session_token: String,
     #[arg(long)]
     pub(crate) subtask_id: String,
-    #[arg(long)]
+    #[arg(long, default_value_t = 30_000)]
     pub(crate) lease_duration_ms: i64,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
@@ -110,7 +112,7 @@ pub(crate) struct FinishSubtaskArgs {
     #[arg(long)]
     pub(crate) fence_seq: i64,
     #[arg(long)]
-    pub(crate) evidence_digest: String,
+    pub(crate) evidence_digest: Option<String>,
     #[arg(long)]
     pub(crate) summary: String,
     #[arg(long)]
@@ -126,7 +128,7 @@ pub(crate) struct RetrySubtaskArgs {
     #[arg(long)]
     pub(crate) fence_seq: i64,
     #[arg(long)]
-    pub(crate) evidence_digest: String,
+    pub(crate) evidence_digest: Option<String>,
     #[arg(long)]
     pub(crate) failure_code: String,
     #[arg(long)]
@@ -144,7 +146,7 @@ pub(crate) struct FailSubtaskArgs {
     #[arg(long)]
     pub(crate) fence_seq: i64,
     #[arg(long)]
-    pub(crate) evidence_digest: String,
+    pub(crate) evidence_digest: Option<String>,
     #[arg(long)]
     pub(crate) failure_code: String,
     #[arg(long)]
@@ -325,6 +327,22 @@ pub(crate) enum SubtaskKindArg {
 pub(crate) enum CandidateRoleArg {
     Executor,
     Reviewer,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum EvidencePolicyArg {
+    Optional,
+    Required,
+}
+
+impl From<EvidencePolicyArg> for covey::EvidencePolicy {
+    fn from(value: EvidencePolicyArg) -> Self {
+        match value {
+            EvidencePolicyArg::Optional => covey::EvidencePolicy::Optional,
+            EvidencePolicyArg::Required => covey::EvidencePolicy::Required,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

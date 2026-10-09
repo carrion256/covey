@@ -12,6 +12,7 @@ use crate::{
     RecordOperatorBlockerReq, RecordRuntimeAttestationReq, RecordVcsWorkspaceReq,
     RegisterSessionReq, ReleaseClaimReq, ResolveOperatorBlockerReq, Result, SessionRole,
     SubmitMetaTaskReq, VcsWorkspaceCleanliness, VcsWorkspaceKind, VcsWorkspaceState,
+    WorkflowProfile,
     schema::{apply_migrations, apply_pragmas},
 };
 
@@ -27,6 +28,7 @@ impl Covey {
             db_path: None,
             conn: Mutex::new(conn),
             clock,
+            workflow: WorkflowProfile::default(),
         })
     }
 }

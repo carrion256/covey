@@ -147,7 +147,7 @@ pub(crate) fn load_meta_task_tx(tx: &Transaction<'_>, meta_task_id: &str) -> Res
 pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<SubtaskRow> {
     map_missing_row(
         tx.query_row(
-            "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at FROM subtasks WHERE subtask_id = ?1",
+            "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, evidence_policy, created_at, updated_at FROM subtasks WHERE subtask_id = ?1",
             params![subtask_id],
             deserialize_row::<SubtaskRow>,
         ),
@@ -577,7 +577,7 @@ pub(crate) fn load_subtasks_for_meta_task_tx(
     meta_task_id: &str,
 ) -> Result<Vec<SubtaskRow>> {
     let mut stmt = tx.prepare(
-        "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, created_at, updated_at FROM subtasks WHERE meta_task_id = ?1 ORDER BY priority ASC, created_at ASC",
+        "SELECT subtask_id, meta_task_id, title, kind, review_target_subtask_id, review_target_artifact_digest, state, current_claim_id, artifact_digest, priority, completion_policy, routing_key, evidence_policy, created_at, updated_at FROM subtasks WHERE meta_task_id = ?1 ORDER BY priority ASC, created_at ASC",
     )?;
     let rows = stmt.query_map(params![meta_task_id], deserialize_row::<SubtaskRow>)?;
     collect_rows(rows)

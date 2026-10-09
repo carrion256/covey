@@ -9,9 +9,9 @@ use super::{
     AttemptOutcomeKind, AttemptSummary, BaseRev, CancelMetaTaskReq, ChangedPathsDigest, ClaimId,
     ClaimResult, ClaimState, CommandTranscriptDigest, CompletionPolicy, ConflictId, ConflictKind,
     ConflictResolutionState, CoveyTypeValidationError, CreateSubtaskRequest, CreateWorkSubtaskReq,
-    DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, ExitSessionReq,
-    FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs, MarkAppliedReq,
-    MarkApplyWorktreeStateReq, MetaTaskId, MetaTaskState, ModelId, ObjectType,
+    DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, EvidencePolicy,
+    ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs,
+    MarkAppliedReq, MarkApplyWorktreeStateReq, MetaTaskId, MetaTaskState, ModelId, ObjectType,
     ObserveVcsWorkspaceReq, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState,
     OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason,
     OperatorBlockerState, OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId,
@@ -1116,6 +1116,7 @@ pub(crate) struct SubtaskRow {
     pub priority: SubtaskPriority,
     completion_policy: CompletionPolicy,
     routing_key: RoutingKey,
+    evidence_policy: EvidencePolicy,
     timestamps: SubtaskTimestamps,
 }
 
@@ -1148,6 +1149,8 @@ struct RawSubtaskRow {
     completion_policy: CompletionPolicy,
     #[serde(default = "default_routing_key")]
     routing_key: RoutingKey,
+    #[serde(default = "default_evidence_policy")]
+    evidence_policy: EvidencePolicy,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -1167,6 +1170,7 @@ impl SubtaskRow {
         priority: SubtaskPriority,
         completion_policy: CompletionPolicy,
         routing_key: RoutingKey,
+        evidence_policy: EvidencePolicy,
         created_at: TimestampMs,
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
@@ -1196,6 +1200,7 @@ impl SubtaskRow {
             priority,
             completion_policy,
             routing_key,
+            evidence_policy,
             timestamps,
         })
     }
@@ -1233,6 +1238,11 @@ impl SubtaskRow {
     #[must_use]
     pub(crate) const fn routing_key(&self) -> &RoutingKey {
         &self.routing_key
+    }
+
+    #[must_use]
+    pub(crate) const fn evidence_policy(&self) -> EvidencePolicy {
+        self.evidence_policy
     }
 
     #[must_use]
@@ -1316,6 +1326,7 @@ impl From<&SubtaskRow> for RawSubtaskRow {
             priority: row.priority,
             completion_policy: row.completion_policy(),
             routing_key: row.routing_key().clone(),
+            evidence_policy: row.evidence_policy(),
             created_at: row.created_at(),
             updated_at: row.updated_at(),
         }
@@ -1339,6 +1350,7 @@ impl TryFrom<RawSubtaskRow> for SubtaskRow {
             raw.priority,
             raw.completion_policy,
             raw.routing_key,
+            raw.evidence_policy,
             raw.created_at,
             raw.updated_at,
         )
@@ -1784,6 +1796,7 @@ pub struct WorkSubtask {
     priority: SubtaskPriority,
     completion_policy: CompletionPolicy,
     routing_key: RoutingKey,
+    evidence_policy: EvidencePolicy,
     timestamps: SubtaskTimestamps,
 }
 
@@ -1825,6 +1838,8 @@ struct RawWorkSubtask {
     completion_policy: CompletionPolicy,
     #[serde(default = "default_routing_key")]
     routing_key: RoutingKey,
+    #[serde(default = "default_evidence_policy")]
+    evidence_policy: EvidencePolicy,
     created_at: TimestampMs,
     updated_at: TimestampMs,
 }
@@ -1876,6 +1891,7 @@ impl WorkSubtask {
             priority,
             CompletionPolicy::CanonicalApply,
             default_routing_key(),
+            EvidencePolicy::Required,
             created_at,
             updated_at,
         )
@@ -1891,6 +1907,7 @@ impl WorkSubtask {
         priority: SubtaskPriority,
         completion_policy: CompletionPolicy,
         routing_key: RoutingKey,
+        evidence_policy: EvidencePolicy,
         created_at: TimestampMs,
         updated_at: TimestampMs,
     ) -> rusqlite::Result<Self> {
@@ -1907,8 +1924,15 @@ impl WorkSubtask {
             priority,
             completion_policy,
             routing_key,
+            evidence_policy,
             timestamps,
         })
+    }
+
+    /// Returns the evidence policy for this work subtask.
+    #[must_use]
+    pub const fn evidence_policy(&self) -> EvidencePolicy {
+        self.evidence_policy
     }
 
     #[must_use]
@@ -1998,6 +2022,7 @@ impl TryFrom<RawWorkSubtask> for WorkSubtask {
             raw.priority,
             raw.completion_policy,
             raw.routing_key,
+            raw.evidence_policy,
             raw.created_at,
             raw.updated_at,
         )
@@ -2014,6 +2039,7 @@ impl From<&WorkSubtask> for RawWorkSubtask {
             priority: subtask.priority,
             completion_policy: subtask.completion_policy,
             routing_key: subtask.routing_key.clone(),
+            evidence_policy: subtask.evidence_policy,
             created_at: subtask.timestamps.created_at(),
             updated_at: subtask.timestamps.updated_at(),
         }
@@ -2220,6 +2246,7 @@ impl TryFrom<SubtaskRow> for Subtask {
                 row.priority,
                 row.completion_policy,
                 row.routing_key,
+                row.evidence_policy,
                 created_at,
                 updated_at,
             )?)),
@@ -2263,6 +2290,10 @@ fn default_routing_key() -> RoutingKey {
 
 const fn default_completion_policy() -> CompletionPolicy {
     CompletionPolicy::Direct
+}
+
+pub(super) const fn default_evidence_policy() -> EvidencePolicy {
+    EvidencePolicy::Required
 }
 
 /// Persisted claim row.
@@ -2451,7 +2482,7 @@ pub struct AttemptOutcome {
     pub subtask_id: SubtaskId,
     pub fence_seq: FenceSeq,
     outcome: AttemptOutcomeResult,
-    pub evidence_digest: AttemptEvidenceDigest,
+    pub evidence_digest: Option<AttemptEvidenceDigest>,
     pub summary: AttemptSummary,
     pub recorded_at: TimestampMs,
 }
@@ -2469,7 +2500,7 @@ struct RawAttemptOutcome {
     subtask_id: SubtaskId,
     fence_seq: FenceSeq,
     outcome_kind: AttemptOutcomeKind,
-    evidence_digest: AttemptEvidenceDigest,
+    evidence_digest: Option<AttemptEvidenceDigest>,
     failure_code: Option<AttemptFailureCode>,
     summary: AttemptSummary,
     recorded_at: TimestampMs,
@@ -2488,7 +2519,7 @@ impl AttemptOutcome {
         subtask_id: SubtaskId,
         fence_seq: FenceSeq,
         outcome_kind: AttemptOutcomeKind,
-        evidence_digest: AttemptEvidenceDigest,
+        evidence_digest: Option<AttemptEvidenceDigest>,
         failure_code: Option<AttemptFailureCode>,
         summary: AttemptSummary,
         recorded_at: TimestampMs,

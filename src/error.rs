@@ -103,6 +103,14 @@ pub enum CoveyError {
         operation: String,
         policy: CompletionPolicy,
     },
+    #[error(
+        "operation {operation} requires attempt evidence for subtask {subtask_id} \
+         (evidence policy is required)"
+    )]
+    AttemptEvidenceRequired {
+        operation: String,
+        subtask_id: String,
+    },
 
     #[error("lease expired for {object_id}")]
     LeaseExpired { object_id: String },
@@ -202,19 +210,20 @@ impl PartialEq for CoveyError {
         use CoveyError::{
             AmbiguousCurrentWorkBlocker, ApplyGateEvidenceMissing,
             ApplyGateSeparationOfDutiesViolation, ArtifactDigestCollision, ArtifactNotFound,
-            ClaimNotFound, ClaimNotHeld, CompletionPolicyViolation, ConflictNotFound,
-            CurrentWorkBlockerNotFound, DatabaseError, DuplicateSubtaskId, FenceTokenMismatch,
-            IdempotencyConflict, IllegalTransition, ImportDuplicate, ImportSourceNotFound,
-            InputTooLarge, InvalidEventShape, InvalidIdempotencyKey, InvalidImportDestination,
-            InvalidImportRow, InvalidLeaseDuration, InvalidObservabilityRow, InvalidPath,
-            InvalidReadyQueueMetrics, InvalidRuntimeAttestation, InvalidSessionToken,
-            InvalidSourceSchema, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
-            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
-            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
-            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
-            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
-            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
+            AttemptEvidenceRequired, ClaimNotFound, ClaimNotHeld, CompletionPolicyViolation,
+            ConflictNotFound, CurrentWorkBlockerNotFound, DatabaseError, DuplicateSubtaskId,
+            FenceTokenMismatch, IdempotencyConflict, IllegalTransition, ImportDuplicate,
+            ImportSourceNotFound, InputTooLarge, InvalidEventShape, InvalidIdempotencyKey,
+            InvalidImportDestination, InvalidImportRow, InvalidLeaseDuration,
+            InvalidObservabilityRow, InvalidPath, InvalidReadyQueueMetrics,
+            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema, LeaseExpired,
+            MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
+            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
+            ReviewKindMismatch, ReviewNotFound, RuntimeAttestationMissing,
+            SeparationOfDutiesViolation, SerializationError, SessionAlreadyActive,
+            SessionAlreadyHasActiveSubtask, SessionNotActive, SessionNotFound, StaleFenceToken,
+            StaleReviewArtifact, SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError,
+            UnknownArtifactDigest, WrongRole,
         };
 
         match (self, other) {
@@ -413,6 +422,16 @@ impl PartialEq for CoveyError {
                     policy: right_policy,
                 },
             ) => left_operation == right_operation && left_policy == right_policy,
+            (
+                AttemptEvidenceRequired {
+                    operation: left_operation,
+                    subtask_id: left_subtask_id,
+                },
+                AttemptEvidenceRequired {
+                    operation: right_operation,
+                    subtask_id: right_subtask_id,
+                },
+            ) => left_operation == right_operation && left_subtask_id == right_subtask_id,
             (
                 ReviewAlreadyOpen {
                     subtask_id: left_subtask_id,

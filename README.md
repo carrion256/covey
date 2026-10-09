@@ -55,8 +55,8 @@ Covey tracks a fixed set of entities:
 
 - `sessions`: who is connected, what role they have, and when they last heartbeated
 - `meta_tasks`: top-level operator work items
-- `subtasks`: decomposed units of work with immutable completion policies and
-  exact routing keys, including first-class review subtasks
+- `subtasks`: decomposed units of work with immutable completion and evidence
+  policies and exact routing keys, including first-class review subtasks
 - `claims`: fenced ownership of a subtask with leases
 - `subtask_attempt_outcomes`: immutable success, retryable-failure, or
   terminal-failure receipts for direct work attempts
@@ -76,9 +76,9 @@ Covey exists to make invalid states hard or impossible.
 - At most one active session per `agent_principal_id`
 - At most one held claim per subtask
 - Fence tokens increase monotonically per subtask claim lifecycle
-- Completion policy and routing key are immutable task facts
-- Candidate reads and `claim-next` match one exact routing key; the retained API
-  is the `mutai` route
+- Completion policy, evidence policy, and routing key are immutable task facts
+- Candidate reads and `claim-next` match one exact routing key; without
+  configuration, that route is `default`
 - Direct attempt outcomes require the current held claim, live lease, and exact
   fence, and close that claim in the same transaction
 - `direct` work cannot publish artifacts, request review, or enter the apply
@@ -97,14 +97,13 @@ These guarantees are enforced through database constraints plus transactional ch
 
 Every work subtask has one immutable completion policy:
 
-- `direct`: the executor records a fenced attempt receipt. Success ends in
-  `completed`; a retryable failure returns the task to `available`; a terminal
-  failure ends in `failed`.
+- `direct` (default): the executor records a fenced attempt receipt with a
+  summary and optional evidence digest. Success ends in `completed`; a retryable
+  failure returns the task to `available`; a terminal failure ends in `failed`.
 - `reviewed`: the executor publishes a non-applyable immutable artifact and an
   independent reviewer decides the exact digest. Approval ends in `completed`
-  without creating an apply-queue item. Generated review subtasks use the
-  shared `mutai` reviewer lane; work routing is not end-to-end workflow
-  affinity.
+  without creating an apply-queue item. Generated review subtasks inherit the
+  source task's completion policy and routing key.
 - `canonical_apply`: the executor publishes an applyable artifact, review
   approval creates the apply-queue item, and authorized landing ends in
   `applied`.
@@ -155,6 +154,66 @@ claim/fence recorded an outcome; it is not Authority evidence, review approval,
 repo mutation evidence, or settlement authorization. `completed` therefore
 does not mean landed. Canonical repository work remains successful only at
 `applied`.
+
+## Workflow Configuration
+
+No configuration is needed for ordinary task execution. The built-in workflow
+uses `direct` completion, the `default` routing lane, and optional direct-attempt
+evidence. Reviews, artifacts, runtime attestations, and the apply queue remain
+available through the governed completion modes; direct work does not need them.
+
+Named profiles compose those existing modes with routing and evidence defaults.
+For example, an explicitly supplied `workflows.json` can contain:
+
+```json
+{
+  "default_profile": "simple",
+  "profiles": {
+    "simple": {},
+    "evidenced": {
+      "evidence_policy": "required"
+    },
+    "reviewed": {
+      "completion_policy": "reviewed",
+      "routing_key": "review"
+    },
+    "canonical": {
+      "completion_policy": "canonical_apply",
+      "routing_key": "mutai"
+    }
+  }
+}
+```
+
+Use `covey --config ./workflows.json --profile reviewed ...` to select a profile.
+If `--profile` is omitted, the file must provide `default_profile`. No file is
+discovered implicitly, and `--profile` alone is an error. This format is separate
+from any consumer-owned backlog `covey.json` dispatch policy.
+
+Omitted profile fields mean `direct`, `default`, and `optional`, respectively.
+The `evidence_policy` setting controls only direct finish/retry/fail receipts;
+it never disables the artifact, independent-review, or apply-gate requirements
+of a governed mode. A supplied digest must always be valid, even when optional.
+
+Profiles are defaults, not an authorization boundary. Creation flags
+`--completion-policy`, `--routing-key`, and `--evidence-policy` override them
+for new tasks. The resolved values are stored immutably on each task.
+Reopening without the config cannot weaken an existing task, and reusing a
+creation idempotency key with different resolved values is a conflict.
+Default claim-next, candidate, and availability operations use the profile's
+route; explicit routing flags select another exact lane.
+
+Invalid JSON, unknown or duplicate fields/profile names, invalid routes, and
+undefined profile selections fail before the CLI opens the database.
+Library callers use `Covey::open_with_workflow` and `WorkflowProfile`;
+`Covey::open` keeps the simple default. `create_subtask` uses the opened profile,
+while `create_work_subtask` takes explicit policies and routing.
+
+Migration 036 preserves existing tasks with required evidence and keeps their
+outcome history. Only newly created ordinary tasks get the optional default.
+For library consumers, direct outcome request constructors now accept
+`Option<String>` evidence, and result records expose an optional digest
+(`null` in JSON when absent). Historical evidence-bearing outcomes remain readable.
 
 ## API Shape
 
@@ -301,41 +360,30 @@ Short help:
 covey --help
 ```
 
-Typical workflow:
+Default workflow (no configuration or governance flags):
 
 ```bash
-# Register sessions
+# Register the planner and worker once per run.
 covey session register --agent-principal-id orch --agent-instance-id orch-1 --role orchestrator
 covey session register --agent-principal-id worker --agent-instance-id worker-1 --role executor
 
-# Create work
+# Create work. kind=work and priority=100 are defaults.
 covey meta submit --session-token <orch-session> --prompt-text "ship feature"
-covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "implement" --kind work --priority 1
+covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "implement"
 
-# Import OpenSpec planning artifacts without claiming or scheduling work
-covey import openspec \
-  --change openspec-covey-importer \
-  --project-root /path/to/project \
-  --dry-run
-covey import openspec \
-  --change openspec-covey-importer \
-  --project-root /path/to/project \
-  --session-token <orch-session>
+# Take and start work. The default claim lease is 30000 ms.
+covey subtask claim-next --session-token <worker-session>
+covey subtask start --session-token <worker-session> --claim-id <claim> --fence-seq <fence>
 
-# Claim and publish canonical mutAI work. Omitting policy/routing uses
-# canonical_apply + mutai for compatibility.
-covey subtask claim-next --session-token <worker-session> --lease-duration-ms 30000
-covey artifact publish --session-token <worker-session> --claim-id <claim> --fence-seq <fence> --artifact-digest blake3:a --artifact-kind patch-bundle --base-rev base --manifest-path artifact.json --changed-paths-digest blake3:paths
-
-# Create and finish direct queue work on an exact route
-covey subtask create --session-token <orch-session> --meta-task-id <meta-task> \
-  --title "inspect incident" --kind work --priority 1 \
-  --completion-policy direct --routing-key research
-covey subtask claim-next --session-token <worker-session> \
-  --lease-duration-ms 30000 --routing-key research
+# Record the result. Evidence is optional unless the task requires it.
 covey subtask finish --session-token <worker-session> --claim-id <claim> \
-  --fence-seq <fence> --evidence-digest blake3:<digest> --summary "inspection complete"
+  --fence-seq <fence> --summary "implementation complete"
 ```
+
+`subtask retry` and `subtask fail` take the same ownership fields, a summary,
+and a `--failure-code`. All three accept `--evidence-digest` when needed.
+Workers still renew leases and heartbeat their sessions for long-running work;
+the workflow profile does not change ownership, expiry, or dependency rules.
 
 Scheduler read paths are explicit and read-only:
 
@@ -347,9 +395,10 @@ covey queue candidates --limit 50
 ```
 
 These commands expose exact claimable IDs and ordering facts. Without
-`--routing-key` they expose only the `mutai` route; an explicit key reads
-only that exact route. They do not create claims, advance fences, lease queue
-items, append events, or perform lifecycle transitions.
+`--routing-key` they expose the selected profile's route (`default` when no
+config is supplied); an explicit key reads only that exact route. They do not
+create claims, advance fences, lease queue items, append events, or perform
+lifecycle transitions.
 
 Apply-queue reconciliation is an explicit write path for operator and scheduler
 bootstrap:
@@ -366,6 +415,13 @@ ready-for-apply items exactly once.
 `covey import openspec` maps one OpenSpec change into deterministic Covey task state. For
 Better Droid changes, run `better-droid compile <change-id>` first so the change contains the
 compiled mission packet set under `.codex/state/better-droid/<change-id>/mission/`.
+
+```bash
+covey import openspec --change openspec-covey-importer \
+  --project-root /path/to/project --dry-run
+covey import openspec --change openspec-covey-importer \
+  --project-root /path/to/project --session-token <orch-session>
+```
 
 - `openspec:<change-id>` becomes the meta task ID.
 - `openspec:<change-id>:<task-id>` becomes each work subtask ID.

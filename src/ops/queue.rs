@@ -2107,7 +2107,7 @@ fn load_openspec_scoped_subtasks_tx(
         SELECT s.subtask_id, s.meta_task_id, s.title, s.kind,
                s.review_target_subtask_id, s.review_target_artifact_digest,
                s.state, s.current_claim_id, s.artifact_digest, s.priority,
-               s.completion_policy, s.routing_key,
+               s.completion_policy, s.routing_key, s.evidence_policy,
                s.created_at, s.updated_at
         FROM openspec_scope scope
         JOIN subtasks s ON s.subtask_id = scope.subtask_id

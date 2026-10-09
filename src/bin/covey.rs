@@ -59,7 +59,7 @@ covey <group> <command> [flags]
 groups: session meta subtask claim artifact review queue reservation repoops events conflict maint import digest
 digest: covey digest blake3 --file PATH | --text TEXT | --stdin
 proof: covey proof apply verify | verify-batch | print-contract
-global: --db PATH --json
+global: --db PATH --json --config PATH --profile NAME
 examples:
   covey session register --agent-principal-id agent-a --agent-instance-id run-1 --role executor
   covey subtask claim-next --session-token session_123 --lease-duration-ms 30000
@@ -147,7 +147,18 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
         return run_digest_command(command, mode);
     }
 
-    let store = Covey::open(&cli.db).map_err(|err| OutputError::from_covey(mode, err))?;
+    let workflow = covey::config::resolve_workflow(cli.config.as_deref(), cli.profile.as_deref())
+        .map_err(|err| {
+        OutputError::new(
+            mode,
+            ReportableError::invalid_args(
+                err.to_string(),
+                vec!["Check --config/--profile values.".into()],
+            ),
+        )
+    })?;
+    let store = Covey::open_with_workflow(&cli.db, workflow)
+        .map_err(|err| OutputError::from_covey(mode, err))?;
 
     let rendered =
         dispatch(&store, cli.command).map_err(|err| OutputError::from_covey(mode, err))?;

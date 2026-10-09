@@ -138,7 +138,7 @@ fn finish_request(work: &StartedWork, summary: &str, idempotency_key: &str) -> F
         work.worker.clone(),
         work.claim.claim_id.clone(),
         work.claim.fence_seq,
-        "blake3:success",
+        Some("blake3:success".into()),
         summary,
         idempotency_key,
     )
@@ -243,7 +243,13 @@ fn direct_finish_records_one_receipt_and_completes_without_apply_queue() {
     assert_eq!(outcome.subtask_id, work.subtask_id);
     assert_eq!(outcome.fence_seq, work.claim.fence_seq);
     assert_eq!(outcome.outcome_kind(), AttemptOutcomeKind::Succeeded);
-    assert_eq!(outcome.evidence_digest.as_str(), "blake3:success");
+    assert_eq!(
+        outcome
+            .evidence_digest
+            .as_ref()
+            .map(|digest| digest.as_str()),
+        Some("blake3:success")
+    );
     assert_eq!(outcome.summary.as_str(), "research completed");
     assert_eq!(outcome.failure_code(), None);
 
@@ -411,7 +417,7 @@ fn retry_requeues_same_work_with_higher_fence_and_rejects_stale_attempts() {
                 work.worker.clone(),
                 work.claim.claim_id.clone(),
                 work.claim.fence_seq,
-                "blake3:retry",
+                Some("blake3:retry".into()),
                 "transient_provider_error",
                 "provider unavailable",
                 "retry-work",
@@ -462,7 +468,7 @@ fn retry_requeues_same_work_with_higher_fence_and_rejects_stale_attempts() {
             work.worker.clone(),
             work.claim.claim_id.clone(),
             work.claim.fence_seq,
-            "blake3:stale-old-claim",
+            Some("blake3:stale-old-claim".into()),
             "stale old claim",
             "finish-stale-old-claim",
         )
@@ -474,7 +480,7 @@ fn retry_requeues_same_work_with_higher_fence_and_rejects_stale_attempts() {
             work.worker.clone(),
             second_claim.claim_id.clone(),
             work.claim.fence_seq,
-            "blake3:stale-fence",
+            Some("blake3:stale-fence".into()),
             "stale fence",
             "finish-stale-fence",
         )
@@ -492,7 +498,7 @@ fn retry_requeues_same_work_with_higher_fence_and_rejects_stale_attempts() {
                 work.worker,
                 second_claim.claim_id,
                 second_claim.fence_seq,
-                "blake3:second-success",
+                Some("blake3:second-success".into()),
                 "second attempt succeeded",
                 "finish-second-attempt",
             )
@@ -527,7 +533,7 @@ fn terminal_failure_records_evidence_and_closes_work_without_queue_success() {
                 work.worker.clone(),
                 work.claim.claim_id.clone(),
                 work.claim.fence_seq,
-                "blake3:terminal-failure",
+                Some("blake3:terminal-failure".into()),
                 "invalid_task_input",
                 "task cannot be completed",
                 "fail-work",
@@ -633,7 +639,7 @@ fn only_successful_direct_dependencies_unblock_dependent_work() {
                 failed_work.worker.clone(),
                 failed_work.claim.claim_id.clone(),
                 failed_work.claim.fence_seq,
-                "blake3:failed-dependency",
+                Some("blake3:failed-dependency".into()),
                 "terminal_dependency_failure",
                 "dependency failed",
                 "fail-dependency",
@@ -719,7 +725,7 @@ fn canonical_policy_rejects_all_direct_outcomes_without_partial_writes() {
             work.worker.clone(),
             work.claim.claim_id.clone(),
             work.claim.fence_seq,
-            "blake3:forbidden-retry",
+            Some("blake3:forbidden-retry".into()),
             "transient",
             "forbidden retry",
             "retry-canonical",
@@ -731,7 +737,7 @@ fn canonical_policy_rejects_all_direct_outcomes_without_partial_writes() {
             work.worker.clone(),
             work.claim.claim_id.clone(),
             work.claim.fence_seq,
-            "blake3:forbidden-failure",
+            Some("blake3:forbidden-failure".into()),
             "terminal",
             "forbidden failure",
             "fail-canonical",
@@ -871,7 +877,7 @@ fn direct_finish_rejects_wrong_owner_and_expired_lease_without_receipt() {
             other,
             work.claim.claim_id.clone(),
             work.claim.fence_seq,
-            "blake3:wrong-owner",
+            Some("blake3:wrong-owner".into()),
             "wrong owner",
             "finish-wrong-owner",
         )

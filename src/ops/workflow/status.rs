@@ -17,8 +17,6 @@ use crate::{
     },
 };
 
-const DEFAULT_ROUTING_KEY: &str = "default";
-
 impl Covey {
     /// Returns the current persisted status for a subtask and its related rows.
     pub fn subtask_status(&self, subtask_id: &str) -> Result<SubtaskStatus> {
@@ -56,14 +54,12 @@ impl Covey {
         result
     }
 
-    /// Returns claimable counts on the generic default route.
+    /// Returns claimable counts on the opened workflow's route.
     pub fn claimable_subtask_availability(
         &self,
         meta_task_id: Option<&str>,
     ) -> Result<ClaimableSubtaskAvailability> {
-        let routing_key =
-            RoutingKey::parse(DEFAULT_ROUTING_KEY).expect("the default routing key is valid");
-        self.claimable_subtask_availability_routed(&routing_key, meta_task_id)
+        self.claimable_subtask_availability_routed(&self.workflow.routing_key, meta_task_id)
     }
 
     /// Returns claimable counts within one exact routing lane.
@@ -93,16 +89,14 @@ impl Covey {
         result
     }
 
-    /// Returns ordered scheduler candidates on the generic default route.
+    /// Returns ordered scheduler candidates on the opened workflow's route.
     pub fn subtask_candidates(
         &self,
         role: SessionRole,
         limit: usize,
         meta_task_id: Option<&str>,
     ) -> Result<Vec<SubtaskCandidate>> {
-        let routing_key =
-            RoutingKey::parse(DEFAULT_ROUTING_KEY).expect("the default routing key is valid");
-        self.subtask_candidates_routed(role, &routing_key, limit, meta_task_id)
+        self.subtask_candidates_routed(role, &self.workflow.routing_key, limit, meta_task_id)
     }
 
     /// Returns ordered candidates within one exact routing lane.
@@ -171,7 +165,8 @@ impl Covey {
                 SELECT st.subtask_id, st.meta_task_id, st.title, st.kind,
                        st.review_target_subtask_id, st.review_target_artifact_digest,
                        st.state, st.current_claim_id, st.artifact_digest, st.priority,
-                       st.completion_policy, st.routing_key, st.created_at, st.updated_at,
+                       st.completion_policy, st.routing_key, st.evidence_policy, st.created_at,
+                       st.updated_at,
                        c.claim_id, c.subtask_id, c.owner_session_token, c.fence_seq,
                        c.lease_deadline, c.state, c.created_at, c.updated_at,
                        s.session_token, s.agent_principal_id, s.agent_instance_id,
@@ -253,7 +248,8 @@ impl Covey {
                        st.subtask_id, st.meta_task_id, st.title, st.kind,
                        st.review_target_subtask_id, st.review_target_artifact_digest,
                        st.state, st.current_claim_id, st.artifact_digest, st.priority,
-                       st.completion_policy, st.routing_key, st.created_at, st.updated_at,
+                       st.completion_policy, st.routing_key, st.evidence_policy, st.created_at,
+                       st.updated_at,
                        s.session_token, s.agent_principal_id, s.agent_instance_id,
                        s.role, s.state, s.active_subtask_id, s.last_heartbeat_at,
                        s.last_heartbeat_tick, s.created_at, s.updated_at
@@ -723,23 +719,24 @@ fn stuck_subtask_from_joined_row(row: &Row<'_>, now: i64) -> Result<StuckSubtask
         row.get(9)?,
         parse_enum::<CompletionPolicy>(row.get::<_, String>(10)?)?,
         row.get(11)?,
-        row.get(12)?,
+        parse_enum::<crate::model::EvidencePolicy>(row.get::<_, String>(12)?)?,
         row.get(13)?,
+        row.get(14)?,
     )?;
     let expects_claim = subtask.current_claim_id().is_some();
     let idle_for_ms = (now - subtask.updated_at().get()).max(0);
-    let claim_id = row.get::<_, Option<crate::model::ClaimId>>(14)?;
+    let claim_id = row.get::<_, Option<crate::model::ClaimId>>(15)?;
     let claim = claim_id
         .map(|claim_id| {
             Claim::try_from_parts(
                 claim_id,
-                row.get(15)?,
                 row.get(16)?,
                 row.get(17)?,
                 row.get(18)?,
-                parse_enum(row.get::<_, String>(19)?)?,
-                row.get(20)?,
+                row.get(19)?,
+                parse_enum(row.get::<_, String>(20)?)?,
                 row.get(21)?,
+                row.get(22)?,
             )
             .map_err(to_sql_err)
         })
@@ -748,20 +745,20 @@ fn stuck_subtask_from_joined_row(row: &Row<'_>, now: i64) -> Result<StuckSubtask
         return Err(CoveyError::ClaimNotFound);
     }
 
-    let session_token = row.get::<_, Option<crate::model::SessionToken>>(22)?;
+    let session_token = row.get::<_, Option<crate::model::SessionToken>>(23)?;
     let session = session_token
         .map(|session_token| {
             Session::try_from_parts(
                 session_token,
-                row.get::<_, String>(23)?,
                 row.get::<_, String>(24)?,
-                parse_enum::<SessionRole>(row.get::<_, String>(25)?)?,
-                parse_enum::<SessionState>(row.get::<_, String>(26)?)?,
-                row.get(27)?,
+                row.get::<_, String>(25)?,
+                parse_enum::<SessionRole>(row.get::<_, String>(26)?)?,
+                parse_enum::<SessionState>(row.get::<_, String>(27)?)?,
                 row.get(28)?,
                 row.get(29)?,
                 row.get(30)?,
                 row.get(31)?,
+                row.get(32)?,
             )
             .map_err(to_sql_err)
         })
@@ -799,20 +796,21 @@ fn expiring_claim_from_joined_row(row: &Row<'_>, lease_now: i64) -> Result<Expir
         row.get(17)?,
         parse_enum::<CompletionPolicy>(row.get::<_, String>(18)?)?,
         row.get(19)?,
-        row.get(20)?,
+        parse_enum::<crate::model::EvidencePolicy>(row.get::<_, String>(20)?)?,
         row.get(21)?,
+        row.get(22)?,
     )?;
     let session = Session::try_from_parts(
-        row.get(22)?,
-        row.get::<_, String>(23)?,
+        row.get(23)?,
         row.get::<_, String>(24)?,
-        parse_enum::<SessionRole>(row.get::<_, String>(25)?)?,
-        parse_enum::<SessionState>(row.get::<_, String>(26)?)?,
-        row.get(27)?,
+        row.get::<_, String>(25)?,
+        parse_enum::<SessionRole>(row.get::<_, String>(26)?)?,
+        parse_enum::<SessionState>(row.get::<_, String>(27)?)?,
         row.get(28)?,
         row.get(29)?,
         row.get(30)?,
         row.get(31)?,
+        row.get(32)?,
     )
     .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })?;
     let expires_in_ms = (claim.lease_deadline.get() - lease_now).max(0);

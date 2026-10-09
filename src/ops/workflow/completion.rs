@@ -30,7 +30,7 @@ struct OutcomeInput<'a> {
     claim_id: &'a ClaimId,
     fence_seq: FenceSeq,
     outcome_kind: AttemptOutcomeKind,
-    evidence_digest: &'a AttemptEvidenceDigest,
+    evidence_digest: Option<&'a AttemptEvidenceDigest>,
     failure_code: Option<&'a AttemptFailureCode>,
     summary: &'a AttemptSummary,
 }
@@ -49,7 +49,7 @@ impl Covey {
                 claim_id: &req.claim_id,
                 fence_seq: req.fence_seq,
                 outcome_kind: AttemptOutcomeKind::Succeeded,
-                evidence_digest: &req.evidence_digest,
+                evidence_digest: req.evidence_digest.as_ref(),
                 failure_code: None,
                 summary: &req.summary,
             },
@@ -69,7 +69,7 @@ impl Covey {
                 claim_id: &req.claim_id,
                 fence_seq: req.fence_seq,
                 outcome_kind: AttemptOutcomeKind::RetryableFailure,
-                evidence_digest: &req.evidence_digest,
+                evidence_digest: req.evidence_digest.as_ref(),
                 failure_code: Some(&req.failure_code),
                 summary: &req.summary,
             },
@@ -89,7 +89,7 @@ impl Covey {
                 claim_id: &req.claim_id,
                 fence_seq: req.fence_seq,
                 outcome_kind: AttemptOutcomeKind::TerminalFailure,
-                evidence_digest: &req.evidence_digest,
+                evidence_digest: req.evidence_digest.as_ref(),
                 failure_code: Some(&req.failure_code),
                 summary: &req.summary,
             },
@@ -158,6 +158,14 @@ fn record_direct_outcome_tx(
             policy: subtask.completion_policy(),
         });
     }
+    if input.evidence_digest.is_none()
+        && subtask.evidence_policy() == crate::model::EvidencePolicy::Required
+    {
+        return Err(CoveyError::AttemptEvidenceRequired {
+            operation: attempt_outcome_kind_name(input.outcome_kind).to_owned(),
+            subtask_id: subtask.subtask_id.to_string(),
+        });
+    }
 
     let next_state = match input.outcome_kind {
         AttemptOutcomeKind::Succeeded => SubtaskState::Completed,
@@ -171,7 +179,7 @@ fn record_direct_outcome_tx(
         subtask.subtask_id.clone(),
         claim.fence_seq,
         input.outcome_kind,
-        input.evidence_digest.clone(),
+        input.evidence_digest.cloned(),
         input.failure_code.cloned(),
         input.summary.clone(),
         TimestampMs::parse(now)?,
@@ -190,7 +198,10 @@ fn record_direct_outcome_tx(
             outcome.subtask_id.as_str(),
             outcome.fence_seq.get(),
             attempt_outcome_kind_name(outcome.outcome_kind()),
-            outcome.evidence_digest.as_str(),
+            outcome
+                .evidence_digest
+                .as_ref()
+                .map(AttemptEvidenceDigest::as_str),
             outcome.failure_code().map(AsRef::as_ref),
             outcome.summary.as_str(),
             input.session_token.as_str(),

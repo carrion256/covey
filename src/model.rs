@@ -11,6 +11,7 @@ mod tests;
 mod types;
 mod views;
 
+pub use crate::config::EvidencePolicy;
 pub use imports::*;
 pub use records::{
     AppliedReadyQueueItem, ApplyGateBlocker, ApplyVerification, ApplyWorktree, Artifact,

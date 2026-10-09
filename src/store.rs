@@ -14,6 +14,7 @@ use tracing::{Level, enabled, info, warn};
 
 use crate::{
     clock::{Clock, SystemClock},
+    config::WorkflowProfile,
     error::{CoveyError, Result},
     model::{
         Claim, ClaimState, EventType, LeaseDeadlineMs, LeaseDurationMs, MetaTaskState, ObjectType,
@@ -39,6 +40,7 @@ pub struct Covey {
     pub(crate) db_path: Option<PathBuf>,
     pub(crate) conn: Mutex<Connection>,
     pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) workflow: WorkflowProfile,
 }
 
 static_assertions::assert_impl_all!(Covey: Send, Sync);
@@ -51,8 +53,31 @@ impl Covey {
         Self::open_with_clock(path, Arc::new(SystemClock))
     }
 
+    /// Opens or creates a Covey database using the given workflow profile.
+    ///
+    /// The profile selects the completion policy, routing lane, and
+    /// direct-receipt evidence policy for newly created work. It never
+    /// weakens reviewed or canonical-apply governance on existing rows.
+    pub fn open_with_workflow(path: impl AsRef<Path>, workflow: WorkflowProfile) -> Result<Self> {
+        Self::open_with_clock_and_workflow(path, Arc::new(SystemClock), workflow)
+    }
+
     /// Opens or creates a Covey database with an injected clock.
     pub fn open_with_clock(path: impl AsRef<Path>, clock: Arc<dyn Clock>) -> Result<Self> {
+        Self::open_with_clock_and_workflow(path, clock, WorkflowProfile::default())
+    }
+
+    /// Opens or creates a Covey database with an injected clock and the given
+    /// workflow profile.
+    ///
+    /// The profile selects the completion policy, routing lane, and
+    /// direct-receipt evidence policy for newly created work. It never
+    /// weakens reviewed or canonical-apply governance on existing rows.
+    pub fn open_with_clock_and_workflow(
+        path: impl AsRef<Path>,
+        clock: Arc<dyn Clock>,
+        workflow: WorkflowProfile,
+    ) -> Result<Self> {
         let db_path = path.as_ref().to_path_buf();
         let mut conn = Connection::open(&db_path)?;
         apply_pragmas(&conn)?;
@@ -61,7 +86,14 @@ impl Covey {
             db_path: Some(db_path),
             conn: Mutex::new(conn),
             clock,
+            workflow,
         })
+    }
+
+    /// Returns the workflow profile this store resolves new work with.
+    #[must_use]
+    pub fn workflow(&self) -> &WorkflowProfile {
+        &self.workflow
     }
 
     pub(crate) fn with_write_tx<T, F>(&self, f: F) -> Result<T>

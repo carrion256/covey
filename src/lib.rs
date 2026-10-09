@@ -9,6 +9,7 @@
 //! not an event-sourced recovery surface.
 
 mod clock;
+pub mod config;
 mod error;
 mod model;
 mod ops;
@@ -22,6 +23,9 @@ mod tests;
 mod validators;
 
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use config::{
+    EvidencePolicy, WorkflowConfig, WorkflowConfigError, WorkflowProfile, resolve_workflow,
+};
 pub use error::{CoveyError, Result};
 pub use model::{
     AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, AppliedReadyQueueItem,

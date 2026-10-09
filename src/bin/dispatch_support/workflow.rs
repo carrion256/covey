@@ -12,19 +12,25 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             let idempotency_key = args
                 .idempotency_key
                 .unwrap_or_else(|| new_idempotency_key("create-subtask"));
-            let subtask_id =
-                store.create_work_subtask(CreateWorkSubtaskReq::try_from_raw_parts(
-                    args.session_token,
-                    args.meta_task_id,
-                    args.subtask_id,
-                    args.title,
-                    args.priority,
-                    args.completion_policy
-                        .map(Into::into)
-                        .unwrap_or(covey::CompletionPolicy::Direct),
-                    args.routing_key.unwrap_or_else(|| "default".to_owned()),
-                    idempotency_key,
-                )?)?;
+            let base = store.workflow();
+            let mut req = CreateWorkSubtaskReq::try_from_raw_parts(
+                args.session_token,
+                args.meta_task_id,
+                args.subtask_id,
+                args.title,
+                args.priority,
+                args.completion_policy
+                    .map(Into::into)
+                    .unwrap_or(base.completion_policy),
+                args.routing_key
+                    .unwrap_or_else(|| base.routing_key.to_string()),
+                idempotency_key,
+            )?;
+            req.evidence_policy = args
+                .evidence_policy
+                .map(Into::into)
+                .unwrap_or(base.evidence_policy);
+            let subtask_id = store.create_work_subtask(req)?;
             Ok(Rendered::summary(
                 SubtaskRef {
                     subtask_id: subtask_id.clone(),
@@ -416,6 +422,7 @@ mod tests {
                     idempotency_key: None,
                     completion_policy: None,
                     routing_key: None,
+                    evidence_policy: None,
                 }),
             )
             .expect("create subtask through dispatcher");
@@ -435,6 +442,7 @@ mod tests {
                 idempotency_key: None,
                 completion_policy: Some(CompletionPolicyArg::CanonicalApply),
                 routing_key: Some("mutai".to_owned()),
+                evidence_policy: None,
             }),
         )
         .expect("create canonical work through dispatcher");

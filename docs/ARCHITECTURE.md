@@ -8,8 +8,8 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
 - Domain invariants must be encoded in schema constraints, typed request/response models, or validator functions.
 - JSON is a transport format at the boundary, not the internal data model.
 - The CLI must stay transport-thin and map directly onto the library API.
-- Completion policy and routing are immutable coordination facts, not runtime
-  supervision or authority grants.
+- Completion policy, evidence policy, and routing are immutable task facts,
+  not runtime supervision or authority grants.
 
 ## Module Map
 
@@ -17,6 +17,10 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
 
 - `src/lib.rs`
   Re-export surface for the crate. This is the public API entrypoint.
+- `src/config.rs`
+  Strict named workflow profiles composing completion mode, routing, and direct
+  evidence requirements. No implicit file discovery; the library default is
+  direct completion on `default` with optional evidence.
 - `src/model.rs`
   Typed domain records, request DTOs, status payloads, event payloads, and persisted-state enums.
 - `src/error.rs`
@@ -41,8 +45,8 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
 - `ops/meta_task.rs`
   Meta-task submission, cancellation, and meta-task status.
 - `ops/workflow/create.rs`
-  Legacy and explicit-policy work creation. Legacy creation is fixed to
-  `completion_policy=canonical_apply` and `routing_key=mutai`.
+  Default-profile and explicit-policy work creation. Both persist a resolved
+  execution contract and emit the same typed `WorkSubtaskCreated` payload.
 - `ops/workflow/lifecycle.rs`
   Exact-route claim selection plus the held-claim, lease, fence, start,
   release, and abandon lifecycle.
@@ -115,22 +119,37 @@ is an explicit compatibility case, not the `direct` policy and not Authority
 settlement evidence.
 
 `subtask_attempt_outcomes` is authoritative only for Covey's direct attempt
-history. Its evidence digest and summary do not attest that a model was correct,
-that a repository changed, or that Authority approved settlement. The
-`canonical_apply` branch retains the existing artifact, review, queue, apply
-gate, and Authority trust boundary.
+history. Its summary and optional evidence digest do not attest that a model
+was correct, that a repository changed, or that Authority approved settlement.
+The `canonical_apply` branch retains the existing artifact, review, queue,
+apply-gate, and Authority trust boundary.
 
-Routing has similarly narrow meaning. `routing_key` is an exact eligibility
-partition used by candidate, availability, and claim-next operations. It does
-not authenticate a worker, supervise an agent, allocate process capacity, or
-grant permission to perform side effects. Legacy APIs are pinned to `mutai` so
-generic routes cannot leak into the existing scheduler view.
+Workflow profiles select the existing completion modes rather than bypassing
+their checks. `evidence_policy=required` adds a digest requirement to direct
+finish/retry/fail; `optional` permits an absent digest, not an invalid one.
+The resolved policy is persisted at creation and enforced from the task row,
+not the completing process's current configuration. Migration 036 preserves
+existing tasks as required-evidence tasks and retains append-only history,
+claim binding, and policy immutability. New ordinary API-created tasks use the
+simple default; raw SQL inserts retain the fail-closed `required` default.
 
-The routed claim-next contract applies to executor work. Generated review
-subtasks remain on the shared `mutai` reviewer lane and use `canonical_apply`
-as the structural policy value required for non-work rows; that value grants no
-settlement authority. Consumer-specific reviewer pools and inherited review
-routing are deferred product decisions.
+The CLI validates explicitly selected JSON configuration before opening the
+store. Creation flags may override profile defaults for new tasks; profiles
+are not organization-wide authorization policies. Resolved creation requests
+are also the idempotency input, so a changed effective contract cannot silently
+reuse a prior request key.
+
+`routing_key` is an exact eligibility partition used by candidate,
+availability, and claim-next operations. Their default APIs use the opened
+profile's route (`default` without configuration); explicit routed APIs remain
+exact selectors. Routing does not authenticate workers, supervise agents,
+allocate capacity, or grant side-effect permissions. Generated review subtasks
+inherit their source's completion policy and route.
+
+Specialized governed imports retain their explicit completion requirements.
+Lightweight prose intake keeps canonical apply with required evidence while
+using the configured route. Consumer-specific OpenSpec settlement paths retain
+their explicit routing and apply contracts.
 
 Covey contains no Hermes adapter. A later adapter may register its own sessions
 and use an explicit route, but it must own polling, process supervision,
