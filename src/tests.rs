@@ -4640,3 +4640,175 @@ fn assert_plan_uses_index(label: &str, plan: &[String], index_name: &str) {
 fn plan_mentions(plan: &[String], needle: &str) -> bool {
     plan.iter().any(|step| step.contains(needle))
 }
+
+fn seed_meta_task(
+    covey: &Covey,
+    meta_task_id: &str,
+    prompt_text: &str,
+    state: &str,
+    created_at: i64,
+    updated_at: i64,
+) {
+    let conn = covey.conn.lock().expect("covey connection mutex");
+    conn.execute(
+        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+         VALUES ('session-creator', 'creator', 'creator-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'session-creator', ?4, ?5)",
+        params![meta_task_id, prompt_text, state, created_at, updated_at],
+    )
+    .expect("seed meta task");
+}
+
+#[test]
+fn list_meta_tasks_returns_empty_page_for_empty_store() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    assert_eq!(covey.list_meta_tasks(50, 0).expect("list"), Vec::new());
+}
+
+#[test]
+fn list_meta_tasks_orders_newest_first_and_tie_breaks_on_id() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_meta_task(&covey, "meta-1", "oldest", "planning", 100, 100);
+    seed_meta_task(&covey, "meta-2", "same-time-a", "planning", 200, 200);
+    seed_meta_task(&covey, "meta-3", "same-time-b", "planning", 200, 200);
+    seed_meta_task(&covey, "meta-4", "newest", "planning", 300, 300);
+
+    let page = covey.list_meta_tasks(50, 0).expect("list");
+    assert_eq!(
+        page.iter()
+            .map(|summary| summary.meta_task_id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["meta-4", "meta-3", "meta-2", "meta-1"]
+    );
+    let newest = &page[0];
+    assert_eq!(newest.prompt_text().as_str(), "newest");
+    assert_eq!(newest.created_at().get(), 300);
+    assert_eq!(newest.updated_at().get(), 300);
+}
+
+#[test]
+fn list_meta_tasks_covers_all_states() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_meta_task(&covey, "meta-p", "planning", "planning", 1, 1);
+    seed_meta_task(&covey, "meta-a", "active", "active", 2, 2);
+    seed_meta_task(&covey, "meta-c", "completed", "completed", 3, 3);
+    seed_meta_task(&covey, "meta-x", "cancelled", "cancelled", 4, 4);
+
+    let page = covey.list_meta_tasks(50, 0).expect("list");
+    let states: Vec<&str> = page
+        .iter()
+        .map(|summary| crate::model::meta_task_state_name(summary.state()))
+        .collect();
+    assert_eq!(states, vec!["cancelled", "completed", "active", "planning"]);
+}
+
+#[test]
+fn list_meta_tasks_summaries_never_expose_creator_tokens_and_write_no_events() {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    seed_meta_task(&covey, "meta-1", "safe prompt", "planning", 1, 1);
+    let events_before = covey.fetch_events(0, 1_000).expect("events before").len();
+
+    let page = covey.list_meta_tasks(50, 0).expect("list");
+    let json = serde_json::to_string(&page).expect("serialize summaries");
+    assert!(json.contains("safe prompt"));
+    assert!(!json.contains("session-creator"));
+    assert!(!json.contains("created_by"));
+
+    let events_after = covey.fetch_events(0, 1_000).expect("events after").len();
+    assert_eq!(events_after, events_before);
+}
+
+#[rstest::rstest]
+#[case(0, 0, false)]
+#[case(500, 0, true)]
+#[case(501, 0, false)]
+#[case(10, u64::MAX, false)]
+#[case(10, u64::try_from(i64::MAX).expect("i64 boundary fits u64"), true)]
+#[case(10, u64::try_from(i64::MAX).expect("i64 boundary fits u64") + 1, false)]
+fn list_meta_tasks_bounds_are_enforced(
+    #[case] limit: usize,
+    #[case] offset: u64,
+    #[case] valid: bool,
+) {
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    let result = covey.list_meta_tasks(limit, offset);
+    if valid {
+        assert!(
+            result.is_ok(),
+            "limit={limit} offset={offset} must be accepted"
+        );
+        if limit == 10 && offset == u64::try_from(i64::MAX).expect("i64 boundary fits u64") {
+            assert_eq!(
+                result.expect("max offset is a valid empty page"),
+                Vec::new(),
+                "the largest valid offset must page past the end without erroring"
+            );
+        }
+    } else {
+        assert!(
+            matches!(result, Err(CoveyError::TypeValidationError(..))),
+            "limit={limit} offset={offset} must be rejected"
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case(1, 0)]
+#[case(2, 1)]
+#[case(3, 2)]
+#[case(1, 4)]
+fn list_meta_tasks_offsets_slice_the_canonical_order(#[case] limit: usize, #[case] offset: usize) {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    let clock = Arc::new(ManualClock::new(TEST_WALL_NOW_MS));
+    let covey = Covey::open_in_memory_with_clock(clock).expect("open in-memory covey");
+    for index in 1..=5 {
+        seed_meta_task(
+            &covey,
+            &format!("meta-{index}"),
+            "seeded",
+            "planning",
+            i64::from(index),
+            i64::from(index),
+        );
+    }
+    let canonical: Vec<String> = covey
+        .list_meta_tasks(500, 0)
+        .expect("canonical order")
+        .iter()
+        .map(|summary| summary.meta_task_id().as_str().to_owned())
+        .collect();
+
+    TestRunner::new(Config::with_cases(16))
+        .run(&(offset..=canonical.len()), |window_offset| {
+            let page: Vec<String> = covey
+                .list_meta_tasks(
+                    limit,
+                    u64::try_from(window_offset).expect("offset fits u64"),
+                )
+                .expect("page")
+                .iter()
+                .map(|summary| summary.meta_task_id().as_str().to_owned())
+                .collect();
+            let expected: Vec<String> = canonical
+                .iter()
+                .skip(window_offset)
+                .take(limit)
+                .cloned()
+                .collect();
+            prop_assert_eq!(page, expected);
+            Ok(())
+        })
+        .expect("static pagination windows match the canonical order");
+}

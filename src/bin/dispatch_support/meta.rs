@@ -35,5 +35,9 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             let status = store.meta_task_status(&args.meta_task_id)?;
             Ok(Rendered::pretty(&status))
         }
+        MetaCommand::List(args) => {
+            let summaries = store.list_meta_tasks(args.limit as usize, args.offset)?;
+            Ok(Rendered::pretty(&summaries))
+        }
     }
 }

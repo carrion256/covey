@@ -10,12 +10,13 @@ use super::{
     AgentPrincipalId, ApplyGateBlocker, ApplyGateBlockerKind, Artifact, ArtifactDigest,
     ArtifactKind, ArtifactManifestPath, AttemptOutcome, BaseRev, ChangedPathsDigest, Claim,
     ClaimId, CompletionPolicy, EvidencePolicy, FailedReviewVerdict, FenceSeq, FindingsDigest,
-    MetaTask, MetaTaskId, OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker, ProseTasksetId,
-    QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef, RepoopsPath, Review, ReviewId,
-    ReviewState, ReviewTarget, ReviewVerdict, RoutingKey, Session, SessionToken,
-    SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget, Subtask, SubtaskId,
-    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskTitle,
-    TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness, VcsWorkspaceState, VerifierId,
+    MetaTask, MetaTaskId, MetaTaskState, OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker,
+    PromptText, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef,
+    RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict, RoutingKey, Session,
+    SessionToken, SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget, Subtask,
+    SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState,
+    SubtaskTitle, TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness, VcsWorkspaceState,
+    VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -931,6 +932,75 @@ impl TryFrom<RawMetaTaskStatus> for MetaTaskStatus {
 
     fn try_from(raw: RawMetaTaskStatus) -> Result<Self, Self::Error> {
         Self::new(raw.meta_task, raw.subtasks)
+    }
+}
+
+/// Safe read projection of a meta-task for discovery listings.
+///
+/// Deliberately omits the creator session token.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MetaTaskSummary {
+    meta_task_id: MetaTaskId,
+    prompt_text: PromptText,
+    state: MetaTaskState,
+    created_at: TimestampMs,
+    updated_at: TimestampMs,
+}
+
+impl MetaTaskSummary {
+    /// Builds a summary from validated storage values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `updated_at` predates `created_at`.
+    pub fn try_new(
+        meta_task_id: MetaTaskId,
+        prompt_text: PromptText,
+        state: MetaTaskState,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<Self, String> {
+        if updated_at < created_at {
+            return Err("meta-task updated_at must be greater than or equal to created_at".into());
+        }
+        Ok(Self {
+            meta_task_id,
+            prompt_text,
+            state,
+            created_at,
+            updated_at,
+        })
+    }
+
+    /// Returns the meta-task id.
+    #[must_use]
+    pub const fn meta_task_id(&self) -> &MetaTaskId {
+        &self.meta_task_id
+    }
+
+    /// Returns the meta-task prompt text.
+    #[must_use]
+    pub const fn prompt_text(&self) -> &PromptText {
+        &self.prompt_text
+    }
+
+    /// Returns the meta-task lifecycle state.
+    #[must_use]
+    pub const fn state(&self) -> MetaTaskState {
+        self.state
+    }
+
+    /// Returns the creation timestamp.
+    #[must_use]
+    pub const fn created_at(&self) -> TimestampMs {
+        self.created_at
+    }
+
+    /// Returns the last-update timestamp.
+    #[must_use]
+    pub const fn updated_at(&self) -> TimestampMs {
+        self.updated_at
     }
 }
 

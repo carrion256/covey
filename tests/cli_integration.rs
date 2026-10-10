@@ -3856,3 +3856,98 @@ fn subtask_claim_reports_typed_failures() {
             .contains(&subtask_id_2)
     );
 }
+
+fn seed_cli_meta_tasks(db: &Path) {
+    success_data(&run_db(db, &["meta", "list"]));
+    let conn = Connection::open(db).expect("open seeded covey db");
+    conn.execute(
+        "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
+         VALUES ('session-creator', 'creator', 'creator-1', 'orchestrator', 'active', NULL, 1, 1, 1, 1)",
+        [],
+    )
+    .expect("insert creator session");
+    for (id, created_at) in [("meta-1", 100_i64), ("meta-2", 200), ("meta-3", 200)] {
+        conn.execute(
+            "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
+             VALUES (?1, ?2, 'planning', 'session-creator', ?3, ?3)",
+            params![id, format!("prompt {id}"), created_at],
+        )
+        .expect("seed meta task");
+    }
+}
+
+fn count_events(db: &Path) -> i64 {
+    let conn = Connection::open(db).expect("open seeded covey db");
+    conn.query_row("SELECT COUNT(*) FROM event_log", [], |row| row.get(0))
+        .expect("count events")
+}
+
+#[test]
+fn meta_list_returns_empty_array_for_empty_db() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let data = success_data(&run_db(&db, &["meta", "list"]));
+    assert_eq!(data, Value::Array(Vec::new()));
+}
+
+#[test]
+fn meta_list_pages_and_omits_creator_tokens() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    seed_cli_meta_tasks(&db);
+
+    let events_before = count_events(&db);
+
+    let page = success_data(&run_db(&db, &["meta", "list"]));
+    assert_eq!(page[0]["meta_task_id"], "meta-3");
+    assert_eq!(page[1]["meta_task_id"], "meta-2");
+    assert_eq!(page[2]["meta_task_id"], "meta-1");
+    assert_eq!(page[0]["prompt_text"], "prompt meta-3");
+    assert_eq!(page[0]["state"], "planning");
+    assert_eq!(page[0]["created_at"], 200);
+    assert_eq!(page[0]["updated_at"], 200);
+    assert_eq!(page.as_array().expect("data array").len(), 3);
+    assert!(!page.to_string().contains("session-creator"));
+
+    let bounded = success_data(&run_db(
+        &db,
+        &["meta", "list", "--limit", "2", "--offset", "2"],
+    ));
+    assert_eq!(bounded.as_array().expect("page array").len(), 1);
+    assert_eq!(bounded[0]["meta_task_id"], "meta-1");
+
+    let events_after = count_events(&db);
+    assert_eq!(events_after, events_before);
+}
+
+#[test]
+fn meta_list_rejects_invalid_bounds() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    seed_cli_meta_tasks(&db);
+
+    let zero_limit = run_db(&db, &["meta", "list", "--limit", "0"]);
+    assert_eq!(zero_limit.status.code(), Some(2));
+    assert_eq!(stderr_code(&zero_limit), "invalid_args");
+
+    let over_limit = run_db(&db, &["meta", "list", "--limit", "501"]);
+    assert_eq!(over_limit.status.code(), Some(2));
+    assert_eq!(stderr_code(&over_limit), "invalid_args");
+
+    let negative_offset = run_db(&db, &["meta", "list", "--offset", "-1"]);
+    assert_eq!(negative_offset.status.code(), Some(2));
+
+    let max_offset = format!("{}", i64::MAX);
+    let max_page = run_db(&db, &["meta", "list", "--offset", &max_offset]);
+    assert_eq!(max_page.status.code(), Some(0));
+    assert_eq!(
+        success_data(&max_page),
+        Value::Array(Vec::new()),
+        "the largest valid offset must page past the end without erroring"
+    );
+
+    let past_max_offset = format!("{}", i64::MAX as u64 + 1);
+    let invalid = run_db(&db, &["meta", "list", "--offset", &past_max_offset]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert_eq!(stderr_code(&invalid), "invalid_args");
+}

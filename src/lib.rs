@@ -48,7 +48,7 @@ pub use model::{
     ImportProseReq, ImportProseResult, ImportProseTaskReq, InFlightReadyQueueItem,
     InProgressReview, LandedCommitOid, LandingAuthorizationStatus, LeaseDeadlineMs,
     LeaseDurationMs, MarkAppliedReq, MarkApplyWorktreeStateReq, MarkInFlightReq, MetaTask,
-    MetaTaskId, MetaTaskState, MetaTaskStatus, ModelId, ObjectType, ObserveVcsWorkspaceReq,
+    MetaTaskId, MetaTaskState, MetaTaskStatus, MetaTaskSummary, ModelId, ObjectType,
     OpenSpecArchiveBlockedReason, OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish,
     OpenSpecArchiveEligibility, OpenSpecArchiveStatus, OpenSpecArchiveStatusState,
     OpenSpecChangeId, OpenSpecCurrentWork, OpenSpecCurrentWorkBlocker,

@@ -400,6 +400,19 @@ config is supplied); an explicit key reads only that exact route. They do not
 create claims, advance fences, lease queue items, append events, or perform
 lifecycle transitions.
 
+Worklist discovery is also read-only:
+
+```bash
+covey meta list --limit 50 --offset 0
+```
+
+`meta list` returns a deterministic page of safe meta-task summaries
+(`meta_task_id`, `prompt_text`, `state`, `created_at`, `updated_at`) newest
+first, ordered by `created_at DESC, meta_task_id DESC`. `--limit` defaults
+to 50 and accepts 1–500; `--offset` defaults to 0 and must be non-negative.
+Summaries never expose the creator session token, and listing writes no
+domain events.
+
 Apply-queue reconciliation is an explicit write path for operator and scheduler
 bootstrap:
 

@@ -9,11 +9,11 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimState, EventType, MetaTaskState, MetaTaskStatus, ObjectType, ReadyQueueState,
-        SessionRole, SubtaskState, claim_state_name, meta_task_state_name, ready_queue_state_name,
-        subtask_state_name,
+        ClaimState, CoveyTypeValidationError, EventType, MetaTaskState, MetaTaskStatus,
+        MetaTaskSummary, ObjectType, ReadyQueueState, SessionRole, SubtaskState, claim_state_name,
+        meta_task_state_name, ready_queue_state_name, subtask_state_name,
     },
-    queries::{load_meta_task_tx, load_subtasks_for_meta_task_tx},
+    queries::{load_meta_task_summaries_tx, load_meta_task_tx, load_subtasks_for_meta_task_tx},
     store::{append_session_event, load_claims_for_meta_task},
     validators::{
         MAX_OBJECT_ID_LEN, MAX_PROMPT_LEN, ensure_length, ensure_transition, require_role,
@@ -185,6 +185,39 @@ impl Covey {
             started_at,
             &result,
             |status| vec![format!("meta_task:{}", status.meta_task().meta_task_id)],
+        );
+        result
+    }
+
+    /// Returns a bounded page of meta-tasks ordered newest-created first.
+    ///
+    /// The returned summaries never contain creator session tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `limit` is outside `1..=500` or `offset`
+    /// exceeds the SQLite signed 64-bit range.
+    pub fn list_meta_tasks(&self, limit: usize, offset: u64) -> Result<Vec<MetaTaskSummary>> {
+        const MAX_LIST_LIMIT: usize = 500;
+        if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+            return Err(CoveyTypeValidationError::new("limit", "must be between 1 and 500").into());
+        }
+        let offset = i64::try_from(offset).map_err(|_| {
+            CoveyTypeValidationError::new("offset", "exceeds the maximum page offset")
+        })?;
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| load_meta_task_summaries_tx(tx, limit, offset));
+        self.log_operation(
+            "list_meta_tasks",
+            "system",
+            started_at,
+            &result,
+            |summaries| {
+                summaries
+                    .iter()
+                    .map(|summary| format!("meta_task:{}", summary.meta_task_id()))
+                    .collect()
+            },
         );
         result
     }

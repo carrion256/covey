@@ -16,6 +16,7 @@ pub(crate) enum MetaCommand {
     Submit(SubmitMetaArgs),
     Cancel(CancelMetaArgs),
     Status(MetaStatusArgs),
+    List(MetaListArgs),
 }
 #[derive(Args, Debug)]
 pub(crate) struct RegisterSessionArgs {
@@ -109,6 +110,14 @@ pub(crate) struct CancelMetaArgs {
 pub(crate) struct MetaStatusArgs {
     #[arg(long)]
     pub(crate) meta_task_id: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct MetaListArgs {
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=500))]
+    pub(crate) limit: u64,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) offset: u64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

@@ -7,7 +7,7 @@ use serde_rusqlite::from_row;
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, Event, MetaTask,
+        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, Event, MetaTask, MetaTaskSummary,
         MutationIdempotencyRecord, ObjectType, OpenSpecImportProvenance,
         OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
         ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
@@ -142,6 +142,29 @@ pub(crate) fn load_meta_task_tx(tx: &Transaction<'_>, meta_task_id: &str) -> Res
         ),
         CoveyError::MetaTaskNotFound,
     )
+}
+
+pub(crate) fn map_meta_task_summary_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MetaTaskSummary> {
+    let state = parse_enum(row.get::<_, String>(2)?)?;
+    MetaTaskSummary::try_new(row.get(0)?, row.get(1)?, state, row.get(3)?, row.get(4)?)
+        .map_err(to_sql_err)
+}
+
+pub(crate) fn load_meta_task_summaries_tx(
+    tx: &Transaction<'_>,
+    limit: usize,
+    offset: i64,
+) -> Result<Vec<MetaTaskSummary>> {
+    let mut stmt = tx.prepare(
+        "SELECT meta_task_id, prompt_text, state, created_at, updated_at
+         FROM meta_tasks
+         ORDER BY created_at DESC, meta_task_id DESC
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(params![limit as i64, offset], map_meta_task_summary_row)?;
+    collect_rows(rows)
 }
 
 pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<SubtaskRow> {
