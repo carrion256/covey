@@ -166,6 +166,49 @@ pub(crate) fn subtask_exists(tx: &Transaction<'_>, subtask_id: &str) -> Result<b
     Ok(exists.is_some())
 }
 
+/// Upper bound on dependency edges one created subtask may declare.
+pub(crate) const MAX_SUBTASK_DEPENDENCIES: usize = 64;
+
+/// Collapses repeat dependency ids while keeping first-seen order, so the same
+/// dependency set always produces the same request bytes and one row per edge.
+pub(crate) fn dedupe_subtask_dependencies(dependencies: &[SubtaskId]) -> Vec<SubtaskId> {
+    let mut deduped: Vec<SubtaskId> = Vec::with_capacity(dependencies.len());
+    for dependency in dependencies {
+        if !deduped.contains(dependency) {
+            deduped.push(dependency.clone());
+        }
+    }
+    deduped
+}
+
+/// Normalizes and validates the dependency list of a subtask being created.
+///
+/// A subtask created here has no dependents yet, so a dependency cycle cannot
+/// appear at create time; the existing claim-time satisfaction gate is the only
+/// place ordering is enforced. Dependencies in any state and on any other
+/// meta-task are accepted: no extra governance is applied here.
+pub(crate) fn normalize_subtask_dependencies(
+    subtask_id: &SubtaskId,
+    dependencies: &[SubtaskId],
+) -> Result<Vec<SubtaskId>> {
+    let deduped = dedupe_subtask_dependencies(dependencies);
+    if deduped.len() > MAX_SUBTASK_DEPENDENCIES {
+        return Err(CoveyError::InvalidSubtaskDependency {
+            reason: format!(
+                "subtask {subtask_id} declares {} dependencies; the maximum is \
+                 {MAX_SUBTASK_DEPENDENCIES}",
+                deduped.len()
+            ),
+        });
+    }
+    if deduped.iter().any(|dependency| dependency == subtask_id) {
+        return Err(CoveyError::InvalidSubtaskDependency {
+            reason: format!("subtask {subtask_id} cannot depend on itself"),
+        });
+    }
+    Ok(deduped)
+}
+
 pub(crate) fn held_claim_owner(
     tx: &Transaction<'_>,
     subtask_id: &str,

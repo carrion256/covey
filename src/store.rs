@@ -526,56 +526,68 @@ fn meta_task_is_claimable(tx: &Transaction<'_>, meta_task_id: &str) -> Result<bo
     ))
 }
 
+/// SQL fragment over the alias `dep`: the claim-gate verdict for one
+/// dependency edge. A dependency counts once it has reached the terminal state
+/// its own completion policy requires, or once one of its repair follow-ups
+/// (directly or through a follow-up chain) reached its own.
+///
+/// This is the single statement of the dependency satisfaction law. Both the
+/// claim gate below and the `subtask status` dependency view are built from
+/// it, so the two can never disagree.
+pub(crate) const DEPENDENCY_SATISFIED_SQL: &str = r#"
+    (
+        (dep.kind = 'review' AND dep.state = 'decided')
+        OR (dep.completion_policy = 'canonical_apply' AND dep.state = 'applied')
+        OR (
+            dep.completion_policy IN ('direct', 'reviewed')
+            AND dep.state = 'completed'
+        )
+    )
+    OR EXISTS (
+        WITH RECURSIVE followup_chain(followup_subtask_id) AS (
+            SELECT f.followup_subtask_id
+            FROM review_followup_subtasks f
+            WHERE f.source_subtask_id = dep.subtask_id
+            UNION
+            SELECT f.followup_subtask_id
+            FROM review_followup_subtasks f
+            JOIN followup_chain chain
+              ON f.source_subtask_id = chain.followup_subtask_id
+        )
+        SELECT 1
+        FROM followup_chain chain
+        JOIN subtasks followup
+          ON followup.subtask_id = chain.followup_subtask_id
+        WHERE (followup.kind = 'review' AND followup.state = 'decided')
+           OR (
+               followup.completion_policy = 'canonical_apply'
+               AND followup.state = 'applied'
+           )
+           OR (
+               followup.completion_policy IN ('direct', 'reviewed')
+               AND followup.state = 'completed'
+           )
+    )
+"#;
+
 pub(crate) fn subtask_dependencies_satisfied(
     tx: &Transaction<'_>,
     subtask_id: &str,
 ) -> Result<bool> {
-    let has_unsatisfied = tx.query_row(
+    let sql = format!(
         r#"
         SELECT EXISTS (
             SELECT 1
             FROM subtask_dependencies d
             JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
             WHERE d.subtask_id = ?1
-              AND NOT (
-                  (dep.kind = 'review' AND dep.state = 'decided')
-                  OR (dep.completion_policy = 'canonical_apply' AND dep.state = 'applied')
-                  OR (
-                      dep.completion_policy IN ('direct', 'reviewed')
-                      AND dep.state = 'completed'
-                  )
-              )
-              AND NOT EXISTS (
-                  WITH RECURSIVE followup_chain(followup_subtask_id) AS (
-                      SELECT f.followup_subtask_id
-                      FROM review_followup_subtasks f
-                      WHERE f.source_subtask_id = dep.subtask_id
-                      UNION
-                      SELECT f.followup_subtask_id
-                      FROM review_followup_subtasks f
-                      JOIN followup_chain chain
-                        ON f.source_subtask_id = chain.followup_subtask_id
-                  )
-                  SELECT 1
-                  FROM followup_chain chain
-                  JOIN subtasks followup
-                    ON followup.subtask_id = chain.followup_subtask_id
-                  WHERE (followup.kind = 'review' AND followup.state = 'decided')
-                     OR (
-                         followup.completion_policy = 'canonical_apply'
-                         AND followup.state = 'applied'
-                     )
-                     OR (
-                         followup.completion_policy IN ('direct', 'reviewed')
-                         AND followup.state = 'completed'
-                     )
-              )
+              AND NOT ({})
             LIMIT 1
         )
         "#,
-        params![subtask_id],
-        |row| row.get::<_, i64>(0),
-    )?;
+        DEPENDENCY_SATISFIED_SQL
+    );
+    let has_unsatisfied = tx.query_row(&sql, params![subtask_id], |row| row.get::<_, i64>(0))?;
     Ok(has_unsatisfied == 0)
 }
 

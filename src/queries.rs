@@ -11,8 +11,9 @@ use crate::{
         MutationIdempotencyRecord, ObjectType, OpenSpecImportProvenance,
         OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
         ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
-        SubtaskRow, TimestampMs, claim_state_name, object_type_name, parse_generated_members,
-        reservation_state_name, session_state_name,
+        SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState, TimestampMs,
+        claim_state_name, object_type_name, parse_generated_members, reservation_state_name,
+        session_state_name,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -176,6 +177,34 @@ pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<
         ),
         CoveyError::SubtaskNotFound,
     )
+}
+
+/// Reads the dependency edges of one subtask together with the claim-gate
+/// verdict, built from the same `store::DEPENDENCY_SATISFIED_SQL` predicate the
+/// scheduler applies, so `subtask status` can never disagree with claimability.
+pub(crate) fn load_subtask_dependencies_tx(
+    tx: &Transaction<'_>,
+    subtask_id: &str,
+) -> Result<Vec<SubtaskDependencyStatus>> {
+    let sql = format!(
+        r#"
+        SELECT d.depends_on_subtask_id, dep.state, ({}) AS satisfied
+        FROM subtask_dependencies d
+        JOIN subtasks dep ON dep.subtask_id = d.depends_on_subtask_id
+        WHERE d.subtask_id = ?1
+        ORDER BY d.created_at ASC, d.depends_on_subtask_id ASC
+        "#,
+        crate::store::DEPENDENCY_SATISFIED_SQL
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    let rows = stmt.query_map(params![subtask_id], |row| {
+        Ok(SubtaskDependencyStatus {
+            subtask_id: row.get::<_, SubtaskId>(0)?,
+            state: parse_enum::<SubtaskState>(row.get::<_, String>(1)?)?,
+            satisfied: row.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    collect_rows(rows)
 }
 
 pub(crate) fn load_claim_tx(tx: &Transaction<'_>, claim_id: &str) -> Result<Claim> {

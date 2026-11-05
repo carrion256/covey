@@ -1602,6 +1602,7 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
             subtask_id: None,
             title: SubtaskTitle::parse("generated").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
+            depends_on: Vec::new(),
             idempotency_key: id_key("create-generated-subtask"),
         })
         .expect("create generated subtask");
@@ -1613,6 +1614,7 @@ fn lifecycle_edge_paths_cover_empty_claim_duplicate_and_wrong_role(rig: Rig) {
             subtask_id: Some(covey::SubtaskId::parse(generated).expect("valid subtask id")),
             title: SubtaskTitle::parse("duplicate").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
+            depends_on: Vec::new(),
             idempotency_key: id_key("create-duplicate-subtask"),
         }),
         Err(CoveyError::DuplicateSubtaskId { .. })

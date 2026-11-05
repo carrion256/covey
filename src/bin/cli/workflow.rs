@@ -63,6 +63,10 @@ pub(crate) struct CreateSubtaskArgs {
     pub(crate) evidence_policy: Option<EvidencePolicyArg>,
     #[arg(long)]
     pub(crate) routing_key: Option<String>,
+    /// Subtask ids that must reach their terminal state before this subtask may
+    /// be claimed. Repeat the flag to declare more than one dependency.
+    #[arg(long = "depends-on", value_name = "SUBTASK_ID", action = clap::ArgAction::Append)]
+    pub(crate) depends_on: Vec<String>,
 }
 
 #[derive(Args, Debug)]

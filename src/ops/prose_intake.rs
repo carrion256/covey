@@ -207,6 +207,7 @@ fn import_prose_tx(
             completion_policy: CompletionPolicy::CanonicalApply,
             routing_key: routing_key.clone(),
             evidence_policy: crate::model::EvidencePolicy::Required,
+            depends_on: Vec::new(),
             idempotency_key: crate::model::IdempotencyKey::parse(format!(
                 "{}:create-subtask:{index}",
                 req.idempotency_key.as_str()

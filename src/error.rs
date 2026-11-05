@@ -97,6 +97,13 @@ pub enum CoveyError {
     ArtifactDigestCollision { digest: String },
     #[error("duplicate subtask id {subtask_id}")]
     DuplicateSubtaskId { subtask_id: SubtaskId },
+    #[error("dependency subtask {depends_on_subtask_id} not found for subtask {subtask_id}")]
+    SubtaskDependencyNotFound {
+        subtask_id: SubtaskId,
+        depends_on_subtask_id: SubtaskId,
+    },
+    #[error("invalid subtask dependency: {reason}")]
+    InvalidSubtaskDependency { reason: String },
 
     #[error("operation {operation} is not allowed for completion policy {policy}")]
     CompletionPolicyViolation {
@@ -216,14 +223,15 @@ impl PartialEq for CoveyError {
             ImportSourceNotFound, InputTooLarge, InvalidEventShape, InvalidIdempotencyKey,
             InvalidImportDestination, InvalidImportRow, InvalidLeaseDuration,
             InvalidObservabilityRow, InvalidPath, InvalidReadyQueueMetrics,
-            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema, LeaseExpired,
-            MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
-            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
-            ReviewKindMismatch, ReviewNotFound, RuntimeAttestationMissing,
-            SeparationOfDutiesViolation, SerializationError, SessionAlreadyActive,
-            SessionAlreadyHasActiveSubtask, SessionNotActive, SessionNotFound, StaleFenceToken,
-            StaleReviewArtifact, SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError,
-            UnknownArtifactDigest, WrongRole,
+            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema,
+            InvalidSubtaskDependency, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
+            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
+            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
+            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
+            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
+            SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
+            WrongRole,
         };
 
         match (self, other) {
@@ -413,6 +421,16 @@ impl PartialEq for CoveyError {
                 },
             ) => left_subtask_id == right_subtask_id,
             (
+                SubtaskDependencyNotFound {
+                    subtask_id: left_subtask_id,
+                    depends_on_subtask_id: left_dependency,
+                },
+                SubtaskDependencyNotFound {
+                    subtask_id: right_subtask_id,
+                    depends_on_subtask_id: right_dependency,
+                },
+            ) => left_subtask_id == right_subtask_id && left_dependency == right_dependency,
+            (
                 CompletionPolicyViolation {
                     operation: left_operation,
                     policy: left_policy,
@@ -595,6 +613,14 @@ impl PartialEq for CoveyError {
                     reason: left_reason,
                 },
                 InvalidObservabilityRow {
+                    reason: right_reason,
+                },
+            )
+            | (
+                InvalidSubtaskDependency {
+                    reason: left_reason,
+                },
+                InvalidSubtaskDependency {
                     reason: right_reason,
                 },
             ) => left_reason == right_reason,

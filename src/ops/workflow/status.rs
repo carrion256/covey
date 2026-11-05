@@ -13,7 +13,8 @@ use crate::{
     },
     queries::{
         load_artifact_tx, load_attempt_outcomes_for_subtask_tx, load_claim_tx,
-        load_queue_items_for_subtask_tx, load_reviews_for_subtask_tx, load_subtask_tx,
+        load_queue_items_for_subtask_tx, load_reviews_for_subtask_tx, load_subtask_dependencies_tx,
+        load_subtask_tx,
     },
 };
 
@@ -37,6 +38,7 @@ impl Covey {
             let reviews = load_reviews_for_subtask_tx(tx, subtask_id)?;
             let ready_queue = load_queue_items_for_subtask_tx(tx, subtask_id)?;
             let landing_receipt_recorded = landing_receipt_exists_for_subtask_tx(tx, subtask_id)?;
+            let dependencies = load_subtask_dependencies_tx(tx, subtask_id)?;
             SubtaskStatus::new_with_landing_receipt_and_attempt_outcomes(
                 SubtaskView::try_from(subtask)?,
                 claim,
@@ -46,6 +48,7 @@ impl Covey {
                 ready_queue,
                 landing_receipt_recorded,
             )
+            .map(|status| status.with_dependencies(dependencies))
             .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation("subtask_status", "system", started_at, &result, |status| {

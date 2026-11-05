@@ -5874,6 +5874,7 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
         subtask_id: Some(SubtaskId::parse("subtask-1").expect("valid subtask id")),
         title: SubtaskTitle::parse("implement").expect("valid subtask title"),
         priority: SubtaskPriority::parse(10).expect("valid subtask priority"),
+        depends_on: Vec::new(),
         idempotency_key: IdempotencyKey::parse("idem-create").expect("valid idempotency key"),
     };
     let create_work = CreateWorkSubtaskReq::try_from_raw_parts(

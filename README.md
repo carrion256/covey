@@ -423,6 +423,23 @@ covey queue reconcile-apply --session-token <orch-or-apply-gate-session>
 It advances approved artifacts to `ready_for_apply` and enqueues missing
 ready-for-apply items exactly once.
 
+### Subtask Dependencies
+
+`subtask create --depends-on` declares prerequisite subtasks. Repeat the flag
+for more than one; a dependency may live in any meta-task and be in any state.
+
+```bash
+covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "integrate"
+covey subtask create --session-token <orch-session> --meta-task-id <meta-task> \
+  --title "integrate" --depends-on <subtask-a> --depends-on <subtask-b>
+```
+
+Dependencies gate CLAIMING only: they delay when a subtask becomes claimable and
+add no review, evidence, or other requirement. Unknown or self-referential
+dependencies are rejected and nothing is created. `subtask status` reports the
+declared edges under `dependencies`, each with the dependency's state and
+whether it currently satisfies the claim gate.
+
 ### OpenSpec Import
 
 `covey import openspec` maps one OpenSpec change into deterministic Covey task state. For

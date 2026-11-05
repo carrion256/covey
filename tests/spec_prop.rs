@@ -56,6 +56,7 @@ fn seed_single_work_subtask(covey: &Covey) -> String {
             subtask_id: Some(covey::SubtaskId::parse("work").expect("valid subtask id")),
             title: SubtaskTitle::parse("work").expect("valid subtask title"),
             priority: covey::SubtaskPriority::parse(1).expect("valid subtask priority"),
+            depends_on: Vec::new(),
             idempotency_key: id_key("create-subtask"),
         })
         .expect("create work");
@@ -91,6 +92,7 @@ fn seed_two_work_subtasks(covey: &Covey) {
                 subtask_id: Some(covey::SubtaskId::parse(subtask_id).expect("valid subtask id")),
                 title: SubtaskTitle::parse(subtask_id).expect("valid subtask title"),
                 priority: covey::SubtaskPriority::parse(priority).expect("valid subtask priority"),
+                depends_on: Vec::new(),
                 idempotency_key: id_key("create-subtask"),
             })
             .expect("create work");

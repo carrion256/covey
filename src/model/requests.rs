@@ -33,6 +33,19 @@ fn parse_idempotency_key(
     IdempotencyKey::parse(value.into())
 }
 
+/// Parses declared dependency ids, collapsing repeats while keeping first-seen
+/// order so the same dependency set always yields the same request bytes (and
+/// therefore the same idempotency request hash).
+fn parse_subtask_dependency_ids(
+    values: &[String],
+) -> Result<Vec<SubtaskId>, CoveyTypeValidationError> {
+    let mut parsed: Vec<SubtaskId> = Vec::with_capacity(values.len());
+    for value in values {
+        parsed.push(SubtaskId::parse(value.clone())?);
+    }
+    Ok(crate::validators::dedupe_subtask_dependencies(&parsed))
+}
+
 /// Request to record a prose-lane apply blocker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordProseApplyBlockerReq {
@@ -547,6 +560,12 @@ pub struct CreateSubtaskRequest {
     pub subtask_id: Option<SubtaskId>,
     pub title: SubtaskTitle,
     pub priority: SubtaskPriority,
+    /// Subtasks that must reach their terminal state before this one may be
+    /// claimed. Dependencies gate claiming only; they add no review or
+    /// evidence requirement. An empty list stays out of the serialized
+    /// request, so existing requests keep their idempotency request hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<SubtaskId>,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -571,8 +590,27 @@ impl CreateSubtaskRequest {
             subtask_id: subtask_id.map(SubtaskId::parse).transpose()?,
             title: SubtaskTitle::parse(title.into())?,
             priority: SubtaskPriority::parse(priority)?,
+            depends_on: Vec::new(),
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+
+    /// Declares the subtasks that must reach their terminal state before this
+    /// one may be claimed, replacing any previously declared list.
+    ///
+    /// Repeats collapse in first-seen order. The dependency ids are validated
+    /// here; whether each one exists, is not this subtask itself, and stays
+    /// within the count limit is decided inside the creation transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a dependency id is not a valid subtask id.
+    pub fn try_with_dependencies(
+        mut self,
+        depends_on: &[String],
+    ) -> Result<Self, CoveyTypeValidationError> {
+        self.depends_on = parse_subtask_dependency_ids(depends_on)?;
+        Ok(self)
     }
 }
 
@@ -590,6 +628,12 @@ pub struct CreateWorkSubtaskReq {
     /// Older serialized requests without this field retain required evidence.
     #[serde(default = "super::records::default_evidence_policy")]
     pub evidence_policy: EvidencePolicy,
+    /// Subtasks that must reach their terminal state before this one may be
+    /// claimed. Dependencies gate claiming only; they add no review or
+    /// evidence requirement. An empty list stays out of the serialized
+    /// request, so existing requests keep their idempotency request hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<SubtaskId>,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -620,8 +664,27 @@ impl CreateWorkSubtaskReq {
             completion_policy,
             routing_key: RoutingKey::parse(routing_key.into())?,
             evidence_policy: EvidencePolicy::Optional,
+            depends_on: Vec::new(),
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+
+    /// Declares the subtasks that must reach their terminal state before this
+    /// one may be claimed, replacing any previously declared list.
+    ///
+    /// Repeats collapse in first-seen order. The dependency ids are validated
+    /// here; whether each one exists, is not this subtask itself, and stays
+    /// within the count limit is decided inside the creation transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a dependency id is not a valid subtask id.
+    pub fn try_with_dependencies(
+        mut self,
+        depends_on: &[String],
+    ) -> Result<Self, CoveyTypeValidationError> {
+        self.depends_on = parse_subtask_dependency_ids(depends_on)?;
+        Ok(self)
     }
 }
 

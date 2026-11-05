@@ -16,9 +16,13 @@ use crate::{
     store::{append_session_event, refresh_meta_task_state},
     validators::{
         MAX_OBJECT_ID_LEN, MAX_TITLE_LEN, ensure_length, ensure_meta_task_exists,
-        ensure_meta_task_is_schedulable, subtask_exists,
+        ensure_meta_task_is_schedulable, normalize_subtask_dependencies, subtask_exists,
     },
 };
+
+/// Provenance recorded in `subtask_dependencies.source_ref` by the create path,
+/// which is the local CLI's writer (importers record their own source refs).
+const DEPENDENCY_SOURCE_REF: &str = "cli";
 
 impl Covey {
     /// Creates work using the opened workflow profile.
@@ -35,6 +39,7 @@ impl Covey {
             completion_policy: self.workflow.completion_policy,
             routing_key: self.workflow.routing_key.clone(),
             evidence_policy: self.workflow.evidence_policy,
+            depends_on: req.depends_on,
             idempotency_key: req.idempotency_key,
         })
     }
@@ -69,7 +74,7 @@ pub(crate) fn create_work_subtask_tx(
     req: &CreateWorkSubtaskReq,
     now: i64,
 ) -> Result<String> {
-    insert_work_subtask_tx(
+    let subtask_id = insert_work_subtask_tx(
         tx,
         req.session_token.as_str(),
         &req.meta_task_id,
@@ -82,7 +87,50 @@ pub(crate) fn create_work_subtask_tx(
         req,
         req.evidence_policy,
         now,
-    )
+    )?;
+    let subtask_id = SubtaskId::parse(subtask_id.as_str())?;
+    insert_subtask_dependencies_tx(tx, &subtask_id, &req.depends_on, now)?;
+    Ok(subtask_id.to_string())
+}
+
+/// Records the declared dependency edges of a freshly created subtask in the
+/// same write transaction as its insert, so either everything commits or
+/// nothing does.
+///
+/// A subtask created here has no dependents yet, so no dependency cycle is
+/// possible at create time and no cycle machinery is needed: the existing
+/// claim-time satisfaction gate in `store::subtask_dependencies_satisfied` is
+/// the only place ordering is enforced. Dependencies may live on any meta-task
+/// and be in any state; the existing satisfaction rules decide claimability.
+fn insert_subtask_dependencies_tx(
+    tx: &Transaction<'_>,
+    subtask_id: &SubtaskId,
+    depends_on: &[SubtaskId],
+    now: i64,
+) -> Result<()> {
+    let dependencies = normalize_subtask_dependencies(subtask_id, depends_on)?;
+    for dependency in &dependencies {
+        if !subtask_exists(tx, dependency.as_str())? {
+            return Err(CoveyError::SubtaskDependencyNotFound {
+                subtask_id: subtask_id.clone(),
+                depends_on_subtask_id: dependency.clone(),
+            });
+        }
+        tx.execute(
+            r#"
+            INSERT INTO subtask_dependencies (
+                subtask_id, depends_on_subtask_id, source_ref, created_at
+            ) VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                subtask_id.as_str(),
+                dependency.as_str(),
+                DEPENDENCY_SOURCE_REF,
+                now,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

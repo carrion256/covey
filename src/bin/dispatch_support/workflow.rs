@@ -25,7 +25,8 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 args.routing_key
                     .unwrap_or_else(|| base.routing_key.to_string()),
                 idempotency_key,
-            )?;
+            )?
+            .try_with_dependencies(&args.depends_on)?;
             req.evidence_policy = args
                 .evidence_policy
                 .map(Into::into)
@@ -423,6 +424,7 @@ mod tests {
                     completion_policy: None,
                     routing_key: None,
                     evidence_policy: None,
+                    depends_on: Vec::new(),
                 }),
             )
             .expect("create subtask through dispatcher");
@@ -443,6 +445,7 @@ mod tests {
                 completion_policy: Some(CompletionPolicyArg::CanonicalApply),
                 routing_key: Some("mutai".to_owned()),
                 evidence_policy: None,
+                depends_on: Vec::new(),
             }),
         )
         .expect("create canonical work through dispatcher");

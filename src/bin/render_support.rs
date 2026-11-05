@@ -133,14 +133,15 @@ impl From<CoveyError> for ReportableError {
             ImportSourceNotFound, InputTooLarge, InvalidEventShape, InvalidIdempotencyKey,
             InvalidImportDestination, InvalidImportRow, InvalidLeaseDuration,
             InvalidObservabilityRow, InvalidPath, InvalidReadyQueueMetrics,
-            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema, LeaseExpired,
-            MetaTaskNotFound, MetaTaskUnavailable, MigrationError, NotClaimOwner,
-            NotQueueClaimOwner, QueueItemNotFound, ReservationNotFound, ReviewAlreadyOpen,
-            ReviewKindMismatch, ReviewNotFound, RuntimeAttestationMissing,
-            SeparationOfDutiesViolation, SerializationError, SessionAlreadyActive,
-            SessionAlreadyHasActiveSubtask, SessionNotActive, SessionNotFound, StaleFenceToken,
-            StaleReviewArtifact, SubtaskAlreadyClaimed, SubtaskNotFound, TypeValidationError,
-            UnknownArtifactDigest, WrongRole,
+            InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema,
+            InvalidSubtaskDependency, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
+            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
+            ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
+            RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
+            SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
+            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
+            SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
+            WrongRole,
         };
 
         match error {
@@ -155,6 +156,7 @@ impl From<CoveyError> for ReportableError {
             | ConflictNotFound
             | CurrentWorkBlockerNotFound { .. }
             | UnknownArtifactDigest { .. }
+            | SubtaskDependencyNotFound { .. }
             | ImportSourceNotFound { .. } => Self {
                 exit_code: 1,
                 code: "not_found",
@@ -172,6 +174,7 @@ impl From<CoveyError> for ReportableError {
             | InvalidEventShape { .. }
             | InvalidObservabilityRow { .. }
             | InvalidReadyQueueMetrics { .. }
+            | InvalidSubtaskDependency { .. }
             | AttemptEvidenceRequired { .. }
             | TypeValidationError(_) => Self {
                 exit_code: 2,

@@ -528,6 +528,19 @@ pub struct SubtaskStatus {
     reviews: Vec<Review>,
     ready_queue: Vec<ReadyQueueItem>,
     readiness: SubtaskReadinessStatus,
+    dependencies: Vec<SubtaskDependencyStatus>,
+}
+
+/// One declared dependency of a subtask together with the verdict the claim
+/// gate applies to it. `satisfied` is the same predicate the scheduler uses
+/// when deciding whether a subtask may be claimed: a dependency counts once it
+/// has reached the terminal state its own completion policy requires.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubtaskDependencyStatus {
+    pub subtask_id: SubtaskId,
+    pub state: SubtaskState,
+    pub satisfied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +562,8 @@ struct RawSubtaskStatus {
     ready_queue: Vec<ReadyQueueItem>,
     #[serde(default)]
     readiness: SubtaskReadinessStatus,
+    #[serde(default)]
+    dependencies: Vec<SubtaskDependencyStatus>,
 }
 
 impl SubtaskStatus {
@@ -647,6 +662,7 @@ impl SubtaskStatus {
             attempt_outcomes,
             reviews,
             ready_queue,
+            dependencies: Vec::new(),
         })
     }
 
@@ -682,6 +698,19 @@ impl SubtaskStatus {
     #[must_use]
     pub fn ready_queue(&self) -> &[ReadyQueueItem] {
         &self.ready_queue
+    }
+
+    /// Returns the declared dependencies with the claim-gate verdict the
+    /// scheduler applies to each of them.
+    #[must_use]
+    pub fn dependencies(&self) -> &[SubtaskDependencyStatus] {
+        &self.dependencies
+    }
+
+    /// Attaches the dependency edges read alongside the subtask.
+    pub fn with_dependencies(mut self, dependencies: Vec<SubtaskDependencyStatus>) -> Self {
+        self.dependencies = dependencies;
+        self
     }
 
     /// Returns the domain-specific readiness projection for this subtask.
@@ -834,6 +863,7 @@ impl From<&SubtaskStatus> for RawSubtaskStatus {
             reviews: status.reviews.clone(),
             ready_queue: status.ready_queue.clone(),
             readiness: status.readiness.clone(),
+            dependencies: status.dependencies.clone(),
         }
     }
 }
@@ -851,6 +881,7 @@ impl TryFrom<RawSubtaskStatus> for SubtaskStatus {
             raw.ready_queue,
             raw.readiness.landed,
         )
+        .map(|status| status.with_dependencies(raw.dependencies))
     }
 }
 
