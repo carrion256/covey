@@ -413,6 +413,31 @@ to 50 and accepts 1–500; `--offset` defaults to 0 and must be non-negative.
 Summaries never expose the creator session token, and listing writes no
 domain events.
 
+A meta task can carry one typed source backlink: where the intake request
+came from, instead of a `Backlink:` line inside `prompt_text`. The link is a
+side row (`thread_id`, `received_at`, an absolute `path`, optional `url`,
+`origin`, `linked_at`), never a prompt convention.
+
+```bash
+# Written with the task at intake: origin=submitted.
+covey meta submit --session-token <orch-session> --prompt-text "ship feature" \
+  --source-thread-id <thread> --source-received-at <receipt-stamp> \
+  --source-path /data/intake/notes.md --source-url https://example.test/thread/7
+
+# Attached later to an existing task: origin=backfilled, method required.
+covey meta link-source --session-token <orch-session> --meta-task-id <meta-task> \
+  --thread-id <thread> --received-at <receipt-stamp> \
+  --path /data/intake/notes.md --method "commander transcribed the message"
+```
+
+The three source fields on `meta submit` are all-or-none, and `--source-url`
+requires them; a partial set is a usage error. A link is set once: a task that
+already has one is refused with the `source_link_exists` error code, and both
+writers need the same orchestrator authority as `meta cancel`. `meta status
+--json` renders it as `data.meta_task.source_link`, or `null` when the task has
+none; the linking session is stored but never rendered. `meta list` is
+unchanged.
+
 Apply-queue reconciliation is an explicit write path for operator and scheduler
 bootstrap:
 

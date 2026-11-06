@@ -175,6 +175,7 @@ fn import_prose_tx(
         tx,
         req.session_token.as_str(),
         req.prompt_text.as_str(),
+        None,
         req,
         now,
     )?)?;

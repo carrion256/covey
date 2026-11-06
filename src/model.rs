@@ -50,10 +50,11 @@ pub(crate) use records::{MutationIdempotencyRecord, OverlapCandidate, SubtaskRow
 pub(crate) use state::{
     apply_gate_blocker_kind_name, apply_worktree_state_name, attempt_outcome_kind_name,
     claim_state_name, completion_policy_name, conflict_kind_name, conflict_resolution_state_name,
-    meta_task_state_name, object_type_name, openspec_archive_status_state_name,
-    ready_queue_state_name, reservation_state_name, review_state_name, review_verdict_name,
-    scope_class_name, session_state_name, settlement_reconcile_reason_name, subtask_kind_name,
-    subtask_state_name, vcs_packet_stack_entry_state_name, vcs_pr_publication_kind_name,
+    meta_task_source_link_origin_name, meta_task_state_name, object_type_name,
+    openspec_archive_status_state_name, ready_queue_state_name, reservation_state_name,
+    review_state_name, review_verdict_name, scope_class_name, session_state_name,
+    settlement_reconcile_reason_name, subtask_kind_name, subtask_state_name,
+    vcs_packet_stack_entry_state_name, vcs_pr_publication_kind_name,
     vcs_pr_publication_status_name, vcs_workspace_cleanliness_name, vcs_workspace_kind_name,
     vcs_workspace_state_name,
 };

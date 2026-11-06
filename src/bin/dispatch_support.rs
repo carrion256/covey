@@ -12,6 +12,7 @@ use covey::{
     AbandonSubtaskReq, ClaimNextReq, ClaimNextRoutedReq, ClaimReadyQueueReq, ClaimSubtaskReq,
     Covey, CreateWorkSubtaskReq, DecideReviewReq, EnqueueForApplyReq, ExitSessionReq,
     FailSubtaskReq, FinishSubtaskReq, HeartbeatReq, ImportBdV1Req, ImportOpenSpecReq,
+    LinkMetaTaskSourceReq,
     MarkAppliedReq, MarkInFlightReq, OpenSpecArchiveStatusState, OverlapQueryReq,
     PublishArtifactReq, ReconcileApplyQueueReq, RecordApplyGateBlockerReq,
     RecordApplyVerificationReq, RecordLandingReceiptReq, RecordOpenSpecArchiveStatusReq,

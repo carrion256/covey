@@ -1440,7 +1440,8 @@ fn meta_task_lifecycle_preserves_flat_state_shape() {
         "state": "active",
         "created_by": "session-1",
         "created_at": 100,
-        "updated_at": 101
+        "updated_at": 101,
+        "source_link": null
     });
 
     let meta_task: MetaTask =

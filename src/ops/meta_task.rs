@@ -9,11 +9,16 @@ use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimState, CoveyTypeValidationError, EventType, MetaTaskState, MetaTaskStatus,
+        ClaimState, CoveyTypeValidationError, EventType, LinkMetaTaskSourceReq,
+        MetaTaskSourceLinkDraft, MetaTaskSourceLinkProvenance, MetaTaskState, MetaTaskStatus,
         MetaTaskSummary, ObjectType, ReadyQueueState, SessionRole, SubtaskState, claim_state_name,
-        meta_task_state_name, ready_queue_state_name, subtask_state_name,
+        meta_task_source_link_origin_name, meta_task_state_name, ready_queue_state_name,
+        subtask_state_name,
     },
-    queries::{load_meta_task_summaries_tx, load_meta_task_tx, load_subtasks_for_meta_task_tx},
+    queries::{
+        load_meta_task_source_link_tx, load_meta_task_summaries_tx, load_meta_task_tx,
+        load_subtasks_for_meta_task_tx,
+    },
     store::{append_session_event, load_claims_for_meta_task},
     validators::{
         MAX_OBJECT_ID_LEN, MAX_PROMPT_LEN, ensure_length, ensure_transition, require_role,
@@ -32,7 +37,16 @@ impl Covey {
                 &req.idempotency_key,
                 &req,
                 crate::model::TimestampMs::parse(now)?,
-                || submit_meta_task_tx(tx, req.session_token.as_str(), &req.prompt_text, &req, now),
+                || {
+                    submit_meta_task_tx(
+                        tx,
+                        req.session_token.as_str(),
+                        &req.prompt_text,
+                        req.source_link.as_ref(),
+                        &req,
+                        now,
+                    )
+                },
             )
         });
         self.log_operation(
@@ -167,11 +181,41 @@ impl Covey {
         result
     }
 
+    /// Attaches an intake source backlink to an existing meta task.
+    ///
+    /// Provenance is set once: a meta task that already carries a link is
+    /// refused with [`CoveyError::SourceLinkExists`]. Replaying the same
+    /// idempotency key returns the original success without a second row.
+    pub fn link_meta_task_source(&self, req: crate::model::LinkMetaTaskSourceReq) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                &req.session_token,
+                "link_meta_task_source",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || link_meta_task_source_tx(tx, &req, now),
+            )
+        });
+        self.log_operation(
+            "link_meta_task_source",
+            &req.session_token,
+            started_at,
+            &result,
+            |_| vec![format!("meta_task:{}", req.meta_task_id)],
+        );
+        result
+    }
+
     /// Returns the current persisted status for a meta-task and its subtasks.
     pub fn meta_task_status(&self, meta_task_id: &str) -> Result<MetaTaskStatus> {
         let started_at = Instant::now();
         let result = self.with_read_tx(|tx| {
             let meta_task = load_meta_task_tx(tx, meta_task_id)?;
+            let source_link = load_meta_task_source_link_tx(tx, meta_task_id)?;
+            let meta_task = meta_task.with_source_link(source_link);
             let subtasks = load_subtasks_for_meta_task_tx(tx, meta_task_id)?
                 .into_iter()
                 .map(crate::model::SubtaskView::try_from)
@@ -227,6 +271,7 @@ pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
     tx: &Transaction<'_>,
     session_token: &str,
     prompt_text: &str,
+    source_link: Option<&MetaTaskSourceLinkDraft>,
     event_payload: &T,
     now: i64,
 ) -> Result<String> {
@@ -246,6 +291,9 @@ pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
             now
         ],
     )?;
+    if let Some(source_link) = source_link {
+        insert_meta_task_source_link_tx(tx, &meta_task_id, source_link, session_token, now)?;
+    }
     append_session_event(
         tx,
         EventType::MetaTaskSubmitted,
@@ -256,4 +304,80 @@ pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
         now,
     )?;
     Ok(meta_task_id)
+}
+
+/// Writes the one source-backlink row of a meta task.
+///
+/// The origin and the presence of a method come from the typed draft, so the
+/// persisted pair always satisfies the table constraint.
+fn insert_meta_task_source_link_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+    draft: &MetaTaskSourceLinkDraft,
+    linked_by: &str,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        r#"
+        INSERT INTO meta_task_source_links (
+            meta_task_id, thread_id, url, received_at, path, origin, method, linked_by, linked_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "#,
+        params![
+            meta_task_id,
+            draft.thread_id(),
+            draft.url(),
+            draft.received_at(),
+            draft.path(),
+            meta_task_source_link_origin_name(draft.origin()),
+            draft.method(),
+            linked_by,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+/// Attaches a backfilled source backlink to an existing, unlinked meta task.
+pub(crate) fn link_meta_task_source_tx(
+    tx: &Transaction<'_>,
+    req: &LinkMetaTaskSourceReq,
+    now: i64,
+) -> Result<()> {
+    // The same authority `meta cancel` demands: an active orchestrator session.
+    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
+    let meta_task = load_meta_task_tx(tx, req.meta_task_id.as_str())?;
+    if load_meta_task_source_link_tx(tx, meta_task.meta_task_id.as_str())?.is_some() {
+        return Err(CoveyError::SourceLinkExists {
+            meta_task_id: meta_task.meta_task_id.to_string(),
+        });
+    }
+    match req.source_link.provenance() {
+        MetaTaskSourceLinkProvenance::Backfilled { .. } => {}
+        MetaTaskSourceLinkProvenance::Submitted => {
+            return Err(CoveyError::TypeValidationError(
+                CoveyTypeValidationError::new(
+                    "source_link",
+                    "a backfilled source link must name its method",
+                ),
+            ));
+        }
+    }
+    insert_meta_task_source_link_tx(
+        tx,
+        meta_task.meta_task_id.as_str(),
+        &req.source_link,
+        req.session_token.as_str(),
+        now,
+    )?;
+    append_session_event(
+        tx,
+        EventType::MetaTaskSourceLinked,
+        ObjectType::MetaTask,
+        meta_task.meta_task_id.as_str(),
+        &req.session_token,
+        req,
+        now,
+    )?;
+    Ok(())
 }

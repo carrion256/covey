@@ -43,7 +43,9 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
 - `ops/session.rs`
   Session register, heartbeat, exit, and status logic.
 - `ops/meta_task.rs`
-  Meta-task submission, cancellation, and meta-task status.
+  Meta-task submission, cancellation, meta-task status, and the typed source
+  backlink (`meta_task_source_links`) written at submission or attached later
+  as a single backfill.
 - `ops/workflow/create.rs`
   Default-profile and explicit-policy work creation. Both persist a resolved
   execution contract and emit the same typed `WorkSubtaskCreated` payload.
@@ -155,6 +157,26 @@ Covey contains no Hermes adapter. A later adapter may register its own sessions
 and use an explicit route, but it must own polling, process supervision,
 heartbeats, and transport outside this crate. It must not duplicate Covey task,
 claim, lease, fence, or attempt-outcome state.
+
+## Meta-Task Source Backlinks
+
+A meta task may carry one intake source backlink: the originating thread, its
+receipt stamp, an absolute path, and an optional URL. It is a typed side row
+(`meta_task_source_links`, migration 037, one row per meta task), not a
+convention inside `prompt_text`, and it is independent of import provenance.
+
+- `meta submit` with `--source-*` writes the row in the same transaction as the
+  meta task, with `origin=submitted` and no method. The link is part of the
+  submission request, so it participates in the idempotency fingerprint.
+- `meta link-source` attaches `origin=backfilled` with a required `method` to an
+  existing task that has no link. Set-once: an already-linked task is refused
+  with the typed `source_link_exists` error, and the authority rule is exactly
+  the one `meta cancel` applies.
+- The illegal origin/method pairings are unconstructible in the model, restated
+  by table CHECK constraints, and refused again when a row is read back.
+- `meta status --json` renders `data.meta_task.source_link` or `null`; the
+  linking session is stored and never rendered, and rows predating migration 037
+  simply have no link.
 
 ## What To Avoid
 

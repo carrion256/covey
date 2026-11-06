@@ -10,13 +10,14 @@ use super::{
     AgentPrincipalId, ApplyGateBlocker, ApplyGateBlockerKind, Artifact, ArtifactDigest,
     ArtifactKind, ArtifactManifestPath, AttemptOutcome, BaseRev, ChangedPathsDigest, Claim,
     ClaimId, CompletionPolicy, EvidencePolicy, FailedReviewVerdict, FenceSeq, FindingsDigest,
-    MetaTask, MetaTaskId, MetaTaskState, OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker,
-    PromptText, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef,
-    RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict, RoutingKey, Session,
-    SessionToken, SettlementReconcileBlocker, SettlementReconcileReason, SettlementTarget, Subtask,
-    SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState,
-    SubtaskTitle, TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness, VcsWorkspaceState,
-    VerifierId,
+    MetaTask, MetaTaskId, MetaTaskSourceLinkDraft, MetaTaskSourceLinkOrigin,
+    MetaTaskSourceLinkProvenance, MetaTaskState, OpenSpecArchiveStatus, OpenSpecChangeId,
+    OperatorBlocker, PromptText, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState,
+    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict,
+    RoutingKey, Session, SessionToken, SettlementReconcileBlocker, SettlementReconcileReason,
+    SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority,
+    SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness,
+    VcsWorkspaceState, VerifierId,
 };
 
 /// Read model for CLI and API responses that expose subtask lifecycle state.
@@ -882,6 +883,147 @@ impl TryFrom<RawSubtaskStatus> for SubtaskStatus {
             raw.readiness.landed,
         )
         .map(|status| status.with_dependencies(raw.dependencies))
+    }
+}
+
+/// Persisted intake source backlink of a meta task.
+///
+/// The link is read-only provenance: it is written once, either with the meta
+/// task (`origin` `submitted`, no method) or later as a single backfill
+/// (`origin` `backfilled`, method required). The session that attached it is
+/// stored but never rendered, like the creator token of a meta task.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaTaskSourceLink {
+    thread_id: String,
+    url: Option<String>,
+    received_at: String,
+    path: String,
+    provenance: MetaTaskSourceLinkProvenance,
+    linked_at: TimestampMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RawMetaTaskSourceLink {
+    thread_id: String,
+    url: Option<String>,
+    received_at: String,
+    path: String,
+    origin: MetaTaskSourceLinkOrigin,
+    method: Option<String>,
+    linked_at: TimestampMs,
+}
+
+impl MetaTaskSourceLink {
+    /// Returns the originating thread identifier.
+    #[must_use]
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    /// Returns the optional source URL.
+    #[must_use]
+    pub const fn url(&self) -> Option<&String> {
+        self.url.as_ref()
+    }
+
+    /// Returns the intake receipt stamp.
+    #[must_use]
+    pub fn received_at(&self) -> &str {
+        &self.received_at
+    }
+
+    /// Returns the absolute source path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the origin this link was recorded with.
+    #[must_use]
+    pub const fn origin(&self) -> MetaTaskSourceLinkOrigin {
+        self.provenance.origin()
+    }
+
+    /// Returns the recovery method of a backfilled link.
+    #[must_use]
+    pub fn method(&self) -> Option<&str> {
+        self.provenance.method()
+    }
+
+    /// Returns the attachment timestamp.
+    #[must_use]
+    pub const fn linked_at(&self) -> TimestampMs {
+        self.linked_at
+    }
+}
+
+impl From<&MetaTaskSourceLink> for RawMetaTaskSourceLink {
+    fn from(link: &MetaTaskSourceLink) -> Self {
+        Self {
+            thread_id: link.thread_id.clone(),
+            url: link.url.clone(),
+            received_at: link.received_at.clone(),
+            path: link.path.clone(),
+            origin: link.provenance.origin(),
+            method: link.provenance.method().map(str::to_owned),
+            linked_at: link.linked_at,
+        }
+    }
+}
+
+impl TryFrom<RawMetaTaskSourceLink> for MetaTaskSourceLink {
+    type Error = String;
+
+    fn try_from(raw: RawMetaTaskSourceLink) -> Result<Self, Self::Error> {
+        let provenance = match (raw.origin, raw.method) {
+            (MetaTaskSourceLinkOrigin::Submitted, None) => MetaTaskSourceLinkProvenance::Submitted,
+            (MetaTaskSourceLinkOrigin::Backfilled, Some(method)) => {
+                MetaTaskSourceLinkProvenance::Backfilled { method }
+            }
+            (MetaTaskSourceLinkOrigin::Submitted, Some(_)) => {
+                return Err("a submitted source link must not carry a method".to_owned());
+            }
+            (MetaTaskSourceLinkOrigin::Backfilled, None) => {
+                return Err("a backfilled source link must carry a method".to_owned());
+            }
+        };
+        let draft = MetaTaskSourceLinkDraft::try_from_raw_parts(
+            raw.thread_id,
+            raw.received_at,
+            raw.path,
+            raw.url,
+            provenance,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(Self {
+            thread_id: draft.thread_id().to_owned(),
+            url: draft.url().cloned(),
+            received_at: draft.received_at().to_owned(),
+            path: draft.path().to_owned(),
+            provenance: draft.provenance().clone(),
+            linked_at: raw.linked_at,
+        })
+    }
+}
+
+impl Serialize for MetaTaskSourceLink {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        RawMetaTaskSourceLink::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MetaTaskSourceLink {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawMetaTaskSourceLink::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
     }
 }
 

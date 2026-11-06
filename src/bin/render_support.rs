@@ -139,9 +139,9 @@ impl From<CoveyError> for ReportableError {
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
-            SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
-            WrongRole,
+            SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact,
+            SubtaskAlreadyClaimed, SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError,
+            UnknownArtifactDigest, WrongRole,
         };
 
         match error {
@@ -219,6 +219,15 @@ impl From<CoveyError> for ReportableError {
                 message: error.to_string(),
                 suggestions: vec![
                     "Refresh state and retry with current ids, leases, and fence tokens.".into(),
+                ],
+            },
+            SourceLinkExists { .. } => Self {
+                exit_code: 4,
+                code: "source_link_exists",
+                message: error.to_string(),
+                suggestions: vec![
+                    "A meta task keeps exactly one source link; read it with `covey meta status`."
+                        .into(),
                 ],
             },
             DatabaseError(_) | MigrationError(_) | SerializationError(_) => Self {

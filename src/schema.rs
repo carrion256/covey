@@ -68,6 +68,7 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::VcsPacketStackEntryRecorded => "vcs_packet_stack_entry_recorded",
         EventType::VcsPrPublicationRecorded => "vcs_pr_publication_recorded",
         EventType::ProseApplyBlockerRecorded => "prose_apply_blocker_recorded",
+        EventType::MetaTaskSourceLinked => "meta_task_source_linked",
     }
 }
 

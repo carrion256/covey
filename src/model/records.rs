@@ -11,19 +11,20 @@ use super::{
     ConflictResolutionState, CoveyTypeValidationError, CreateSubtaskRequest, CreateWorkSubtaskReq,
     DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, EvidencePolicy,
     ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs,
-    MarkAppliedReq, MarkApplyWorktreeStateReq, MetaTaskId, MetaTaskState, ModelId, ObjectType,
-    ObserveVcsWorkspaceReq, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState,
-    OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason,
-    OperatorBlockerState, OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId,
-    ProviderRunIdIssuer, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState,
-    RecordApplyGateBlockerReq, RecordApplyVerificationReq, RecordApplyWorktreeReq,
-    RecordOpenSpecArchiveStatusReq, RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq,
-    RecordProseApplyBlockerReq, RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq,
-    RecordVcsPacketStackEntryReq, RecordVcsPrPublicationReq, RecordVcsWorkspaceReq,
-    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationId, ReservationState,
-    ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict,
-    RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
-    SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
+    LinkMetaTaskSourceReq, MarkAppliedReq, MarkApplyWorktreeStateReq, MetaTaskId,
+    MetaTaskSourceLink, MetaTaskState, ModelId, ObjectType, ObserveVcsWorkspaceReq,
+    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
+    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerState,
+    OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
+    PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyGateBlockerReq,
+    RecordApplyVerificationReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
+    RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq, RecordProseApplyBlockerReq,
+    RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq, RecordVcsPacketStackEntryReq,
+    RecordVcsPrPublicationReq, RecordVcsWorkspaceReq, ReleaseClaimReq, RequestReservationReq,
+    RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
+    ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict, RoutingKey,
+    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick,
+    SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
     SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
     VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind,
@@ -922,6 +923,7 @@ pub struct MetaTask {
     lifecycle: MetaTaskLifecycle,
     pub created_by: SessionToken,
     timestamps: MetaTaskTimestamps,
+    source_link: Option<MetaTaskSourceLink>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -946,6 +948,8 @@ struct RawMetaTask {
     created_by: SessionToken,
     created_at: TimestampMs,
     updated_at: TimestampMs,
+    #[serde(default)]
+    source_link: Option<MetaTaskSourceLink>,
 }
 
 impl MetaTask {
@@ -968,6 +972,7 @@ impl MetaTask {
             lifecycle: MetaTaskLifecycle::from(state),
             created_by,
             timestamps: MetaTaskTimestamps::new(created_at, updated_at)?,
+            source_link: None,
         })
     }
 
@@ -996,6 +1001,19 @@ impl MetaTask {
     #[must_use]
     pub const fn state(&self) -> MetaTaskState {
         self.lifecycle.state()
+    }
+
+    /// Attaches the intake source backlink read for this row, if any.
+    #[must_use]
+    pub fn with_source_link(mut self, source_link: Option<MetaTaskSourceLink>) -> Self {
+        self.source_link = source_link;
+        self
+    }
+
+    /// Returns the intake source backlink of this meta task.
+    #[must_use]
+    pub const fn source_link(&self) -> Option<&MetaTaskSourceLink> {
+        self.source_link.as_ref()
     }
 
     /// Returns the creation timestamp.
@@ -1065,6 +1083,7 @@ impl TryFrom<RawMetaTask> for MetaTask {
             raw.created_at,
             raw.updated_at,
         )
+        .map(|meta_task| meta_task.with_source_link(raw.source_link))
     }
 }
 
@@ -1077,6 +1096,7 @@ impl From<&MetaTask> for RawMetaTask {
             created_by: meta_task.created_by.clone(),
             created_at: meta_task.created_at(),
             updated_at: meta_task.updated_at(),
+            source_link: meta_task.source_link().cloned(),
         }
     }
 }
@@ -4908,6 +4928,7 @@ pub enum EventPayload {
     RuntimeAttestationRecorded(RecordRuntimeAttestationReq),
     MetaTaskSubmitted(SubmitMetaTaskReq),
     MetaTaskCancelled(CancelMetaTaskReq),
+    MetaTaskSourceLinked(LinkMetaTaskSourceReq),
     SubtaskCreated(CreateSubtaskRequest),
     WorkSubtaskCreated(CreateWorkSubtaskReq),
     SubtaskClaimed(ClaimResult),
@@ -4960,6 +4981,7 @@ impl EventPayload {
             Self::RuntimeAttestationRecorded(_) => EventType::RuntimeAttestationRecorded,
             Self::MetaTaskSubmitted(_) => EventType::MetaTaskSubmitted,
             Self::MetaTaskCancelled(_) => EventType::MetaTaskCancelled,
+            Self::MetaTaskSourceLinked(_) => EventType::MetaTaskSourceLinked,
             Self::SubtaskCreated(_) => EventType::SubtaskCreated,
             Self::WorkSubtaskCreated(_) => EventType::WorkSubtaskCreated,
             Self::SubtaskClaimed(_) => EventType::SubtaskClaimed,
@@ -5013,7 +5035,9 @@ impl EventPayload {
             | Self::SessionExited(_)
             | Self::SessionsReaped(_) => ObjectType::Session,
             Self::RuntimeAttestationRecorded(_) => ObjectType::RuntimeAttestation,
-            Self::MetaTaskSubmitted(_) | Self::MetaTaskCancelled(_) => ObjectType::MetaTask,
+            Self::MetaTaskSubmitted(_)
+            | Self::MetaTaskCancelled(_)
+            | Self::MetaTaskSourceLinked(_) => ObjectType::MetaTask,
             Self::SubtaskCreated(_)
             | Self::WorkSubtaskCreated(_)
             | Self::SubtaskStarted(_)

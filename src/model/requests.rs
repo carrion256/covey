@@ -14,17 +14,18 @@ use super::{
     ArtifactManifestPath, AttemptEvidenceDigest, AttemptFailureCode, AttemptSummary, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, CompletionPolicy, ConflictId,
     ConflictResolutionState, CoveyTypeValidationError, EvidencePolicy, FenceSeq, FindingsDigest,
-    IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId, ModelId,
-    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
-    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerTargetKind,
-    PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId, ProseTasksetId, ProviderId,
-    ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope,
-    ReviewId, ReviewVerdict, RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass,
-    SessionRole, SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason,
-    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VcsPacketStackEntryId,
-    VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind, VcsPrPublicationStatus,
-    VcsWorkspaceCleanliness, VcsWorkspaceId, VcsWorkspaceKind, VcsWorkspaceObservationReason,
-    VcsWorkspacePath, VcsWorkspaceRef, VcsWorkspaceState, VerifierId,
+    IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId,
+    MetaTaskSourceLinkOrigin, ModelId, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState,
+    OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason,
+    OperatorBlockerTargetKind, PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId,
+    ProseTasksetId, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath,
+    ReservationId, ReservationScope, ReviewId, ReviewVerdict, RoutingKey, RuntimeContainerId,
+    RuntimeProcessId, ScopeClass, SessionRole, SessionToken, SettlementReconcileEvidenceId,
+    SettlementReconcileReason, SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle,
+    TimestampMs, VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId,
+    VcsPrPublicationKind, VcsPrPublicationStatus, VcsWorkspaceCleanliness, VcsWorkspaceId,
+    VcsWorkspaceKind, VcsWorkspaceObservationReason, VcsWorkspacePath, VcsWorkspaceRef,
+    VcsWorkspaceState, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -208,6 +209,11 @@ impl SessionHandle {
 pub struct SubmitMetaTaskReq {
     pub session_token: SessionToken,
     pub prompt_text: PromptText,
+    /// Optional intake source backlink written in the same transaction as the
+    /// meta task. Absent links are omitted from the serialized request so the
+    /// idempotency request hash of an unlinked submission stays unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_link: Option<MetaTaskSourceLinkDraft>,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -225,8 +231,263 @@ impl SubmitMetaTaskReq {
         Ok(Self {
             session_token: SessionToken::parse(session_token.into())?,
             prompt_text: PromptText::parse(prompt_text.into())?,
+            source_link: None,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+
+    /// Attaches an intake source backlink to this submission request.
+    ///
+    /// The link participates in the idempotency request fingerprint, so the
+    /// same key carrying a different link is reported as a conflict.
+    #[must_use]
+    pub fn with_source_link(mut self, source_link: MetaTaskSourceLinkDraft) -> Self {
+        self.source_link = Some(source_link);
+        self
+    }
+}
+
+/// Request to attach an intake source backlink to an existing meta task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkMetaTaskSourceReq {
+    pub session_token: SessionToken,
+    pub meta_task_id: MetaTaskId,
+    pub source_link: MetaTaskSourceLinkDraft,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl LinkMetaTaskSourceReq {
+    /// Builds a link-source request from unvalidated scalar values.
+    ///
+    /// The link is recorded as a backfill, so `method` is required and names
+    /// how the source was recovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token, meta-task id, or any
+    /// source-backlink field is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        thread_id: impl Into<String>,
+        received_at: impl Into<String>,
+        path: impl Into<String>,
+        url: Option<String>,
+        method: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
+            source_link: MetaTaskSourceLinkDraft::backfilled(
+                thread_id,
+                received_at,
+                path,
+                url,
+                method,
+            )?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
+/// How a source backlink came to be attached to a meta task.
+///
+/// The `Backfilled` variant carries the recovery method, so a backfilled link
+/// without a method and a submitted link carrying one cannot be constructed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaTaskSourceLinkProvenance {
+    /// Written together with the meta task by the intake submission.
+    Submitted,
+    /// Attached later to an existing meta task, naming how it was recovered.
+    Backfilled {
+        /// How the source was recovered after the fact.
+        method: String,
+    },
+}
+
+impl MetaTaskSourceLinkProvenance {
+    /// The provenance of a link written together with its meta task.
+    #[must_use]
+    pub const fn submitted() -> Self {
+        Self::Submitted
+    }
+
+    /// Builds the provenance of a later backfill, validating the method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `method` is blank or oversized.
+    pub fn backfilled(method: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        let method = method.into();
+        crate::validators::ensure_source_field(
+            "method",
+            &method,
+            crate::validators::MAX_SOURCE_METHOD_LEN,
+        )?;
+        Ok(Self::Backfilled { method })
+    }
+
+    /// Returns the persisted origin of this provenance.
+    #[must_use]
+    pub const fn origin(&self) -> MetaTaskSourceLinkOrigin {
+        match self {
+            Self::Submitted => MetaTaskSourceLinkOrigin::Submitted,
+            Self::Backfilled { .. } => MetaTaskSourceLinkOrigin::Backfilled,
+        }
+    }
+
+    /// Returns the recovery method of a backfilled link.
+    #[must_use]
+    pub fn method(&self) -> Option<&str> {
+        match self {
+            Self::Submitted => None,
+            Self::Backfilled { method } => Some(method.as_str()),
+        }
+    }
+}
+
+/// Validated source-backlink fields as supplied at the API boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetaTaskSourceLinkDraft {
+    thread_id: String,
+    received_at: String,
+    path: String,
+    url: Option<String>,
+    provenance: MetaTaskSourceLinkProvenance,
+}
+
+impl MetaTaskSourceLinkDraft {
+    /// Builds a validated draft for the given provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any required field is blank or oversized, when
+    /// `path` is not absolute, or when `url` is present but blank or oversized.
+    pub fn try_from_raw_parts(
+        thread_id: impl Into<String>,
+        received_at: impl Into<String>,
+        path: impl Into<String>,
+        url: Option<String>,
+        provenance: MetaTaskSourceLinkProvenance,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        let thread_id = thread_id.into();
+        let received_at = received_at.into();
+        let path = path.into();
+        crate::validators::ensure_source_field(
+            "thread_id",
+            &thread_id,
+            crate::validators::MAX_SOURCE_THREAD_ID_LEN,
+        )?;
+        crate::validators::ensure_source_field(
+            "received_at",
+            &received_at,
+            crate::validators::MAX_SOURCE_RECEIVED_AT_LEN,
+        )?;
+        crate::validators::ensure_source_path(&path)?;
+        let url = match url {
+            Some(url) => {
+                crate::validators::ensure_source_field(
+                    "url",
+                    &url,
+                    crate::validators::MAX_SOURCE_URL_LEN,
+                )?;
+                Some(url)
+            }
+            None => None,
+        };
+        Ok(Self {
+            thread_id,
+            received_at,
+            path,
+            url,
+            provenance,
+        })
+    }
+
+    /// Builds the draft of a link written together with its meta task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a source-backlink field is invalid.
+    pub fn submitted(
+        thread_id: impl Into<String>,
+        received_at: impl Into<String>,
+        path: impl Into<String>,
+        url: Option<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Self::try_from_raw_parts(
+            thread_id,
+            received_at,
+            path,
+            url,
+            MetaTaskSourceLinkProvenance::submitted(),
+        )
+    }
+
+    /// Builds the draft of a link attached later to an existing meta task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a source-backlink field or the method is invalid.
+    pub fn backfilled(
+        thread_id: impl Into<String>,
+        received_at: impl Into<String>,
+        path: impl Into<String>,
+        url: Option<String>,
+        method: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Self::try_from_raw_parts(
+            thread_id,
+            received_at,
+            path,
+            url,
+            MetaTaskSourceLinkProvenance::backfilled(method)?,
+        )
+    }
+
+    /// Returns the originating thread identifier.
+    #[must_use]
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    /// Returns the intake receipt stamp.
+    #[must_use]
+    pub fn received_at(&self) -> &str {
+        &self.received_at
+    }
+
+    /// Returns the absolute source path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the optional source URL.
+    #[must_use]
+    pub const fn url(&self) -> Option<&String> {
+        self.url.as_ref()
+    }
+
+    /// Returns the provenance carried by this draft.
+    #[must_use]
+    pub const fn provenance(&self) -> &MetaTaskSourceLinkProvenance {
+        &self.provenance
+    }
+
+    /// Returns the persisted origin of this draft.
+    #[must_use]
+    pub const fn origin(&self) -> MetaTaskSourceLinkOrigin {
+        self.provenance.origin()
+    }
+
+    /// Returns the recovery method of a backfilled draft.
+    #[must_use]
+    pub fn method(&self) -> Option<&str> {
+        self.provenance.method()
     }
 }
 

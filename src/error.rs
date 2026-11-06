@@ -160,6 +160,8 @@ pub enum CoveyError {
         meta_task_id: String,
         state: MetaTaskState,
     },
+    #[error("meta-task {meta_task_id} already has a source link")]
+    SourceLinkExists { meta_task_id: String },
     #[error("unknown artifact digest {digest}")]
     UnknownArtifactDigest { digest: String },
     #[error("invalid repository path {path}")]
@@ -229,9 +231,9 @@ impl PartialEq for CoveyError {
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, StaleFenceToken, StaleReviewArtifact, SubtaskAlreadyClaimed,
-            SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
-            WrongRole,
+            SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact,
+            SubtaskAlreadyClaimed, SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError,
+            UnknownArtifactDigest, WrongRole,
         };
 
         match (self, other) {
@@ -527,6 +529,14 @@ impl PartialEq for CoveyError {
                     state: right_state,
                 },
             ) => left_meta_task_id == right_meta_task_id && left_state == right_state,
+            (
+                SourceLinkExists {
+                    meta_task_id: left_meta_task_id,
+                },
+                SourceLinkExists {
+                    meta_task_id: right_meta_task_id,
+                },
+            ) => left_meta_task_id == right_meta_task_id,
             (
                 LeaseExpired {
                     object_id: left_object_id,

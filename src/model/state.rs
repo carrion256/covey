@@ -233,6 +233,7 @@ pub enum EventType {
     VcsPacketStackEntryRecorded,
     VcsPrPublicationRecorded,
     ProseApplyBlockerRecorded,
+    MetaTaskSourceLinked,
 }
 
 /// Covey-owned lifecycle state for apply worktrees retained as evidence.
@@ -482,6 +483,29 @@ pub enum MetaTaskState {
     Active,
     Completed,
     Cancelled,
+}
+
+/// How a meta task came to carry a source backlink.
+///
+/// `Submitted` links are written with the meta task itself; `Backfilled` links
+/// are attached later and must name the method used, which the typed
+/// [`crate::model::MetaTaskSourceLinkProvenance`] variant makes unconstructible
+/// without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetaTaskSourceLinkOrigin {
+    Submitted,
+    Backfilled,
+}
+
+pub(crate) const fn meta_task_source_link_origin_name(
+    origin: MetaTaskSourceLinkOrigin,
+) -> &'static str {
+    match origin {
+        MetaTaskSourceLinkOrigin::Submitted => "submitted",
+        MetaTaskSourceLinkOrigin::Backfilled => "backfilled",
+    }
 }
 
 /// Subtask variants supported by Covey.

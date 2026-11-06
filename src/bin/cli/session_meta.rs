@@ -15,6 +15,7 @@ pub(crate) enum SessionCommand {
 pub(crate) enum MetaCommand {
     Submit(SubmitMetaArgs),
     Cancel(CancelMetaArgs),
+    LinkSource(LinkSourceMetaArgs),
     Status(MetaStatusArgs),
     List(MetaListArgs),
 }
@@ -92,6 +93,37 @@ pub(crate) struct SubmitMetaArgs {
     pub(crate) session_token: String,
     #[arg(long)]
     pub(crate) prompt_text: String,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+    #[arg(long, requires_all = ["source_received_at", "source_path"])]
+    pub(crate) source_thread_id: Option<String>,
+    #[arg(long, requires_all = ["source_thread_id", "source_path"])]
+    pub(crate) source_received_at: Option<String>,
+    #[arg(long, requires_all = ["source_thread_id", "source_received_at"])]
+    pub(crate) source_path: Option<String>,
+    #[arg(
+        long,
+        requires_all = ["source_thread_id", "source_received_at", "source_path"]
+    )]
+    pub(crate) source_url: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct LinkSourceMetaArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) meta_task_id: String,
+    #[arg(long)]
+    pub(crate) thread_id: String,
+    #[arg(long)]
+    pub(crate) received_at: String,
+    #[arg(long)]
+    pub(crate) path: String,
+    #[arg(long)]
+    pub(crate) url: Option<String>,
+    #[arg(long)]
+    pub(crate) method: String,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }

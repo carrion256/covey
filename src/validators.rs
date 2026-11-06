@@ -3,10 +3,11 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ArtifactDigest, Claim, ClaimState, ConflictResolutionState, FenceSeq, MetaTaskState,
-        ObjectType, ReadyQueueState, ReservationState, ReviewState, RuntimeAttestation, Session,
-        SessionRole, SessionState, SessionToken, StateValue, SubtaskId, SubtaskKind, SubtaskState,
-        claim_state_name, review_state_name, session_state_name,
+        ArtifactDigest, Claim, ClaimState, ConflictResolutionState, CoveyTypeValidationError,
+        FenceSeq, MetaTaskState, ObjectType, ReadyQueueState, ReservationState, ReviewState,
+        RuntimeAttestation, Session, SessionRole, SessionState, SessionToken, StateValue,
+        SubtaskId, SubtaskKind, SubtaskState, claim_state_name, review_state_name,
+        session_state_name,
     },
     queries::{
         load_artifact_tx, load_claim_tx, load_meta_task_tx, load_runtime_attestation_tx,
@@ -24,6 +25,44 @@ pub(crate) const MAX_BASE_REV_LEN: usize = 512;
 pub(crate) const MAX_PATH_LEN: usize = 4 * 1024;
 pub(crate) const MAX_GENERATED_MEMBERS: usize = 1_024;
 pub(crate) const MAX_RUNTIME_FIELD_LEN: usize = 512;
+/// Upper bound on the intake thread identifier of a meta-task source backlink.
+pub(crate) const MAX_SOURCE_THREAD_ID_LEN: usize = 512;
+/// Upper bound on the intake receipt stamp of a meta-task source backlink.
+pub(crate) const MAX_SOURCE_RECEIVED_AT_LEN: usize = 128;
+/// Upper bound on the optional source URL of a meta-task source backlink.
+pub(crate) const MAX_SOURCE_URL_LEN: usize = 2 * 1024;
+/// Upper bound on the recovery method named by a backfilled source link.
+pub(crate) const MAX_SOURCE_METHOD_LEN: usize = 256;
+
+/// Rejects a blank or oversized source-backlink field with a typed error.
+pub(crate) fn ensure_source_field(
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> std::result::Result<(), CoveyTypeValidationError> {
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > max {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "exceeds the maximum length for a source backlink field",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects a source path that is not absolute.
+pub(crate) fn ensure_source_path(path: &str) -> std::result::Result<(), CoveyTypeValidationError> {
+    ensure_source_field("path", path, MAX_PATH_LEN)?;
+    if !path.starts_with('/') {
+        return Err(CoveyTypeValidationError::new(
+            "path",
+            "must be an absolute path",
+        ));
+    }
+    Ok(())
+}
 
 pub(crate) fn ensure_no_other_active_session(
     tx: &Transaction<'_>,

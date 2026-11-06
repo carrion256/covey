@@ -7,13 +7,13 @@ use serde_rusqlite::from_row;
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, Event, MetaTask, MetaTaskSummary,
-        MutationIdempotencyRecord, ObjectType, OpenSpecImportProvenance,
-        OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
-        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
-        SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState, TimestampMs,
-        claim_state_name, object_type_name, parse_generated_members, reservation_state_name,
-        session_state_name,
+        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, Event, MetaTask,
+        MetaTaskSourceLink, MetaTaskSummary, MutationIdempotencyRecord, ObjectType,
+        OpenSpecImportProvenance, OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest,
+        ReadyQueueItem, Reservation, ReservationState, Review, RuntimeAttestation, Session,
+        SessionState, SessionToken, SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState,
+        TimestampMs, claim_state_name, object_type_name, parse_generated_members,
+        reservation_state_name, session_state_name,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
 };
@@ -143,6 +143,22 @@ pub(crate) fn load_meta_task_tx(tx: &Transaction<'_>, meta_task_id: &str) -> Res
         ),
         CoveyError::MetaTaskNotFound,
     )
+}
+
+pub(crate) fn load_meta_task_source_link_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+) -> Result<Option<MetaTaskSourceLink>> {
+    tx.query_row(
+        r#"
+        SELECT thread_id, url, received_at, path, origin, method, linked_at
+        FROM meta_task_source_links WHERE meta_task_id = ?1
+        "#,
+        params![meta_task_id],
+        deserialize_row::<MetaTaskSourceLink>,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub(crate) fn map_meta_task_summary_row(

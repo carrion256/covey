@@ -629,7 +629,7 @@ fn resolve_import_bd_v1_destination<T: Serialize>(
         }
         ImportBdV1Destination::NewMetaTask(prompt_text) => {
             ensure_length("prompt_text", prompt_text, MAX_PROMPT_LEN)?;
-            submit_meta_task_tx(tx, session_token, prompt_text, event_payload, now)
+            submit_meta_task_tx(tx, session_token, prompt_text, None, event_payload, now)
         }
     }
 }
