@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use covey::proof_apply::{ApplyProofBatchArgs, ApplyProofVerifyArgs};
 
-use crate::DEFAULT_DB_PATH;
-
 mod import;
 mod queue;
 mod repoops;
@@ -29,13 +27,10 @@ pub(crate) use workflow::*;
     disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
-    #[arg(
-        long,
-        global = true,
-        env = "COVEY_DB_PATH",
-        default_value = DEFAULT_DB_PATH
-    )]
-    pub(crate) db: PathBuf,
+    /// Store path. Without this flag or `COVEY_DB_PATH`, `./covey.db` is used
+    /// only when it already exists; a store is created only at a named path.
+    #[arg(long, global = true, env = "COVEY_DB_PATH")]
+    pub(crate) db: Option<PathBuf>,
 
     /// Workflow profiles file (JSON). Profiles select creation completion
     /// policy, routing key, and evidence policy as defaults for new tasks;

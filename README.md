@@ -309,6 +309,12 @@ formatter on stderr, without ANSI colours; unset means no log output. Each line
 carries the operation name, the redacted actor, the duration, the result, and
 the affected object ids.
 
+`covey events list --typed` decodes each event payload into its typed form and
+always answers one object, `{ typed_event_count, decode_error_count, items }`.
+Each item is `{ "status": "typed", "event": ... }` or
+`{ "status": "decode_error", "event": ..., "error": ... }` with the raw event,
+so a store holding an old payload shape lists without failing.
+
 ## Repository Shape
 
 This crate should stay centered on the core coordination library. Wrapper-specific processes can embed it or expose it over RPC later, but the schema, invariants, and transactional behavior are the real product.
@@ -391,12 +397,14 @@ The CLI is transport-thin by design:
 
 - it maps directly onto the embedded `Covey` API
 - it defaults to JSON when stdout is not a TTY
-- `--db` falls back to `COVEY_DB_PATH`, then `./covey.db`
+- `--db` falls back to `COVEY_DB_PATH`. With neither, `./covey.db` is used
+  only when it already exists
 - `--read-only` opens an existing store without creating or migrating it and
   refuses writes with the `store_read_only` code
-- a command that only reads, run against a store file that does not exist,
-  answers `store_not_found` and creates nothing; a write command still creates
-  and migrates the store
+- a write command creates and migrates a missing store only at a path named
+  by `--db` or `COVEY_DB_PATH`. Every other command against a missing store
+  answers `store_not_found` and creates nothing: a command that only reads,
+  and any command that would fall back to a `./covey.db` that does not exist
 - `--version` prints the version, the short commit, and `-dirty` when built
   from a modified tree
 

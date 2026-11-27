@@ -36,6 +36,9 @@ struct OkEnvelope {
 struct ErrorEnvelope {
     ok: bool,
     code: String,
+    reason: String,
+    #[serde(default)]
+    suggestions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +142,7 @@ fn read_command_on_a_missing_store_reports_store_not_found() {
     let error = stderr_error(&output);
     assert!(!error.ok);
     assert_eq!(error.code, "store_not_found");
+    assert_eq!(error.reason, "store_not_found");
     assert!(!db.exists(), "the read command must not create the store");
 }
 
@@ -150,6 +154,70 @@ fn write_command_creates_a_missing_store() {
 
     assert!(!session_token.is_empty(), "the session token is reported");
     assert!(db.is_file(), "the write command must create the store");
+}
+
+#[test]
+fn no_command_creates_a_store_at_the_default_path() {
+    let dir = TempDir::new().expect("tempdir");
+    let default_db = dir.path().join("covey.db");
+
+    let output = covey(&dir)
+        .args(REGISTER_ORCHESTRATOR)
+        .output()
+        .expect("run covey");
+
+    assert_eq!(output.status.code(), Some(1));
+    let error = stderr_error(&output);
+    assert!(!error.ok);
+    assert_eq!(error.code, "store_not_found");
+    assert!(
+        error
+            .suggestions
+            .iter()
+            .any(|hint| hint.contains("--db") && hint.contains("COVEY_DB_PATH")),
+        "the refusal must name both ways to choose a store: {:?}",
+        error.suggestions
+    );
+    assert!(
+        !default_db.exists(),
+        "a write command without --db or COVEY_DB_PATH must not create ./covey.db"
+    );
+
+    // Once the default store exists, a command without --db uses it.
+    let session_token = register_orchestrator(&dir, &default_db);
+    let output = covey(&dir)
+        .args([
+            "meta",
+            "submit",
+            "--session-token",
+            session_token.as_str(),
+            "--prompt-text",
+            "default store task",
+        ])
+        .output()
+        .expect("run covey");
+    success_data::<MetaTaskRow>(&output);
+    assert_eq!(meta_task_count(&default_db), 1);
+}
+
+#[test]
+fn refusal_reason_names_the_specific_error_under_a_coarse_code() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    register_orchestrator(&dir, &db);
+
+    let output = covey(&dir)
+        .arg("--db")
+        .arg(&db)
+        .args(REGISTER_ORCHESTRATOR)
+        .output()
+        .expect("run covey");
+
+    assert_eq!(output.status.code(), Some(4));
+    let error = stderr_error(&output);
+    assert!(!error.ok);
+    assert_eq!(error.code, "conflict");
+    assert_eq!(error.reason, "session_already_active");
 }
 
 #[test]
@@ -372,6 +440,7 @@ fn invalid_log_level_is_invalid_args() {
     let error = stderr_error(&output);
     assert!(!error.ok);
     assert_eq!(error.code, "invalid_args");
+    assert_eq!(error.reason, "invalid_args");
     assert!(
         !dir.path().join("covey.db").exists(),
         "the rejected run must not create a store"

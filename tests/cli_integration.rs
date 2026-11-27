@@ -852,7 +852,12 @@ fn workflow_commands_emit_json() {
             "--typed",
         ],
     ));
-    assert!(events.as_array().expect("events").len() >= 5);
+    assert_eq!(events["decode_error_count"], 0);
+    assert_eq!(
+        events["typed_event_count"],
+        events["items"].as_array().expect("typed event items").len()
+    );
+    assert!(events["typed_event_count"].as_u64().expect("typed count") >= 5);
 
     let status = success_data(&run_db(
         &db,

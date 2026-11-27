@@ -5,7 +5,11 @@ use crate::model::{
 use thiserror::Error;
 
 /// Errors returned by the Covey coordination substrate.
-#[derive(Debug, Error)]
+///
+/// `Into<&'static str>` yields the snake_case variant name: the stable reason
+/// a caller can branch on.
+#[derive(Debug, Error, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum CoveyError {
     #[error("session not found")]
     SessionNotFound,

@@ -5,7 +5,7 @@
 use std::{
     ffi::OsString,
     io::{self, IsTerminal, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -154,13 +154,22 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
             ),
         )
     })?;
-    let plan = store_open_plan(&cli.db, cli.read_only, cli.command.is_read_only_command());
+    let (db_path, named_store) = match cli.db {
+        Some(path) => (path, true),
+        None => (PathBuf::from(DEFAULT_DB_PATH), false),
+    };
+    let plan = store_open_plan(
+        &db_path,
+        named_store,
+        cli.read_only,
+        cli.command.is_read_only_command(),
+    );
     let store = match plan {
-        StoreOpenPlan::ReadOnly => Covey::open_read_only_with_workflow(&cli.db, workflow),
+        StoreOpenPlan::ReadOnly => Covey::open_read_only_with_workflow(&db_path, workflow),
         StoreOpenPlan::RefuseMissing => Err(CoveyError::StoreNotFound {
-            path: cli.db.display().to_string(),
+            path: db_path.display().to_string(),
         }),
-        StoreOpenPlan::OpenOrCreate => Covey::open_with_workflow(&cli.db, workflow),
+        StoreOpenPlan::OpenOrCreate => Covey::open_with_workflow(&db_path, workflow),
     }
     .map_err(|err| OutputError::from_covey(mode, err))?;
 
@@ -177,12 +186,18 @@ enum StoreOpenPlan {
 }
 
 /// Decides how the store is opened: `--read-only` opens an existing store
-/// without migrating it, a read-only command refuses a missing store, and
-/// everything else opens or creates the store.
-fn store_open_plan(db_path: &Path, read_only: bool, read_only_command: bool) -> StoreOpenPlan {
+/// without migrating it; a missing store is refused for a read-only command
+/// and for any command when the path is the default rather than one named by
+/// `--db` or `COVEY_DB_PATH`; everything else opens or creates the store.
+fn store_open_plan(
+    db_path: &Path,
+    named_store: bool,
+    read_only: bool,
+    read_only_command: bool,
+) -> StoreOpenPlan {
     if read_only {
         StoreOpenPlan::ReadOnly
-    } else if read_only_command && !store_path_exists(db_path) {
+    } else if (read_only_command || !named_store) && !store_path_exists(db_path) {
         StoreOpenPlan::RefuseMissing
     } else {
         StoreOpenPlan::OpenOrCreate

@@ -21,6 +21,7 @@ pub(crate) fn render_error(render_mode: OutputMode, report: &ReportableError) {
             write_json_stderr(&ErrorEnvelope {
                 ok: false,
                 code: report.code,
+                reason: report.reason,
                 message: report.message.clone(),
                 suggestions: report.suggestions.clone(),
             });
@@ -107,6 +108,9 @@ impl OutputError {
 pub(crate) struct ReportableError {
     pub(crate) exit_code: u8,
     pub(crate) code: &'static str,
+    /// Snake-case name of the specific refusal: the `CoveyError` variant, or
+    /// `invalid_args` for a usage error raised by the CLI itself.
+    pub(crate) reason: &'static str,
     pub(crate) message: String,
     pub(crate) suggestions: Vec<String>,
 }
@@ -116,6 +120,7 @@ impl ReportableError {
         Self {
             exit_code: 2,
             code: "invalid_args",
+            reason: "invalid_args",
             message: message.into(),
             suggestions,
         }
@@ -149,6 +154,7 @@ impl From<CoveyError> for ReportableError {
             StoreMigrationRequired, StoreNotFound, StoreReadOnly,
         };
 
+        let reason: &'static str = (&error).into();
         match error {
             SessionNotFound
             | SubtaskNotFound
@@ -166,6 +172,7 @@ impl From<CoveyError> for ReportableError {
             | MetaTaskHandleNotFound { .. } => Self {
                 exit_code: 1,
                 code: "not_found",
+                reason,
                 message: error.to_string(),
                 suggestions: vec!["Check the referenced id or digest.".into()],
             },
@@ -185,6 +192,7 @@ impl From<CoveyError> for ReportableError {
             | TypeValidationError(_) => Self {
                 exit_code: 2,
                 code: "invalid_args",
+                reason,
                 message: error.to_string(),
                 suggestions: vec!["Fix the request shape and retry.".into()],
             },
@@ -195,6 +203,7 @@ impl From<CoveyError> for ReportableError {
             | ApplyGateSeparationOfDutiesViolation { .. } => Self {
                 exit_code: 3,
                 code: "permission_denied",
+                reason,
                 message: error.to_string(),
                 suggestions: vec!["Use a session with the required role or ownership.".into()],
             },
@@ -224,6 +233,7 @@ impl From<CoveyError> for ReportableError {
             | MetaTaskAlreadySuperseded { .. } => Self {
                 exit_code: 4,
                 code: "conflict",
+                reason,
                 message: error.to_string(),
                 suggestions: vec![
                     "Refresh state and retry with current ids, leases, and fence tokens.".into(),
@@ -232,20 +242,25 @@ impl From<CoveyError> for ReportableError {
             StoreNotFound { .. } => Self {
                 exit_code: 1,
                 code: "store_not_found",
+                reason,
                 message: error.to_string(),
                 suggestions: vec![
-                    "Check the --db path; a write command creates a missing store.".into(),
+                    "Name the store with --db or COVEY_DB_PATH; a missing store is created \
+                     only at a path named that way, and only by a write command."
+                        .into(),
                 ],
             },
             StoreReadOnly => Self {
                 exit_code: 3,
                 code: "store_read_only",
+                reason,
                 message: error.to_string(),
                 suggestions: vec!["Re-run the command without --read-only to allow writes.".into()],
             },
             StoreMigrationRequired { .. } => Self {
                 exit_code: 4,
                 code: "store_migration_required",
+                reason,
                 message: error.to_string(),
                 suggestions: vec![
                     "Run a write command with this binary to migrate the store.".into(),
@@ -254,6 +269,7 @@ impl From<CoveyError> for ReportableError {
             SourceLinkExists { .. } => Self {
                 exit_code: 4,
                 code: "source_link_exists",
+                reason,
                 message: error.to_string(),
                 suggestions: vec![
                     "A meta task keeps exactly one source link; read it with `covey meta status`."
@@ -263,6 +279,7 @@ impl From<CoveyError> for ReportableError {
             DatabaseError(_) | MigrationError(_) | SerializationError(_) => Self {
                 exit_code: 5,
                 code: "internal_error",
+                reason,
                 message: error.to_string(),
                 suggestions: vec!["Inspect the database path and runtime logs.".into()],
             },
@@ -303,6 +320,7 @@ pub(crate) struct SuccessEnvelope {
 pub(crate) struct ErrorEnvelope {
     pub(crate) ok: bool,
     pub(crate) code: &'static str,
+    pub(crate) reason: &'static str,
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) suggestions: Vec<String>,
