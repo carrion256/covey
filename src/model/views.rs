@@ -5982,6 +5982,7 @@ fn validate_repoops_authority_locks(
 
 /// Result of a stale-session reap pass.
 #[must_use]
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ReapResult {
     pub stale_sessions: usize,
@@ -5989,6 +5990,7 @@ pub struct ReapResult {
 
 /// Result of a lease-expiration maintenance pass.
 #[must_use]
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ExpireResult {
     pub expired_count: usize,

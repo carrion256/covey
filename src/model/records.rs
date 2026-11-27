@@ -1473,6 +1473,7 @@ impl<'de> Deserialize<'de> for SubtaskRow {
 
 /// Review target encoded by a review subtask.
 #[must_use]
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ReviewTarget {
     pub subtask_id: SubtaskId,
@@ -4982,12 +4983,14 @@ impl<'de> Deserialize<'de> for TypedEvent {
 }
 
 /// Payload emitted when stale sessions are reaped.
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct StaleSessionsPayload {
     pub stale_sessions: usize,
 }
 
 /// Payload emitted when leases are expired in bulk.
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ExpiredCountPayload {
     pub expired_count: usize,

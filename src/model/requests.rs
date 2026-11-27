@@ -1310,6 +1310,7 @@ impl ClaimSubtaskReq {
 
 /// Claim token and lease metadata returned after a successful claim.
 #[must_use]
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ClaimResult {
     pub claim_id: ClaimId,
@@ -1809,6 +1810,7 @@ impl ClaimReadyQueueReq {
 
 /// Claimed ready-queue item with apply fence and lease metadata.
 #[must_use]
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
 pub struct ReadyQueueClaim {
     pub queue_id: QueueId,
