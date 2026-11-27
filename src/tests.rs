@@ -29,6 +29,7 @@ impl Covey {
             conn: Mutex::new(conn),
             clock,
             workflow: WorkflowProfile::default(),
+            read_only: false,
         })
     }
 }

@@ -1,13 +1,30 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
-    let migrations_dir = Path::new(&manifest_dir).join("src/migrations");
+    let manifest_path = Path::new(&manifest_dir);
+    let migrations_dir = manifest_path.join("src/migrations");
 
     println!("cargo:rerun-if-changed={}", migrations_dir.display());
+    for compiled_input in ["src", "Cargo.toml", "Cargo.lock", "build.rs"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_path.join(compiled_input).display()
+        );
+    }
+
+    println!(
+        "cargo:rustc-env=COVEY_BUILD_COMMIT={}",
+        build_commit(&manifest_dir)
+    );
+    println!(
+        "cargo:rustc-env=COVEY_BUILD_DIRTY={}",
+        build_dirty(&manifest_dir)
+    );
 
     let mut migrations = migration_files(&migrations_dir);
     migrations.sort_by_key(|migration| migration.number);
@@ -23,6 +40,46 @@ fn main() {
     let generated = render_migrations(&migrations);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
     fs::write(out_dir.join("covey_migrations.rs"), generated).expect("write generated migrations");
+}
+
+fn git_output(manifest_dir: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(manifest_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// Returns the 12-character short hash of HEAD, or `unknown` when git or the
+/// repository is unavailable.
+fn build_commit(manifest_dir: &str) -> String {
+    let short: String = git_output(manifest_dir, &["rev-parse", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(12)
+        .collect();
+    if short.len() == 12 {
+        short
+    } else {
+        "unknown".to_owned()
+    }
+}
+
+/// Returns `true` when tracked files differ from HEAD, `false` when they do
+/// not or when git is unavailable.
+fn build_dirty(manifest_dir: &str) -> bool {
+    match git_output(
+        manifest_dir,
+        &["status", "--porcelain", "--untracked-files=no"],
+    ) {
+        Some(status) => !status.trim().is_empty(),
+        None => false,
+    }
 }
 
 #[derive(Debug)]

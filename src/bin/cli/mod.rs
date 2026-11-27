@@ -29,7 +29,12 @@ pub(crate) use workflow::*;
     disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
-    #[arg(long, global = true, default_value = DEFAULT_DB_PATH)]
+    #[arg(
+        long,
+        global = true,
+        env = "COVEY_DB_PATH",
+        default_value = DEFAULT_DB_PATH
+    )]
     pub(crate) db: PathBuf,
 
     /// Workflow profiles file (JSON). Profiles select creation completion
@@ -44,6 +49,11 @@ pub(crate) struct Cli {
 
     #[arg(long, global = true)]
     pub(crate) json: bool,
+
+    /// Open an existing store without creating or migrating it and refuse every
+    /// write.
+    #[arg(long, global = true)]
+    pub(crate) read_only: bool,
 
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -112,6 +122,102 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: ProofCommand,
     },
+}
+
+impl Commands {
+    /// True when dispatching this command reaches only the store's read
+    /// helpers, so the command never writes the store.
+    pub(crate) fn is_read_only_command(&self) -> bool {
+        match self {
+            Self::Session { command } => match command {
+                SessionCommand::ActiveForPrincipal(_) | SessionCommand::Status(_) => true,
+                SessionCommand::Register(_)
+                | SessionCommand::Ensure(_)
+                | SessionCommand::Attest(_)
+                | SessionCommand::Heartbeat(_)
+                | SessionCommand::Exit(_) => false,
+            },
+            Self::Meta { command } => match command {
+                MetaCommand::Status(_) | MetaCommand::List(_) => true,
+                MetaCommand::Submit(_)
+                | MetaCommand::Cancel(_)
+                | MetaCommand::Complete(_)
+                | MetaCommand::Annotate(_)
+                | MetaCommand::LinkSource(_) => false,
+            },
+            Self::Subtask { command } => match command {
+                SubtaskCommand::Status(_)
+                | SubtaskCommand::Candidates(_)
+                | SubtaskCommand::Availability(_)
+                | SubtaskCommand::Stuck(_) => true,
+                SubtaskCommand::Create(_)
+                | SubtaskCommand::ClaimNext(_)
+                | SubtaskCommand::Claim(_)
+                | SubtaskCommand::Start(_)
+                | SubtaskCommand::Finish(_)
+                | SubtaskCommand::Retry(_)
+                | SubtaskCommand::Fail(_)
+                | SubtaskCommand::Abandon(_) => false,
+            },
+            Self::Claim { command } => match command {
+                ClaimCommand::Expiring(_) => true,
+                ClaimCommand::Renew(_) | ClaimCommand::Release(_) => false,
+            },
+            Self::Artifact { command } => match command {
+                ArtifactCommand::Publish(_) => false,
+            },
+            Self::Review { command } => match command {
+                ReviewCommand::Request(_)
+                | ReviewCommand::Decide(_)
+                | ReviewCommand::PermissiveLand(_) => false,
+            },
+            Self::Queue { command } => match command {
+                QueueCommand::List(_)
+                | QueueCommand::Candidates(_)
+                | QueueCommand::VerifyLandingAuthorization(_)
+                | QueueCommand::ListOpenSpecArchiveBlockers(_)
+                | QueueCommand::Metrics => true,
+                QueueCommand::Enqueue(_)
+                | QueueCommand::ReconcileApply(_)
+                | QueueCommand::ClaimNext(_)
+                | QueueCommand::MarkInFlight(_)
+                | QueueCommand::RecordApplyVerification(_)
+                | QueueCommand::RecordApplyGateBlocker(_)
+                | QueueCommand::RecordSettlementReconcileBlocker(_)
+                | QueueCommand::RecordLandingReceipt(_)
+                | QueueCommand::MarkApplied(_)
+                | QueueCommand::RecordOpenSpecArchiveStatus(_)
+                | QueueCommand::Supersede(_) => false,
+            },
+            Self::Reservation { command } => match command {
+                ReservationCommand::Overlaps(_) => true,
+                ReservationCommand::Request(_)
+                | ReservationCommand::Release(_)
+                | ReservationCommand::Renew(_) => false,
+            },
+            Self::Repoops { command } => match command {
+                RepoopsCommand::AuthoritySnapshot(_) => true,
+            },
+            Self::Events { command } => match command {
+                EventsCommand::List(_) => true,
+            },
+            Self::Conflict { command } => match command {
+                ConflictCommand::List => true,
+                ConflictCommand::Resolve(_) => false,
+            },
+            Self::Maint { command } => match command {
+                MaintCommand::Backup(_) => true,
+                MaintCommand::ReapStale(_)
+                | MaintCommand::ExpireClaims
+                | MaintCommand::ExpireReservations => false,
+            },
+            Self::Import { command } => match command {
+                ImportCommand::Provenance(_) => true,
+                ImportCommand::Bd(_) | ImportCommand::Openspec(_) => false,
+            },
+            Self::Digest { .. } | Self::Proof { .. } => true,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]

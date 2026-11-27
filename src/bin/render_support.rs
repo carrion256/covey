@@ -354,6 +354,8 @@ impl HelpPayload {
 pub(crate) struct VersionPayload {
     pub(crate) command: &'static str,
     pub(crate) version: &'static str,
+    pub(crate) commit: &'static str,
+    pub(crate) dirty: bool,
 }
 
 impl VersionPayload {
@@ -361,8 +363,25 @@ impl VersionPayload {
         Self {
             command: "covey",
             version: env!("CARGO_PKG_VERSION"),
+            commit: build_commit(),
+            dirty: build_dirty(),
         }
     }
+}
+
+/// Commit hash recorded for this build, or `unknown` outside a git checkout.
+pub(crate) fn build_commit() -> &'static str {
+    env!("COVEY_BUILD_COMMIT")
+}
+
+/// Whether tracked files differed from HEAD when this binary was compiled.
+pub(crate) fn build_dirty() -> bool {
+    env!("COVEY_BUILD_DIRTY") == "true"
+}
+
+/// The human-readable line printed by `--version`.
+pub(crate) fn version_line() -> String {
+    format!("covey {} ({})", env!("CARGO_PKG_VERSION"), build_commit())
 }
 
 #[derive(Serialize)]

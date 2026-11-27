@@ -41,6 +41,7 @@ pub struct Covey {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) workflow: WorkflowProfile,
+    pub(crate) read_only: bool,
 }
 
 static_assertions::assert_impl_all!(Covey: Send, Sync);
@@ -87,6 +88,53 @@ impl Covey {
             conn: Mutex::new(conn),
             clock,
             workflow,
+            read_only: false,
+        })
+    }
+
+    /// Opens an existing Covey database without creating or migrating it and
+    /// refuses every write.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_with_clock_and_workflow(
+            path,
+            Arc::new(SystemClock),
+            WorkflowProfile::default(),
+        )
+    }
+
+    /// Opens an existing Covey database read-only using the given workflow
+    /// profile.
+    pub fn open_read_only_with_workflow(
+        path: impl AsRef<Path>,
+        workflow: WorkflowProfile,
+    ) -> Result<Self> {
+        Self::open_read_only_with_clock_and_workflow(path, Arc::new(SystemClock), workflow)
+    }
+
+    fn open_read_only_with_clock_and_workflow(
+        path: impl AsRef<Path>,
+        clock: Arc<dyn Clock>,
+        workflow: WorkflowProfile,
+    ) -> Result<Self> {
+        let db_path = path.as_ref().to_path_buf();
+        if !db_path.exists() {
+            return Err(CoveyError::StoreNotFound {
+                path: db_path.display().to_string(),
+            });
+        }
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        apply_read_pragmas(&conn)?;
+        let found = read_schema_version(&conn)?;
+        let expected = crate::schema::expected_schema_version();
+        if found != expected {
+            return Err(CoveyError::StoreMigrationRequired { found, expected });
+        }
+        Ok(Self {
+            db_path: Some(db_path),
+            conn: Mutex::new(conn),
+            clock,
+            workflow,
+            read_only: true,
         })
     }
 
@@ -100,6 +148,10 @@ impl Covey {
     where
         F: FnMut(&Transaction<'_>, i64) -> Result<T>,
     {
+        if self.read_only {
+            return Err(CoveyError::StoreReadOnly);
+        }
+
         let mut f = f;
         let mut conn = self
             .conn
@@ -118,6 +170,7 @@ impl Covey {
     {
         if let Some(path) = &self.db_path {
             let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            apply_read_pragmas(&conn)?;
             return f(&conn);
         }
 
@@ -134,6 +187,7 @@ impl Covey {
     {
         if let Some(path) = &self.db_path {
             let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            apply_read_pragmas(&conn)?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
             let result = f(&tx)?;
             tx.commit()?;
@@ -184,6 +238,21 @@ impl Covey {
             ),
         }
     }
+}
+
+fn apply_read_pragmas(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        PRAGMA busy_timeout = 5000;
+        PRAGMA mmap_size = 268435456;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn read_schema_version(conn: &Connection) -> Result<usize> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    Ok(usize::try_from(version).unwrap_or(0))
 }
 
 pub(crate) fn with_idempotent_mutation<T, Req, F>(
@@ -936,7 +1005,192 @@ pub(crate) fn reset_in_progress_review_for_expired_claim(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use rusqlite_migration::{M, Migrations};
+    use tempfile::TempDir;
+
+    use crate::{RegisterSessionReq, SessionRole, SubmitMetaTaskReq};
+
     use super::*;
+
+    /// Migration sources in application order, mirroring the build script.
+    fn migration_sql() -> Vec<String> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/migrations");
+        let mut files = fs::read_dir(&dir)
+            .expect("read migrations directory")
+            .map(|entry| entry.expect("migration entry").path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+            .iter()
+            .map(|path| fs::read_to_string(path).expect("read migration source"))
+            .collect()
+    }
+
+    /// Writes a store at the schema version before the newest migration and
+    /// returns the version it records together with the expected version.
+    fn earlier_store(path: &Path) -> (usize, usize) {
+        let expected = crate::schema::expected_schema_version();
+        let applied = expected.saturating_sub(1);
+        let sources = migration_sql();
+        assert_eq!(
+            sources.len(),
+            expected,
+            "the migration directory must hold one source per expected version"
+        );
+        let mut conn = Connection::open(path).expect("create the earlier store file");
+        let migrations = sources
+            .iter()
+            .take(applied)
+            .map(|sql| M::up(sql.as_str()))
+            .collect::<Vec<_>>();
+        Migrations::new(migrations)
+            .to_latest(&mut conn)
+            .expect("apply the earlier migrations");
+        (applied, expected)
+    }
+
+    #[test]
+    fn open_read_only_reports_a_missing_store() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("absent.db");
+        let error = Covey::open_read_only(&path)
+            .err()
+            .expect("a missing store must be refused");
+        match error {
+            CoveyError::StoreNotFound { path: reported } => {
+                assert_eq!(reported, path.display().to_string());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(
+            !path.exists(),
+            "a read-only open must not create the store file"
+        );
+    }
+
+    #[test]
+    fn open_read_only_refuses_a_store_behind_the_expected_schema() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("earlier.db");
+        let (applied, expected) = earlier_store(&path);
+        let error = Covey::open_read_only(&path)
+            .err()
+            .expect("an earlier schema must be refused");
+        match error {
+            CoveyError::StoreMigrationRequired {
+                found,
+                expected: wanted,
+            } => {
+                assert_eq!(found, applied);
+                assert_eq!(wanted, expected);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_only_store_lists_meta_tasks_and_refuses_writes() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("covey.db");
+        let session_token = {
+            let writable = Covey::open(&path).expect("create the store");
+            let session = writable
+                .register_session(
+                    RegisterSessionReq::try_from_raw_parts(
+                        "read-only-principal",
+                        "read-only-instance",
+                        SessionRole::Orchestrator,
+                        "register-read-only",
+                    )
+                    .expect("valid registration request"),
+                )
+                .expect("register session");
+            writable
+                .submit_meta_task(
+                    SubmitMetaTaskReq::try_from_raw_parts(
+                        session.session_token.clone(),
+                        "read-only listing",
+                        "submit-read-only",
+                    )
+                    .expect("valid submit request"),
+                )
+                .expect("submit meta task");
+            session.session_token
+        };
+
+        let store = Covey::open_read_only(&path).expect("open the store read-only");
+        let summaries = store.list_meta_tasks(10, 0).expect("list meta tasks");
+        assert_eq!(summaries.len(), 1, "the stored meta task must be readable");
+
+        let error = store
+            .submit_meta_task(
+                SubmitMetaTaskReq::try_from_raw_parts(
+                    session_token,
+                    "a read-only store must refuse this",
+                    "submit-read-only-second",
+                )
+                .expect("valid submit request"),
+            )
+            .expect_err("a read-only store must refuse writes");
+        assert!(
+            matches!(error, CoveyError::StoreReadOnly),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_a_completed_task_without_subtasks_completed() {
+        let covey = crate::Covey::open_in_memory_with_clock(std::sync::Arc::new(
+            crate::ManualClock::new(1_700_000_000_000),
+        ))
+        .expect("open in-memory covey");
+        let orchestrator = covey
+            .register_session(
+                RegisterSessionReq::try_from_raw_parts(
+                    "refresh-orchestrator",
+                    "refresh-orchestrator-1",
+                    SessionRole::Orchestrator,
+                    "register-refresh",
+                )
+                .expect("valid registration request"),
+            )
+            .expect("register session");
+        let meta_task_id = covey
+            .submit_meta_task(
+                SubmitMetaTaskReq::try_from_raw_parts(
+                    orchestrator.session_token.clone(),
+                    "closed without subtasks",
+                    "submit-refresh",
+                )
+                .expect("valid submit request"),
+            )
+            .expect("submit meta task");
+        covey
+            .complete_meta_task(
+                crate::CompleteMetaTaskReq::try_from_raw_parts(
+                    orchestrator.session_token.clone(),
+                    meta_task_id.clone(),
+                    "complete-refresh",
+                )
+                .expect("valid complete request"),
+            )
+            .expect("complete the childless task");
+
+        covey
+            .with_write_tx(|tx, now| super::refresh_meta_task_state(tx, &meta_task_id, now))
+            .expect("refresh the completed task");
+
+        let meta_task = covey
+            .meta_task_status(&meta_task_id)
+            .expect("meta task status")
+            .meta_task()
+            .clone();
+        assert_eq!(meta_task.state(), crate::MetaTaskState::Completed);
+        assert_eq!(meta_task.closure, Some(crate::MetaTaskClosure::Done));
+    }
 
     #[test]
     fn redacts_session_token_to_last_eight_chars() {

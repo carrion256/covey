@@ -5,6 +5,7 @@
 use std::{
     ffi::OsString,
     io::{self, IsTerminal, Read, Write},
+    path::Path,
     process::ExitCode,
 };
 
@@ -17,6 +18,7 @@ use covey::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use tracing::level_filters::LevelFilter;
 
 mod cli;
 mod dispatch_support;
@@ -27,7 +29,7 @@ use dispatch_support::dispatch;
 use render_support::{
     OutputError, OutputMode, Rendered, ReportableError, exit_code_for_clap_kind, help_payload,
     print_line, render_error, render_success, resolve_output_mode, short_help_payload,
-    version_payload,
+    version_line, version_payload,
 };
 
 const DEFAULT_DB_PATH: &str = "./covey.db";
@@ -59,7 +61,7 @@ covey <group> <command> [flags]
 groups: session meta subtask claim artifact review queue reservation repoops events conflict maint import digest
 digest: covey digest blake3 --file PATH | --text TEXT | --stdin
 proof: covey proof apply verify | verify-batch | print-contract
-global: --db PATH --json --config PATH --profile NAME
+global: --db PATH --json --config PATH --profile NAME --read-only
 examples:
   covey session register --agent-principal-id agent-a --agent-instance-id run-1 --role executor
   covey subtask claim-next --session-token session_123 --lease-duration-ms 30000
@@ -79,17 +81,12 @@ fn main() -> ExitCode {
 fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
     let explicit_json = raw_args.iter().any(|arg| arg == "--json");
     let mode = resolve_output_mode(&raw_args);
+    install_logging(mode)?;
     if raw_args.iter().any(|arg| arg == "--version" || arg == "-V") {
         if mode == OutputMode::Human && !explicit_json {
-            print_line(
-                &format!("covey {}", env!("CARGO_PKG_VERSION")),
-                &mut io::stdout(),
-            );
+            print_line(&version_line(), &mut io::stdout());
         } else {
-            render_success(
-                mode,
-                &Rendered::summary(version_payload(), env!("CARGO_PKG_VERSION").into()),
-            );
+            render_success(mode, &Rendered::summary(version_payload(), version_line()));
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -119,7 +116,7 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
             ) {
                 let rendered = match err.kind() {
                     clap::error::ErrorKind::DisplayVersion => {
-                        Rendered::summary(version_payload(), env!("CARGO_PKG_VERSION").into())
+                        Rendered::summary(version_payload(), version_line())
                     }
                     _ => Rendered::summary(help_payload(err.to_string().trim()), SHORT_HELP.into()),
                 };
@@ -157,13 +154,74 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
             ),
         )
     })?;
-    let store = Covey::open_with_workflow(&cli.db, workflow)
-        .map_err(|err| OutputError::from_covey(mode, err))?;
+    let plan = store_open_plan(&cli.db, cli.read_only, cli.command.is_read_only_command());
+    let store = match plan {
+        StoreOpenPlan::ReadOnly => Covey::open_read_only_with_workflow(&cli.db, workflow),
+        StoreOpenPlan::RefuseMissing => Err(CoveyError::StoreNotFound {
+            path: cli.db.display().to_string(),
+        }),
+        StoreOpenPlan::OpenOrCreate => Covey::open_with_workflow(&cli.db, workflow),
+    }
+    .map_err(|err| OutputError::from_covey(mode, err))?;
 
     let rendered =
         dispatch(&store, cli.command).map_err(|err| OutputError::from_covey(mode, err))?;
     render_success(mode, &rendered);
     Ok(ExitCode::SUCCESS)
+}
+
+enum StoreOpenPlan {
+    OpenOrCreate,
+    ReadOnly,
+    RefuseMissing,
+}
+
+/// Decides how the store is opened: `--read-only` opens an existing store
+/// without migrating it, a read-only command refuses a missing store, and
+/// everything else opens or creates the store.
+fn store_open_plan(db_path: &Path, read_only: bool, read_only_command: bool) -> StoreOpenPlan {
+    if read_only {
+        StoreOpenPlan::ReadOnly
+    } else if read_only_command && !store_path_exists(db_path) {
+        StoreOpenPlan::RefuseMissing
+    } else {
+        StoreOpenPlan::OpenOrCreate
+    }
+}
+
+/// A path of exactly `:memory:` counts as an existing store: SQLite creates it
+/// in memory.
+fn store_path_exists(db_path: &Path) -> bool {
+    db_path == Path::new(":memory:") || db_path.exists()
+}
+
+fn install_logging(mode: OutputMode) -> Result<(), OutputError> {
+    let Ok(raw) = std::env::var("COVEY_LOG") else {
+        return Ok(());
+    };
+    let level = match raw.as_str() {
+        "off" => LevelFilter::OFF,
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "info" => LevelFilter::INFO,
+        "debug" => LevelFilter::DEBUG,
+        "trace" => LevelFilter::TRACE,
+        other => {
+            return Err(OutputError::new(
+                mode,
+                ReportableError::invalid_args(
+                    format!("invalid COVEY_LOG value `{other}`"),
+                    vec!["Set COVEY_LOG to off, error, warn, info, debug, or trace.".into()],
+                ),
+            ));
+        }
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(io::stderr)
+        .with_max_level(level)
+        .try_init();
+    Ok(())
 }
 
 fn run_proof_command(command: ProofCommand) -> ExitCode {

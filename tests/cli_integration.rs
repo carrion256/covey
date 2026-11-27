@@ -3083,6 +3083,8 @@ fn reservation_and_conflict_commands_emit_json() {
 fn exit_codes_cover_robot_contract() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");
+    // A read verb refuses a missing store, so create it first.
+    success_data(&run_db(&db, &["maint", "expire-claims"]));
 
     let not_found = run_db(&db, &["session", "status", "--session-token", "missing"]);
     assert_eq!(not_found.status.code(), Some(1));
@@ -3185,6 +3187,8 @@ fn maintenance_backup_writes_consistent_snapshot() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");
     let backup = tmp.path().join("covey.backup.db");
+    // `maint backup` only reads the store, so the store must already exist.
+    success_data(&run_db(&db, &["maint", "expire-claims"]));
 
     success_data(&run_db(
         &db,
@@ -3858,7 +3862,7 @@ fn subtask_claim_reports_typed_failures() {
 }
 
 fn seed_cli_meta_tasks(db: &Path) {
-    success_data(&run_db(db, &["meta", "list"]));
+    success_data(&run_db(db, &["maint", "expire-claims"]));
     let conn = Connection::open(db).expect("open seeded covey db");
     conn.execute(
         "INSERT INTO sessions (session_token, agent_principal_id, agent_instance_id, role, state, active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at)
@@ -3886,6 +3890,8 @@ fn count_events(db: &Path) -> i64 {
 fn meta_list_returns_empty_array_for_empty_db() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");
+    // The store must exist before a read verb runs; it still holds no meta tasks.
+    success_data(&run_db(&db, &["maint", "expire-claims"]));
     let data = success_data(&run_db(&db, &["meta", "list"]));
     assert_eq!(data, Value::Array(Vec::new()));
 }
