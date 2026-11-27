@@ -5,12 +5,13 @@ use std::{
 };
 
 use covey::{
-    ArtifactKind, AttemptOutcomeKind, ClaimNextRoutedReq, ClaimResult, ClaimSubtaskReq,
-    CompletionPolicy, Covey, CoveyError, CreateWorkSubtaskReq, EnqueueForApplyReq, EventType,
-    FailSubtaskReq, FinishSubtaskReq, ManualClock, MetaTaskState, PublishArtifactReq,
-    RegisterSessionReq, RequestReviewReq, RetrySubtaskReq, RoutingKey, SessionRole,
-    SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    ActorKind, ArtifactKind, AttemptOutcomeKind, ClaimNextRoutedReq, ClaimResult, ClaimSubtaskReq,
+    CompletionPolicy, Covey, CoveyError, CreateWorkSubtaskReq, EnqueueForApplyReq, EventPayload,
+    EventType, FailSubtaskReq, FinishSubtaskReq, ManualClock, MetaTaskClosure, MetaTaskState,
+    PublishArtifactReq, RegisterSessionReq, RequestReviewReq, RetrySubtaskReq, RoutingKey,
+    SessionRole, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
 };
+use rstest::rstest;
 use rusqlite::{Connection, OpenFlags, params};
 use tempfile::TempDir;
 
@@ -570,6 +571,77 @@ fn terminal_failure_records_evidence_and_closes_work_without_queue_success() {
         MetaTaskState::Completed
     );
     assert_eq!(outcome_event_count(&rig.covey, EventType::SubtaskFailed), 1);
+}
+
+/// The closures recorded by the auto-completion events of one meta task. Each
+/// event must come from the system and name the task in its typed payload.
+fn auto_completion_closures(covey: &Covey, meta_task_id: &str) -> Vec<MetaTaskClosure> {
+    covey
+        .fetch_events(0, 1_000)
+        .expect("fetch events")
+        .into_iter()
+        .filter(|event| event.event_type() == EventType::MetaTaskAutoCompleted)
+        .map(|event| {
+            assert_eq!(event.actor_kind(), ActorKind::System);
+            assert_eq!(event.object_id(), meta_task_id);
+            match event
+                .typed()
+                .expect("typed auto-completion payload")
+                .payload
+            {
+                EventPayload::MetaTaskAutoCompleted(payload) => {
+                    assert_eq!(payload.meta_task_id.as_str(), meta_task_id);
+                    payload.closure
+                }
+                other => panic!("unexpected auto-completion payload: {other:?}"),
+            }
+        })
+        .collect()
+}
+
+#[rstest]
+#[case::finished_work(true, MetaTaskClosure::Done)]
+#[case::failed_work(false, MetaTaskClosure::Dropped)]
+fn the_last_settled_subtask_completes_the_meta_task_with_a_closure_and_one_event(
+    #[case] finish: bool,
+    #[case] closure: MetaTaskClosure,
+) {
+    let rig = Rig::new();
+    let work = start_work(&rig, CompletionPolicy::Direct, 30_000);
+    assert!(auto_completion_closures(&rig.covey, &work.meta_task_id).is_empty());
+
+    let outcome = if finish {
+        rig.covey
+            .finish_subtask(finish_request(&work, "work done", "finish-work"))
+            .expect("finish the work")
+    } else {
+        rig.covey
+            .fail_subtask(
+                FailSubtaskReq::try_from_raw_parts(
+                    work.worker.clone(),
+                    work.claim.claim_id.clone(),
+                    work.claim.fence_seq,
+                    Some("blake3:terminal-failure".into()),
+                    "invalid_task_input",
+                    "task cannot be completed",
+                    "fail-work",
+                )
+                .expect("valid failure request"),
+            )
+            .expect("fail the work")
+    };
+    assert_eq!(outcome.subtask_id, work.subtask_id);
+
+    let status = rig
+        .covey
+        .meta_task_status(&work.meta_task_id)
+        .expect("meta-task status");
+    assert_eq!(status.meta_task().state(), MetaTaskState::Completed);
+    assert_eq!(status.meta_task().closure, Some(closure));
+    assert_eq!(
+        auto_completion_closures(&rig.covey, &work.meta_task_id),
+        [closure]
+    );
 }
 
 #[test]

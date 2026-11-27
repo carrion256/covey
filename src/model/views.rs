@@ -6012,3 +6012,14 @@ pub struct ReapResult {
 pub struct ExpireResult {
     pub expired_count: usize,
 }
+
+/// Result of a prune pass, and the payload of the `store_pruned` event that
+/// records it.
+#[must_use]
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+pub struct PruneResult {
+    pub older_than_ms: i64,
+    pub idempotency_rows: usize,
+    pub event_rows: usize,
+}

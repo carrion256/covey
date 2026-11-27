@@ -7,8 +7,9 @@ use crate::{
     Covey,
     error::Result,
     model::{
-        ClaimState, EventType, ExpireResult, ExpiredCountPayload, ObjectType, ReapResult,
-        ReservationState, SessionState, StaleSessionsPayload, SubtaskState,
+        ClaimState, CoveyTypeValidationError, EventType, ExpireResult, ExpiredCountPayload,
+        ObjectType, PruneResult, ReapResult, ReservationState, SessionState, StaleSessionsPayload,
+        SubtaskState,
     },
     overlap::resolve_reservation_overlap_conflicts,
     queries::{load_expirable_claims, load_expired_reservation_ids},
@@ -191,6 +192,50 @@ impl Covey {
         );
         result
     }
+
+    /// Deletes idempotency rows, and on request event-log rows, older than
+    /// `older_than_ms`.
+    ///
+    /// An idempotency row matters only while its caller may still retry, and
+    /// the event log is a feed rather than the source of truth, so both can be
+    /// cut back by age. The pass records itself as one `store_pruned` event,
+    /// which is newer than the cutoff and so survives it.
+    pub fn prune_store(&self, older_than_ms: i64, prune_events: bool) -> Result<PruneResult> {
+        if older_than_ms <= 0 {
+            return Err(CoveyTypeValidationError::new("older_than_ms", "must be positive").into());
+        }
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            let cutoff = now.saturating_sub(older_than_ms);
+            let idempotency_rows = tx.execute(
+                "DELETE FROM mutation_idempotency WHERE created_at < ?1",
+                params![cutoff],
+            )?;
+            let event_rows = if prune_events {
+                tx.execute(
+                    "DELETE FROM event_log WHERE created_at < ?1",
+                    params![cutoff],
+                )?
+            } else {
+                0
+            };
+            let result = PruneResult::new(older_than_ms, idempotency_rows, event_rows);
+            append_system_event(
+                tx,
+                EventType::StorePruned,
+                ObjectType::Store,
+                "store",
+                &result,
+                now,
+            )?;
+            Ok(result)
+        });
+        self.log_operation("prune_store", "system", started_at, &result, |_| {
+            Vec::<String>::new()
+        });
+        result
+    }
+
     /// Backs up the database to a fresh SQLite file via VACUUM INTO.
     ///
     /// The backup is a consistent snapshot produced without writing to the

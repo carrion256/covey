@@ -91,7 +91,8 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
 - `ops/reservation.rs`
   Reservation lifecycle, overlap lookup, event listing, and conflict resolution.
 - `ops/maintenance.rs`
-  Lease-based cleanup and stale-session/claim/reservation maintenance.
+  Lease-based cleanup and stale-session/claim/reservation maintenance, and the
+  age-based prune of idempotency rows and, on request, event-log rows.
 - `ops/current_work.rs`
   Current-work projection for one imported change set: its blockers, the held
   claims that have gone stale past an explicit threshold, and the resolution of
@@ -256,7 +257,11 @@ NULL in every new column.
   unspecified closure means `done` for complete and `dropped` for cancel. The
   stored closure is the value the event payload carries.
 - A refresh never reopens a completed task that has no subtasks, and whenever a
-  refresh moves a task out of a terminal state it clears the closure.
+  refresh moves a task out of a terminal state it clears the closure. When the
+  last open subtask of a task settles, the refresh completes the task in the
+  same transaction, stores closure `done` if any of its work subtasks is
+  `completed` or `applied` and `dropped` otherwise, and appends one system
+  event `meta_task_auto_completed` carrying `{ meta_task_id, closure }`.
 - Supersede links (`meta_task_supersedes`) give a replaced task at most one
   replacement and are written in the same transaction that retires it: a task still
   `planning` or `active` is retired exactly as `meta cancel` retires it, with closure

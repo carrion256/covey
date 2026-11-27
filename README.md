@@ -68,7 +68,8 @@ Covey tracks a fixed set of entities:
 - `reviews`: verdicts attached to an exact artifact digest
 - `reservations`: advisory path-scope hints for planning
 - `ready_queue`: approved artifacts waiting for apply, with leased apply claims
-- `event_log`: append-only change feed for subscribers
+- `event_log`: change feed for subscribers. Rows are only ever appended;
+  `maint prune --events` is the one command that removes rows, and only by age
 - `conflicts`: visible unresolved situations needing intervention
 
 Schema changes are forward-only.
@@ -96,7 +97,10 @@ Covey exists to make invalid states hard or impossible.
 - Artifact digests are unique and immutable
 - Reviews bind to one exact artifact digest; a new artifact requires a new review
 - At most one queued or in-flight ready-queue entry per subtask
-- Every successful mutation appends exactly one event-log row
+- Every successful state change appends its event-log row in the same
+  transaction. A mutation that causes a further change appends a row for that
+  too: a meta task that its last settled subtask completes
+  (`meta_task_auto_completed`), a task that a superseding submission retires
 - Failed validations append no event-log row and leave no partial state
 - Every meta task carries a unique numeric handle issued by the store and
   numbered by the schema in creation order
@@ -484,6 +488,24 @@ covey subtask finish --session-token <worker-session> --claim-id <claim> \
 and a `--failure-code`. All three accept `--evidence-digest` when needed.
 Workers still renew leases and heartbeat their sessions for long-running work;
 the workflow profile does not change ownership, expiry, or dependency rules.
+
+Every write that takes a session token accepts `--idempotency-key`. When it is
+omitted, `subtask start`, `finish`, `retry`, `fail`, `abandon`, and
+`claim release` use a key derived from the claim id and fence, so running the
+same command again for the same claim replays the first result instead of
+acting twice. Every other command generates a fresh key per call.
+
+Maintenance needs no session:
+
+```bash
+covey maint expire-claims
+covey maint reap-stale --stale-threshold-ms 45000
+covey maint prune --older-than-ms 2592000000 --events
+```
+
+`maint prune` deletes idempotency rows older than the given age, and with
+`--events` event-log rows of that age as well. It answers both counts and
+records itself as one `store_pruned` event.
 
 Scheduler read paths are explicit and read-only:
 

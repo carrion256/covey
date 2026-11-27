@@ -48,6 +48,9 @@ impl EventPayload {
             EventType::MetaTaskUpdated => {
                 Self::MetaTaskUpdated(serde_json::from_str(payload_json)?)
             }
+            EventType::MetaTaskAutoCompleted => {
+                Self::MetaTaskAutoCompleted(serde_json::from_str(payload_json)?)
+            }
             EventType::SubtaskCreated => Self::SubtaskCreated(serde_json::from_str(payload_json)?),
             EventType::WorkSubtaskCreated => {
                 Self::WorkSubtaskCreated(serde_json::from_str(payload_json)?)
@@ -142,6 +145,7 @@ impl EventPayload {
             EventType::ReservationsExpired => {
                 Self::ReservationsExpired(serde_json::from_str(payload_json)?)
             }
+            EventType::StorePruned => Self::StorePruned(serde_json::from_str(payload_json)?),
             EventType::OpenSpecImported => {
                 Self::OpenSpecImported(Box::new(serde_json::from_str(payload_json)?))
             }

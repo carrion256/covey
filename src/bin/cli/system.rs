@@ -20,6 +20,10 @@ pub(crate) enum MaintCommand {
     ExpireClaims,
     #[command(name = "expire-reservations")]
     ExpireReservations,
+    #[command(name = "prune")]
+    /// Delete idempotency rows, and with --events event-log rows, older than
+    /// a given age.
+    Prune(PruneArgs),
     #[command(name = "backup")]
     /// Write a consistent snapshot of the database to a fresh SQLite file.
     Backup(BackupArgs),
@@ -28,6 +32,15 @@ pub(crate) enum MaintCommand {
 pub(crate) struct BackupArgs {
     #[arg(long)]
     pub(crate) output: std::path::PathBuf,
+}
+#[derive(Args, Debug)]
+pub(crate) struct PruneArgs {
+    /// Age in milliseconds; rows older than this are deleted.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    pub(crate) older_than_ms: i64,
+    /// Also delete event-log rows older than that age.
+    #[arg(long)]
+    pub(crate) events: bool,
 }
 #[derive(Args, Debug)]
 pub(crate) struct ListEventsArgs {

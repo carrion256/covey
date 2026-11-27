@@ -17,9 +17,10 @@ use crate::{
     config::WorkflowProfile,
     error::{CoveyError, Result},
     model::{
-        Claim, ClaimState, EventType, LeaseDeadlineMs, LeaseDurationMs, MetaTaskState, ObjectType,
-        ReadyQueueClaim, ReadyQueueState, ReviewState, SessionState, SubtaskKind, SubtaskState,
-        TimestampMs, claim_state_name, meta_task_state_name, ready_queue_state_name,
+        Claim, ClaimState, EventType, LeaseDeadlineMs, LeaseDurationMs,
+        MetaTaskAutoCompletedPayload, MetaTaskClosure, MetaTaskState, ObjectType, ReadyQueueClaim,
+        ReadyQueueState, ReviewState, SessionState, SubtaskKind, SubtaskState, TimestampMs,
+        claim_state_name, meta_task_closure_name, meta_task_state_name, ready_queue_state_name,
         review_state_name, session_state_name, subtask_kind_name, subtask_state_name,
     },
     queries::{
@@ -743,12 +744,19 @@ pub(crate) fn refresh_meta_task_state(
     };
 
     if meta_task.state() != desired_state {
-        tx.execute(
+        // A task that completes here was closed by its last subtask settling,
+        // not by `meta complete`: the closure is decided from its work, and the
+        // change gets its own event. Any other move leaves a terminal state or
+        // starts work, and carries no closure.
+        let closure = if desired_state == MetaTaskState::Completed {
+            Some(auto_completion_closure(tx, meta_task_id)?)
+        } else {
+            None
+        };
+        let updated = tx.execute(
             r#"
             UPDATE meta_tasks
-            SET state = ?2,
-                closure = CASE WHEN ?2 IN (?5, ?6) THEN closure ELSE NULL END,
-                updated_at = ?3
+            SET state = ?2, closure = ?5, updated_at = ?3
             WHERE meta_task_id = ?1 AND state != ?4
             "#,
             params![
@@ -756,12 +764,50 @@ pub(crate) fn refresh_meta_task_state(
                 meta_task_state_name(desired_state),
                 now,
                 meta_task_state_name(MetaTaskState::Cancelled),
-                meta_task_state_name(MetaTaskState::Completed),
-                meta_task_state_name(MetaTaskState::Cancelled)
+                closure.map(meta_task_closure_name),
             ],
         )?;
+        if updated == 1
+            && let Some(closure) = closure
+        {
+            append_system_event(
+                tx,
+                EventType::MetaTaskAutoCompleted,
+                ObjectType::MetaTask,
+                meta_task_id,
+                &MetaTaskAutoCompletedPayload::new(meta_task.meta_task_id.clone(), closure),
+                now,
+            )?;
+        }
     }
     Ok(())
+}
+
+/// The closure of a meta task that its last settled subtask completed: `done`
+/// when at least one work subtask finished (`completed` or `applied`),
+/// `dropped` when all of its work failed or was abandoned.
+fn auto_completion_closure(tx: &Transaction<'_>, meta_task_id: &str) -> Result<MetaTaskClosure> {
+    let finished_work: bool = tx.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM subtasks
+            WHERE meta_task_id = ?1 AND kind = ?2 AND state IN (?3, ?4)
+        )
+        "#,
+        params![
+            meta_task_id,
+            subtask_kind_name(SubtaskKind::Work),
+            subtask_state_name(SubtaskState::Completed),
+            subtask_state_name(SubtaskState::Applied),
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(if finished_work {
+        MetaTaskClosure::Done
+    } else {
+        MetaTaskClosure::Dropped
+    })
 }
 
 pub(crate) fn requeue_stale_ready_queue_claims(

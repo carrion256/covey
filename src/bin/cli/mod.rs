@@ -205,7 +205,8 @@ impl Commands {
                 MaintCommand::Backup(_) => true,
                 MaintCommand::ReapStale(_)
                 | MaintCommand::ExpireClaims
-                | MaintCommand::ExpireReservations => false,
+                | MaintCommand::ExpireReservations
+                | MaintCommand::Prune(_) => false,
             },
             Self::Import { command } => match command {
                 ImportCommand::Provenance(_) => true,

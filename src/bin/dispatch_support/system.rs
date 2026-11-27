@@ -115,6 +115,16 @@ pub(super) fn dispatch_maint(store: &Covey, command: MaintCommand) -> covey::Res
                 format!("expired_reservations={}", result.expired_count),
             ))
         }
+        MaintCommand::Prune(args) => {
+            let result = store.prune_store(args.older_than_ms, args.events)?;
+            Ok(Rendered::summary(
+                &result,
+                format!(
+                    "pruned idempotency_rows={} event_rows={}",
+                    result.idempotency_rows, result.event_rows
+                ),
+            ))
+        }
         MaintCommand::Backup(args) => {
             store.backup_database(&args.output)?;
             Ok(Rendered::summary(

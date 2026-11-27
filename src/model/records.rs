@@ -17,7 +17,7 @@ use super::{
     ModelId, ObjectType, ObserveVcsWorkspaceReq, OpenSpecArchiveBlockedReason,
     OpenSpecArchiveStatusState, OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId,
     OperatorBlockerReason, OperatorBlockerState, OperatorBlockerTargetKind, PromptText, ProviderId,
-    ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq, QueueId, ReadyQueueClaim,
+    ProviderRunId, ProviderRunIdIssuer, PruneResult, PublishArtifactReq, QueueId, ReadyQueueClaim,
     ReadyQueueState, RecordApplyGateBlockerReq, RecordApplyVerificationReq, RecordApplyWorktreeReq,
     RecordOpenSpecArchiveStatusReq, RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq,
     RecordProseApplyBlockerReq, RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq,
@@ -4996,6 +4996,15 @@ pub struct ExpiredCountPayload {
     pub expired_count: usize,
 }
 
+/// Payload emitted when the last open subtask of a meta task settles and the
+/// store completes the task on its own.
+#[allow(clippy::redundant_field_names)] // derive-new writes `field: field` in the generated `new`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, new)]
+pub struct MetaTaskAutoCompletedPayload {
+    pub meta_task_id: MetaTaskId,
+    pub closure: MetaTaskClosure,
+}
+
 /// Typed event payload union for the append-only event log audit trail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventPayload {
@@ -5009,6 +5018,7 @@ pub enum EventPayload {
     MetaTaskCompleted(CompleteMetaTaskReq),
     MetaTaskAnnotated(AnnotateMetaTaskReq),
     MetaTaskUpdated(UpdateMetaTaskReq),
+    MetaTaskAutoCompleted(MetaTaskAutoCompletedPayload),
     SubtaskCreated(CreateSubtaskRequest),
     WorkSubtaskCreated(CreateWorkSubtaskReq),
     SubtaskClaimed(ClaimResult),
@@ -5047,6 +5057,7 @@ pub enum EventPayload {
     SessionsReaped(StaleSessionsPayload),
     ClaimsExpired(ExpiredCountPayload),
     ReservationsExpired(ExpiredCountPayload),
+    StorePruned(PruneResult),
     OpenSpecImported(Box<ImportOpenSpecEvent>),
 }
 
@@ -5065,6 +5076,7 @@ impl EventPayload {
             Self::MetaTaskCompleted(_) => EventType::MetaTaskCompleted,
             Self::MetaTaskAnnotated(_) => EventType::MetaTaskAnnotated,
             Self::MetaTaskUpdated(_) => EventType::MetaTaskUpdated,
+            Self::MetaTaskAutoCompleted(_) => EventType::MetaTaskAutoCompleted,
             Self::SubtaskCreated(_) => EventType::SubtaskCreated,
             Self::WorkSubtaskCreated(_) => EventType::WorkSubtaskCreated,
             Self::SubtaskClaimed(_) => EventType::SubtaskClaimed,
@@ -5105,6 +5117,7 @@ impl EventPayload {
             Self::SessionsReaped(_) => EventType::SessionsReaped,
             Self::ClaimsExpired(_) => EventType::ClaimsExpired,
             Self::ReservationsExpired(_) => EventType::ReservationsExpired,
+            Self::StorePruned(_) => EventType::StorePruned,
             Self::OpenSpecImported(_) => EventType::OpenSpecImported,
         }
     }
@@ -5123,6 +5136,7 @@ impl EventPayload {
             | Self::MetaTaskCompleted(_)
             | Self::MetaTaskAnnotated(_)
             | Self::MetaTaskUpdated(_)
+            | Self::MetaTaskAutoCompleted(_)
             | Self::MetaTaskSourceLinked(_) => ObjectType::MetaTask,
             Self::SubtaskCreated(_)
             | Self::WorkSubtaskCreated(_)
@@ -5163,6 +5177,7 @@ impl EventPayload {
             | Self::ReservationReleased(_)
             | Self::ReservationRenewed(_)
             | Self::ReservationsExpired(_) => ObjectType::Reservation,
+            Self::StorePruned(_) => ObjectType::Store,
             Self::ConflictResolved(_) => ObjectType::Conflict,
             Self::OpenSpecImported(event) => event.object_type(),
         }

@@ -92,8 +92,9 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 args.session_token.clone(),
                 args.claim_id.clone(),
                 args.fence_seq,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("start-subtask")),
+                args.idempotency_key.unwrap_or_else(|| {
+                    fenced_idempotency_key("start-subtask", &args.claim_id, args.fence_seq)
+                }),
             )?)?;
             Ok(Rendered::summary(
                 ClaimFenceAck {
@@ -105,14 +106,16 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Finish(args) => {
+            let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
+                fenced_idempotency_key("finish-subtask", &args.claim_id, args.fence_seq)
+            });
             let outcome = store.finish_subtask(FinishSubtaskReq::try_from_raw_parts(
                 args.session_token,
                 args.claim_id,
                 args.fence_seq,
                 args.evidence_digest,
                 args.summary,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("finish-subtask")),
+                idempotency_key,
             )?)?;
             Ok(Rendered::summary(
                 &outcome,
@@ -120,6 +123,9 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Retry(args) => {
+            let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
+                fenced_idempotency_key("retry-subtask", &args.claim_id, args.fence_seq)
+            });
             let outcome = store.retry_subtask(RetrySubtaskReq::try_from_raw_parts(
                 args.session_token,
                 args.claim_id,
@@ -127,8 +133,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 args.evidence_digest,
                 args.failure_code,
                 args.summary,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("retry-subtask")),
+                idempotency_key,
             )?)?;
             Ok(Rendered::summary(
                 &outcome,
@@ -136,6 +141,9 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Fail(args) => {
+            let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
+                fenced_idempotency_key("fail-subtask", &args.claim_id, args.fence_seq)
+            });
             let outcome = store.fail_subtask(FailSubtaskReq::try_from_raw_parts(
                 args.session_token,
                 args.claim_id,
@@ -143,8 +151,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 args.evidence_digest,
                 args.failure_code,
                 args.summary,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("fail-subtask")),
+                idempotency_key,
             )?)?;
             Ok(Rendered::summary(
                 &outcome,
@@ -156,8 +163,9 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 args.session_token.clone(),
                 args.claim_id.clone(),
                 args.fence_seq,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("abandon-subtask")),
+                args.idempotency_key.unwrap_or_else(|| {
+                    fenced_idempotency_key("abandon-subtask", &args.claim_id, args.fence_seq)
+                }),
             )?)?;
             Ok(Rendered::summary(
                 ClaimFenceAck {
@@ -228,8 +236,9 @@ pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Res
                 args.session_token.clone(),
                 args.claim_id.clone(),
                 args.fence_seq,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("release-claim")),
+                args.idempotency_key.unwrap_or_else(|| {
+                    fenced_idempotency_key("release-claim", &args.claim_id, args.fence_seq)
+                }),
             )?)?;
             Ok(Rendered::summary(
                 ClaimFenceAck {

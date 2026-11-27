@@ -870,6 +870,70 @@ fn store_time_does_not_follow_a_backward_wall_clock_step() {
 }
 
 #[test]
+fn prune_deletes_old_idempotency_rows_and_only_on_request_old_events() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let orch = register(
+        &covey,
+        "orch_prune",
+        "orch_prune",
+        SessionRole::Orchestrator,
+    );
+    covey
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(orch.clone(), "old work", id_key("submit"))
+                .expect("valid submit-meta-task request"),
+        )
+        .expect("submit meta task");
+    rig.tick(10_000);
+    send_heartbeat(&covey, &orch).expect("heartbeat inside the kept window");
+    let count = |table: &str| -> i64 {
+        Connection::open(&rig.db_path)
+            .expect("open db")
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count rows")
+    };
+    assert_eq!(count("mutation_idempotency"), 3);
+    assert_eq!(count("event_log"), 3);
+
+    assert!(matches!(
+        covey.prune_store(0, true),
+        Err(CoveyError::TypeValidationError(_))
+    ));
+
+    // Without `prune_events` the event log only gains the prune's own event.
+    let kept_events = covey.prune_store(5_000, false).expect("prune idempotency");
+    assert_eq!(kept_events.idempotency_rows, 2);
+    assert_eq!(kept_events.event_rows, 0);
+    assert_eq!(count("mutation_idempotency"), 1);
+    assert_eq!(count("event_log"), 4);
+
+    let pruned = covey.prune_store(5_000, true).expect("prune events");
+    assert_eq!(pruned.idempotency_rows, 0);
+    assert_eq!(pruned.event_rows, 2);
+    let remaining = covey.fetch_events(0, 100).expect("fetch events");
+    assert_eq!(
+        remaining
+            .iter()
+            .map(covey::Event::event_type)
+            .collect::<Vec<_>>(),
+        [
+            EventType::SessionHeartbeat,
+            EventType::StorePruned,
+            EventType::StorePruned
+        ]
+    );
+    let last = remaining.last().expect("the prune records itself");
+    assert_eq!(last.actor_kind(), ActorKind::System);
+    match last.typed().expect("typed prune payload").payload {
+        EventPayload::StorePruned(recorded) => assert_eq!(recorded, pruned),
+        other => panic!("unexpected prune payload: {other:?}"),
+    }
+}
+
+#[test]
 fn idempotent_mutations_replay_and_reject_payload_drift() {
     let rig = Rig::new();
     let covey = rig.covey();

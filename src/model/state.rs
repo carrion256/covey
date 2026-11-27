@@ -23,6 +23,7 @@ pub enum ObjectType {
     VcsWorkspace,
     VcsPacketStackEntry,
     VcsPrPublication,
+    Store,
 }
 
 pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
@@ -44,6 +45,7 @@ pub(crate) const fn object_type_name(object_type: ObjectType) -> &'static str {
         ObjectType::VcsWorkspace => "vcs_workspace",
         ObjectType::VcsPacketStackEntry => "vcs_packet_stack_entry",
         ObjectType::VcsPrPublication => "vcs_pr_publication",
+        ObjectType::Store => "store",
     }
 }
 
@@ -237,6 +239,8 @@ pub enum EventType {
     MetaTaskCompleted,
     MetaTaskAnnotated,
     MetaTaskUpdated,
+    MetaTaskAutoCompleted,
+    StorePruned,
 }
 
 /// Covey-owned lifecycle state for apply worktrees retained as evidence.

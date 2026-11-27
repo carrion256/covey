@@ -60,3 +60,14 @@ pub(crate) fn dispatch(store: &Covey, command: Commands) -> covey::Result<Render
 fn new_idempotency_key(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4().simple())
 }
+
+/// The idempotency key of a call fenced by one claim, used when the caller
+/// named none. Running the same command again for the same claim and fence
+/// replays the first result instead of running the operation a second time.
+fn fenced_idempotency_key(
+    operation: &str,
+    claim_id: &str,
+    fence_seq: impl std::fmt::Display,
+) -> String {
+    format!("{operation}:{claim_id}:{fence_seq}")
+}
