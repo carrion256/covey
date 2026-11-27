@@ -6,28 +6,30 @@ use super::{
     ClaimSubtaskReq, CompleteMetaTaskReq, CompletionPolicy, Conflict, ConflictKind,
     ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, DueDate, EnqueueForApplyReq,
     Event, EventPayload, EventType, ExitSessionReq, ExpiredCountPayload, ExpiringClaim, FenceSeq,
-    HeartbeatReq, IdempotencyKey, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason,
-    ImportOpenSpecAction, ImportOpenSpecConflict, ImportOpenSpecConflictReason,
-    ImportOpenSpecEvent, ImportOpenSpecItemResult, ImportOpenSpecReq, ImportOpenSpecResult,
-    LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask,
-    MetaTaskAnnotationChange, MetaTaskAnnotationKey, MetaTaskAnnotationValue, MetaTaskClosure,
-    MetaTaskDedupeKey, MetaTaskHandle, MetaTaskId, MetaTaskState, MetaTaskStatus, MetaTaskTitle,
-    MetaTaskUrgency, ObjectType, OpenSpecImportProvenance, OpenSpecImportProvenanceCommon,
+    FieldChange, HeartbeatReq, IdempotencyKey, ImportBdV1Req, ImportBdV1Result,
+    ImportBdV1SkipReason, ImportOpenSpecAction, ImportOpenSpecConflict,
+    ImportOpenSpecConflictReason, ImportOpenSpecEvent, ImportOpenSpecItemResult, ImportOpenSpecReq,
+    ImportOpenSpecResult, LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq,
+    MarkInFlightReq, MetaTask, MetaTaskAnnotationChange, MetaTaskAnnotationKey,
+    MetaTaskAnnotationValue, MetaTaskAutoCompletedPayload, MetaTaskClosure, MetaTaskDedupeKey,
+    MetaTaskHandle, MetaTaskId, MetaTaskState, MetaTaskStatus, MetaTaskTitle, MetaTaskUrgency,
+    ObjectType, OpenSpecImportProvenance, OpenSpecImportProvenanceCommon,
     OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, OpenSpecTaskId, OverlapQueryReq,
-    PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics,
+    PruneResult, PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics,
     ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
     RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq,
     ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
     RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
     RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, RequestReservationReq,
     RequestReviewReq, Reservation, ReservationId, ReservationOverlapConflictPayload,
-    ReservationScope, ReservationState, ResolveConflictReq, Review, ReviewSubtask, ReviewTarget,
-    ReviewVerdict, RoutingKey, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
-    SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq,
-    StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
-    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle, SubtaskView,
-    SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask,
-    bd_import_v1_subtask_id, make_id, parse_generated_members,
+    ReservationScope, ReservationState, ResolveConflictReq, RetireSubtaskReq, Review,
+    ReviewSubtask, ReviewTarget, ReviewVerdict, RoutingKey, ScopeClass, Session, SessionHandle,
+    SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload,
+    StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind,
+    SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle,
+    SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent, UpdateMetaTaskReq,
+    VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id, make_id,
+    parse_generated_members,
 };
 use crate::{CoveyError, CreateWorkSubtaskReq, EvidencePolicy, FinishSubtaskReq, RetrySubtaskReq};
 use rstest::rstest;
@@ -6038,6 +6040,17 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
     let stale_sessions = StaleSessionsPayload::new(2);
     let expired = ExpiredCountPayload::new(3);
     let openspec = sample_openspec_event();
+    let update = UpdateMetaTaskReq::try_from_raw_parts("session-1", "meta-1", "idem-update")
+        .expect("valid update-meta-task request")
+        .with_urgency(FieldChange::Set(MetaTaskUrgency::High))
+        .with_due_on(FieldChange::Clear);
+    let auto_completed = MetaTaskAutoCompletedPayload::new(
+        MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+        MetaTaskClosure::Dropped,
+    );
+    let retire = RetireSubtaskReq::try_from_raw_parts("session-1", "subtask-1", "idem-retire")
+        .expect("valid retire-subtask request");
+    let pruned = PruneResult::new(60_000, 4, 9);
 
     let cases = vec![
         (
@@ -6206,6 +6219,26 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
             EventType::OpenSpecImported,
             payload_json(&openspec),
             EventPayload::OpenSpecImported(Box::new(openspec)),
+        ),
+        (
+            EventType::MetaTaskUpdated,
+            payload_json(&update),
+            EventPayload::MetaTaskUpdated(update),
+        ),
+        (
+            EventType::MetaTaskAutoCompleted,
+            payload_json(&auto_completed),
+            EventPayload::MetaTaskAutoCompleted(auto_completed),
+        ),
+        (
+            EventType::SubtaskRetired,
+            payload_json(&retire),
+            EventPayload::SubtaskRetired(retire),
+        ),
+        (
+            EventType::StorePruned,
+            payload_json(&pruned),
+            EventPayload::StorePruned(pruned),
         ),
     ];
 

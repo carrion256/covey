@@ -52,6 +52,24 @@ struct MetaTaskRow {
 }
 
 #[derive(Deserialize)]
+struct ClaimData {
+    claim_id: String,
+    fence_seq: i64,
+}
+
+#[derive(Deserialize)]
+struct EventRow {
+    event_type: String,
+}
+
+#[derive(Deserialize)]
+struct PruneData {
+    older_than_ms: i64,
+    idempotency_rows: usize,
+    event_rows: usize,
+}
+
+#[derive(Deserialize)]
 struct VersionData {
     command: String,
     version: String,
@@ -218,6 +236,161 @@ fn refusal_reason_names_the_specific_error_under_a_coarse_code() {
     assert!(!error.ok);
     assert_eq!(error.code, "conflict");
     assert_eq!(error.reason, "session_already_active");
+}
+
+#[test]
+fn a_repeated_fenced_command_replays_instead_of_running_twice() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    let orchestrator = register_orchestrator(&dir, &db);
+    let meta_task_id = submit_meta_task(&dir, &db, &orchestrator, "replayed work");
+    let run = |args: &[&str]| {
+        covey(&dir)
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+    success_data::<serde::de::IgnoredAny>(&run(&[
+        "subtask",
+        "create",
+        "--session-token",
+        &orchestrator,
+        "--meta-task-id",
+        &meta_task_id,
+        "--title",
+        "work",
+    ]));
+    let worker = success_data::<SessionData>(&run(&[
+        "session",
+        "register",
+        "--agent-principal-id",
+        "worker",
+        "--agent-instance-id",
+        "worker-1",
+        "--role",
+        "executor",
+    ]))
+    .session_token;
+    let claim =
+        success_data::<ClaimData>(&run(&["subtask", "claim-next", "--session-token", &worker]));
+    let fence_seq = claim.fence_seq.to_string();
+    let fenced = |verb: &'static str, extra: &[&str]| {
+        let mut args = vec![
+            "subtask",
+            verb,
+            "--session-token",
+            worker.as_str(),
+            "--claim-id",
+            claim.claim_id.as_str(),
+            "--fence-seq",
+            fence_seq.as_str(),
+        ];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+
+    // No command names an idempotency key, so each repeat reuses the key
+    // derived from its claim and fence and replays the first result.
+    for _ in 0..2 {
+        success_data::<serde::de::IgnoredAny>(&fenced("start", &[]));
+    }
+    let first = fenced("finish", &["--summary", "done"]);
+    let second = fenced("finish", &["--summary", "done"]);
+    success_data::<serde::de::IgnoredAny>(&first);
+    assert_eq!(
+        second.stdout, first.stdout,
+        "the repeat answers the first result"
+    );
+
+    let events = success_data::<Vec<EventRow>>(&run(&["events", "list", "--limit", "200"]));
+    for event_type in ["subtask_started", "subtask_finished"] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == event_type)
+                .count(),
+            1,
+            "{event_type} must be recorded once"
+        );
+    }
+}
+
+#[test]
+fn maint_prune_reports_both_counts_and_refuses_a_non_positive_age() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    register_orchestrator(&dir, &db);
+    let prune = |age: &str| {
+        covey(&dir)
+            .arg("--db")
+            .arg(&db)
+            .args(["maint", "prune", "--older-than-ms", age, "--events"])
+            .output()
+            .expect("run covey")
+    };
+
+    let refused = prune("0");
+    assert_eq!(refused.status.code(), Some(2));
+    assert_eq!(stderr_error(&refused).code, "invalid_args");
+
+    // Nothing is a day old yet, so the pass deletes nothing and says so.
+    let pruned = success_data::<PruneData>(&prune("86400000"));
+    assert_eq!(pruned.older_than_ms, 86_400_000);
+    assert_eq!(pruned.idempotency_rows, 0);
+    assert_eq!(pruned.event_rows, 0);
+}
+
+#[test]
+fn depending_on_retired_work_is_a_conflict_that_names_its_reason() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    let orchestrator = register_orchestrator(&dir, &db);
+    let meta_task_id = submit_meta_task(&dir, &db, &orchestrator, "retired work");
+    let run = |args: &[&str]| {
+        covey(&dir)
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+    let create = |subtask_id: &str, depends_on: &[&str]| {
+        let mut args = vec![
+            "subtask",
+            "create",
+            "--session-token",
+            orchestrator.as_str(),
+            "--meta-task-id",
+            meta_task_id.as_str(),
+            "--title",
+            "work",
+            "--subtask-id",
+            subtask_id,
+        ];
+        for dependency in depends_on {
+            args.extend_from_slice(&["--depends-on", dependency]);
+        }
+        run(&args)
+    };
+    success_data::<serde::de::IgnoredAny>(&create("retired", &[]));
+    success_data::<serde::de::IgnoredAny>(&create("kept", &[]));
+
+    success_data::<serde::de::IgnoredAny>(&run(&[
+        "subtask",
+        "retire",
+        "--session-token",
+        &orchestrator,
+        "--subtask-id",
+        "retired",
+    ]));
+
+    let refused = create("dependent", &["retired"]);
+    assert_eq!(refused.status.code(), Some(4));
+    let error = stderr_error(&refused);
+    assert_eq!(error.code, "conflict");
+    assert_eq!(error.reason, "subtask_dependency_unsatisfiable");
 }
 
 #[test]
