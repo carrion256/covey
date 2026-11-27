@@ -7,9 +7,9 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         Claim, ClaimState, EventType, ExitSessionReq, HeartbeatReq, ObjectType,
-        RecordRuntimeAttestationReq, RegisterSessionReq, RuntimeAttestation, SessionHandle,
-        SessionRole, SessionState, SubtaskState, TimestampMs, claim_state_name, session_state_name,
-        subtask_state_name,
+        RecordRuntimeAttestationReq, RegisterSessionReq, RuntimeAttestation, SessionEnsured,
+        SessionHandle, SessionRole, SessionState, SubtaskState, TimestampMs, claim_state_name,
+        session_state_name, subtask_state_name,
     },
     queries::{load_runtime_attestation_tx, load_session_tx, load_subtask_tx},
     schema::advance_lease_clock,
@@ -44,60 +44,58 @@ impl Covey {
             MAX_AGENT_ID_LEN,
         )?;
         let started_at = Instant::now();
-        let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
-            crate::store::with_idempotent_mutation(
-                tx,
-                req.agent_principal_id(),
-                "register_session",
-                &req.idempotency_key,
-                &req,
-                crate::model::TimestampMs::parse(now)?,
-                || {
-                    ensure_no_other_active_session(tx, req.agent_principal_id())?;
-                    let session_token = crate::model::make_id("session");
-                    tx.execute(
-                        r#"
-                        INSERT INTO sessions (
-                            session_token, agent_principal_id, agent_instance_id, role, state,
-                            active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?6, ?6)
-                        "#,
-                        params![
-                            session_token,
-                            req.agent_principal_id.as_str(),
-                            req.agent_instance_id.as_str(),
-                            session_role_name(req.role),
-                            session_state_name(SessionState::Active),
-                            now,
-                            lease_now,
-                        ],
-                    )?;
-                    let handle = SessionHandle::new(
-                        session_token,
-                        req.agent_principal_id().to_owned(),
-                        req.agent_instance_id().to_owned(),
-                        req.role,
-                    );
-                    append_session_event(
-                        tx,
-                        EventType::SessionRegistered,
-                        ObjectType::Session,
-                        handle.session_token(),
-                        handle.session_token(),
-                        &handle,
-                        now,
-                    )?;
-                    Ok(handle)
-                },
-            )
-        });
+        let result = self.with_write_tx(|tx, now| register_session_in_tx(tx, &req, now));
         self.log_operation(
             "register_session",
             req.agent_principal_id(),
             started_at,
             &result,
             |handle| vec![format!("session:{}", handle.session_token)],
+        );
+        result
+    }
+
+    /// Ensures the principal holds an active session in the requested role.
+    ///
+    /// The active session of `req.agent_principal_id` decides the outcome: none
+    /// present registers a session exactly as [`Covey::register_session`] does;
+    /// one present in the requested role is returned untouched, whatever instance
+    /// identity it carries, and nothing is written; one present in another role is
+    /// refused with [`CoveyError::WrongRole`].
+    pub fn ensure_session(&self, req: RegisterSessionReq) -> Result<SessionEnsured> {
+        ensure_length(
+            "agent_principal_id",
+            &req.agent_principal_id,
+            MAX_AGENT_ID_LEN,
+        )?;
+        ensure_length(
+            "agent_instance_id",
+            &req.agent_instance_id,
+            MAX_AGENT_ID_LEN,
+        )?;
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            match active_session_for_principal_tx(tx, req.agent_principal_id())? {
+                None => register_session_in_tx(tx, &req, now).map(|session| SessionEnsured {
+                    session,
+                    registered: true,
+                }),
+                Some(session) if session.role == req.role => Ok(SessionEnsured {
+                    session,
+                    registered: false,
+                }),
+                Some(session) => Err(CoveyError::WrongRole {
+                    expected: vec![req.role],
+                    actual: session.role,
+                }),
+            }
+        });
+        self.log_operation(
+            "ensure_session",
+            req.agent_principal_id(),
+            started_at,
+            &result,
+            |ensured| vec![format!("session:{}", ensured.session.session_token)],
         );
         result
     }
@@ -359,29 +357,7 @@ impl Covey {
                     session_role_name(role),
                     session_state_name(SessionState::Active)
                 ],
-                |row| {
-                    crate::model::SessionHandle::try_from_raw_parts(
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        crate::model::SessionRole::from_str(&row.get::<_, String>(3)?).map_err(
-                            |err| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    3,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(err),
-                                )
-                            },
-                        )?,
-                    )
-                    .map_err(|err| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            Box::new(err),
-                        )
-                    })
-                },
+                session_handle_from_row,
             )
             .optional()
             .map_err(Into::into)
@@ -400,6 +376,95 @@ impl Covey {
         );
         result
     }
+}
+
+/// Registers a session, its event, and its idempotency record inside `tx`.
+///
+/// Shared by [`Covey::register_session`] and [`Covey::ensure_session`] so both
+/// verbs write the same rows in the same order.
+fn register_session_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    req: &RegisterSessionReq,
+    now: i64,
+) -> Result<SessionHandle> {
+    let lease_now = advance_lease_clock(tx, now)?;
+    crate::store::with_idempotent_mutation(
+        tx,
+        req.agent_principal_id(),
+        "register_session",
+        &req.idempotency_key,
+        req,
+        TimestampMs::parse(now)?,
+        || {
+            ensure_no_other_active_session(tx, req.agent_principal_id())?;
+            let session_token = crate::model::make_id("session");
+            tx.execute(
+                r#"
+                INSERT INTO sessions (
+                    session_token, agent_principal_id, agent_instance_id, role, state,
+                    active_subtask_id, last_heartbeat_at, last_heartbeat_tick, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?6, ?6)
+                "#,
+                params![
+                    session_token,
+                    req.agent_principal_id.as_str(),
+                    req.agent_instance_id.as_str(),
+                    session_role_name(req.role),
+                    session_state_name(SessionState::Active),
+                    now,
+                    lease_now,
+                ],
+            )?;
+            let handle = SessionHandle::new(
+                session_token,
+                req.agent_principal_id().to_owned(),
+                req.agent_instance_id().to_owned(),
+                req.role,
+            );
+            append_session_event(
+                tx,
+                EventType::SessionRegistered,
+                ObjectType::Session,
+                handle.session_token(),
+                handle.session_token(),
+                &handle,
+                now,
+            )?;
+            Ok(handle)
+        },
+    )
+}
+
+/// Loads the one active session of a principal, whatever its role.
+fn active_session_for_principal_tx(
+    tx: &rusqlite::Transaction<'_>,
+    agent_principal_id: &str,
+) -> Result<Option<SessionHandle>> {
+    tx.query_row(
+        r#"
+        SELECT session_token, agent_principal_id, agent_instance_id, role
+        FROM sessions
+        WHERE agent_principal_id = ?1 AND state = ?2
+        "#,
+        params![agent_principal_id, session_state_name(SessionState::Active)],
+        session_handle_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn session_handle_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionHandle> {
+    SessionHandle::try_from_raw_parts(
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        SessionRole::from_str(&row.get::<_, String>(3)?).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+    )
+    .map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+    })
 }
 
 fn expire_held_claims_for_exited_session(
