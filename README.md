@@ -652,6 +652,22 @@ repeated key returns that task and writes nothing; the JSON ack then carries
 matches, so the next submission under the key files a new task. Every submit
 ack carries `state`, the state of the task it returns.
 
+`--subtask-title TITLE` is repeatable and files one work subtask per title, in
+the order given, in the same transaction as the task. Each is the subtask
+`subtask create` files without policy flags: the opened workflow profile
+decides its completion policy, evidence policy, and routing key.
+
+```bash
+covey meta submit --session-token <orch-session> --prompt-text "ship feature" \
+  --subtask-title "implement" --subtask-title "write the release note"
+```
+
+The ack then lists them as `subtasks: [{ subtask_id, title }]` and reports the
+task as `active`; `meta_task_submitted` is followed by one
+`work_subtask_created` event per subtask. The list is empty when no title was
+given and when a dedupe key resolved the submission to an existing task, which
+files nothing.
+
 `meta annotate` writes one annotation from the closed key set `verdict`,
 `acked`, `tier`, and `entity`:
 

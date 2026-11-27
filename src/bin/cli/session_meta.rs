@@ -147,6 +147,10 @@ pub(crate) struct SubmitMetaArgs {
     /// Existing meta-task this submission replaces. Repeat for several.
     #[arg(long = "supersedes", value_name = "META_TASK_ID", action = clap::ArgAction::Append)]
     pub(crate) supersedes: Vec<String>,
+    /// File one work subtask with this title under the new task. Repeat for
+    /// several; they are filed in the order given.
+    #[arg(long = "subtask-title", value_name = "TITLE", action = clap::ArgAction::Append)]
+    pub(crate) subtask_title: Vec<String>,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
     #[arg(long, requires_all = ["source_received_at", "source_path"])]

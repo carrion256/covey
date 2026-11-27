@@ -754,6 +754,61 @@ fn submit_ack_carries_the_state_and_an_ended_task_frees_its_dedupe_key() {
 }
 
 #[test]
+fn submit_with_subtask_titles_acks_the_filed_subtasks() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let orch = register_orchestrator(&db, "subtask-title-orch");
+
+    let plain = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "no subtasks",
+        ],
+    ));
+    assert_eq!(plain["state"], "planning");
+    assert_eq!(plain["subtasks"], Value::Array(Vec::new()));
+
+    let filed = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "two steps",
+            "--subtask-title",
+            "first",
+            "--subtask-title",
+            "second",
+        ],
+    ));
+    assert_eq!(filed["state"], "active");
+    let subtasks = filed["subtasks"].as_array().expect("subtasks array");
+    assert_eq!(
+        subtasks
+            .iter()
+            .map(|subtask| subtask["title"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("first"), Some("second")]
+    );
+    assert!(
+        subtasks.iter().all(|subtask| subtask["subtask_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())),
+        "every filed subtask is acked with its id"
+    );
+    let active = success_data(&run_db(&db, &["meta", "list", "--state", "active"]));
+    assert_eq!(active[0]["meta_task_id"], filed["meta_task_id"]);
+    assert_eq!(active[0]["subtask_total"], 2);
+}
+
+#[test]
 fn list_compact_omits_prompt_text_and_changes_nothing_else() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");

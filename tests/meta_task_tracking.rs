@@ -15,12 +15,12 @@ use std::{
 
 use covey::{
     AnnotateMetaTaskReq, CancelMetaTaskReq, CompleteMetaTaskReq, CompletionPolicy, Covey,
-    CoveyError, CreateWorkSubtaskReq, DueDate, Event, EventPayload, EventType, FieldChange,
-    ManualClock, MetaTaskAnnotationChange, MetaTaskAnnotationValue, MetaTaskClosure,
-    MetaTaskDedupeKey, MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskListState,
-    MetaTaskSort, MetaTaskSourceLinkDraft, MetaTaskState, MetaTaskStatus, MetaTaskSummary,
-    MetaTaskTitle, MetaTaskUrgency, RegisterSessionReq, SessionRole, SubmitMetaTaskReq,
-    UpdateMetaTaskReq,
+    CoveyError, CreateSubtaskRequest, CreateWorkSubtaskReq, DueDate, Event, EventPayload,
+    EventType, FieldChange, ManualClock, MetaTaskAnnotationChange, MetaTaskAnnotationValue,
+    MetaTaskClosure, MetaTaskDedupeKey, MetaTaskHandle, MetaTaskId, MetaTaskListQuery,
+    MetaTaskListState, MetaTaskSort, MetaTaskSourceLinkDraft, MetaTaskState, MetaTaskStatus,
+    MetaTaskSummary, MetaTaskTitle, MetaTaskUrgency, RegisterSessionReq, SessionRole,
+    SubmitMetaTaskReq, SubtaskTitle, UpdateMetaTaskReq,
 };
 use rstest::rstest;
 use rusqlite::Connection;
@@ -430,6 +430,145 @@ fn several_open_tasks_under_one_key_resolve_to_the_newest() {
     let hit = rig.submit(rig.request().with_dedupe_key(dedupe_key));
     assert!(hit.deduplicated);
     assert_eq!(hit.meta_task_id, newer);
+}
+
+fn subtask_titles(titles: &[&str]) -> Vec<SubtaskTitle> {
+    titles
+        .iter()
+        .map(|title| SubtaskTitle::parse((*title).to_owned()).expect("valid subtask title"))
+        .collect()
+}
+
+/// Title, completion policy, routing key, evidence policy, and priority of
+/// every subtask of a meta task, in filing order.
+fn filed_subtasks(rig: &Rig, meta_task_id: &str) -> Vec<(String, String, String, String, i64)> {
+    Connection::open(&rig.db_path)
+        .expect("open database")
+        .prepare(
+            "SELECT title, completion_policy, routing_key, evidence_policy, priority
+             FROM subtasks WHERE meta_task_id = ?1 ORDER BY rowid",
+        )
+        .expect("prepare subtask query")
+        .query_map([meta_task_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("query subtasks")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read subtasks")
+}
+
+#[test]
+fn submit_with_subtask_titles_files_the_task_and_its_work_in_one_mutation() {
+    let rig = Rig::new();
+    let events = rig
+        .covey
+        .fetch_events(0, 1_000)
+        .expect("fetch events")
+        .len();
+    let idempotency_rows = rig.table_count("mutation_idempotency");
+    let request = rig
+        .request()
+        .with_subtask_titles(subtask_titles(&["gather", "write up"]));
+
+    let submission = rig.submit(request.clone());
+
+    assert!(!submission.deduplicated);
+    assert_eq!(submission.state, MetaTaskState::Active);
+    assert_eq!(
+        submission
+            .subtasks
+            .iter()
+            .map(|subtask| subtask.title.as_str())
+            .collect::<Vec<_>>(),
+        ["gather", "write up"]
+    );
+    let appended: Vec<EventType> = rig
+        .covey
+        .fetch_events(0, 1_000)
+        .expect("fetch events")
+        .iter()
+        .skip(events)
+        .map(Event::event_type)
+        .collect();
+    assert_eq!(
+        appended,
+        [
+            EventType::MetaTaskSubmitted,
+            EventType::WorkSubtaskCreated,
+            EventType::WorkSubtaskCreated
+        ]
+    );
+    assert_eq!(
+        rig.table_count("mutation_idempotency"),
+        idempotency_rows + 1,
+        "the task and its subtasks share one idempotency row"
+    );
+
+    let replayed = rig.submit(request);
+    assert_eq!(
+        replayed, submission,
+        "a replay answers the first submission"
+    );
+    assert_eq!(rig.table_count("subtasks"), 2, "a replay files nothing");
+
+    // A subtask filed at submission is the subtask `create_subtask` files
+    // under the opened workflow profile.
+    rig.covey
+        .create_subtask(
+            CreateSubtaskRequest::try_from_raw_parts(
+                rig.orchestrator.clone(),
+                submission.meta_task_id.clone(),
+                None,
+                "reference",
+                100,
+                id_key("create-subtask"),
+            )
+            .expect("valid create-subtask request"),
+        )
+        .expect("create the reference subtask");
+    let filed = filed_subtasks(&rig, &submission.meta_task_id);
+    let (_, completion_policy, routing_key, evidence_policy, priority) = &filed[2];
+    for (title, row) in ["gather", "write up"].into_iter().zip(&filed) {
+        assert_eq!(
+            row,
+            &(
+                title.to_owned(),
+                completion_policy.clone(),
+                routing_key.clone(),
+                evidence_policy.clone(),
+                *priority
+            )
+        );
+    }
+}
+
+#[test]
+fn a_dedupe_hit_files_no_subtasks_and_reports_none() {
+    let rig = Rig::new();
+    let dedupe_key = MetaTaskDedupeKey::parse("intake-24".to_owned()).expect("valid dedupe key");
+    let keyed = || {
+        rig.request()
+            .with_dedupe_key(dedupe_key.clone())
+            .with_subtask_titles(subtask_titles(&["only once"]))
+    };
+    let first = rig.submit(keyed());
+    assert_eq!(first.subtasks.len(), 1);
+
+    let hit = rig.submit(keyed());
+
+    assert!(hit.deduplicated);
+    assert_eq!(hit.meta_task_id, first.meta_task_id);
+    assert!(
+        hit.subtasks.is_empty(),
+        "a dedupe hit reports no filed subtasks"
+    );
+    assert_eq!(rig.table_count("subtasks"), 1, "a dedupe hit files nothing");
 }
 
 #[test]

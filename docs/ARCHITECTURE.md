@@ -297,6 +297,12 @@ NULL in every new column.
   under it, in any state), and a sort by creation order, due date (undated rows
   last), or urgency (`high` first, unset last). A compact page does not read
   `prompt_text` and omits it from every row.
+- `meta submit` can file work subtasks with the task (`--subtask-title`, one
+  per title, in order). They are created inside the submission's transaction
+  and under its one idempotency row, each resolved through the opened workflow
+  profile as a profile-relative create is. The stored replay record is the
+  bare meta-task id for a submission without subtasks and the id plus the
+  subtask list otherwise.
 - `session ensure` looks up or registers in one transaction: the active session
   the principal holds in the requested role is returned unchanged, and an absent
   one is registered. Active sessions are unique per principal and role, so the

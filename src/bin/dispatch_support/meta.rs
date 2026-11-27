@@ -45,6 +45,14 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
                     .collect::<Result<Vec<_>, _>>()?;
                 request = request.with_supersedes(supersedes);
             }
+            if !args.subtask_title.is_empty() {
+                let titles = args
+                    .subtask_title
+                    .into_iter()
+                    .map(covey::SubtaskTitle::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
+                request = request.with_subtask_titles(titles);
+            }
             if let (Some(thread_id), Some(received_at), Some(path)) = (
                 args.source_thread_id,
                 args.source_received_at,
@@ -66,14 +74,21 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
                     ),
                     None => format!("meta_task {}", submission.meta_task_id),
                 }
-            } else {
+            } else if submission.subtasks.is_empty() {
                 format!("meta_task {}", submission.meta_task_id)
+            } else {
+                format!(
+                    "meta_task {} with {} subtask(s)",
+                    submission.meta_task_id,
+                    submission.subtasks.len()
+                )
             };
             Ok(Rendered::summary(
                 MetaTaskRef {
                     meta_task_id: submission.meta_task_id,
                     deduplicated: submission.deduplicated,
                     state: submission.state,
+                    subtasks: submission.subtasks,
                 },
                 human,
             ))

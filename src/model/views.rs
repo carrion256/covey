@@ -1515,12 +1515,24 @@ impl MetaTaskListQuery {
     }
 }
 
+/// One work subtask filed together with its meta task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmittedSubtask {
+    pub subtask_id: SubtaskId,
+    pub title: SubtaskTitle,
+}
+
 /// Outcome of filing a meta task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaTaskSubmission {
     pub meta_task_id: String,
     pub deduplicated: bool,
     pub state: MetaTaskState,
+    /// The work subtasks this submission filed, in request order. Empty when
+    /// the request named none, and when a dedupe key resolved the submission
+    /// to a task that already exists.
+    #[serde(default)]
+    pub subtasks: Vec<SubmittedSubtask>,
 }
 
 /// Outcome of ensuring the active session of an agent principal.

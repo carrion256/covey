@@ -4,22 +4,23 @@ use std::time::Instant;
 
 use rusqlite::Transaction;
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
         AnnotateMetaTaskReq, CancelMetaTaskReq, ClaimState, CompleteMetaTaskReq,
-        CoveyTypeValidationError, DueDate, EventType, FieldChange, LinkMetaTaskSourceReq, MetaTask,
-        MetaTaskAnnotationChange, MetaTaskAnnotationValue, MetaTaskClosure, MetaTaskHandle,
-        MetaTaskId, MetaTaskListQuery, MetaTaskSourceLinkDraft, MetaTaskSourceLinkProvenance,
-        MetaTaskState, MetaTaskStatus, MetaTaskSubmission, MetaTaskSummary, MetaTaskTitle,
-        MetaTaskUrgency, ObjectType, ReadyQueueState, SessionRole, SubmitMetaTaskReq, SubtaskState,
-        TimestampMs, UpdateMetaTaskReq, claim_state_name, meta_task_annotation_key_name,
-        meta_task_closure_name, meta_task_state_name, meta_task_urgency_name,
-        ready_queue_state_name, subtask_state_name,
+        CoveyTypeValidationError, CreateSubtaskRequest, DueDate, EventType, FieldChange,
+        LinkMetaTaskSourceReq, MetaTask, MetaTaskAnnotationChange, MetaTaskAnnotationValue,
+        MetaTaskClosure, MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskSourceLinkDraft,
+        MetaTaskSourceLinkProvenance, MetaTaskState, MetaTaskStatus, MetaTaskSubmission,
+        MetaTaskSummary, MetaTaskTitle, MetaTaskUrgency, ObjectType, ReadyQueueState, SessionRole,
+        SubmitMetaTaskReq, SubmittedSubtask, SubtaskId, SubtaskPriority, SubtaskState, TimestampMs,
+        UpdateMetaTaskReq, claim_state_name, meta_task_annotation_key_name, meta_task_closure_name,
+        meta_task_state_name, meta_task_urgency_name, ready_queue_state_name, subtask_state_name,
     },
+    ops::workflow::create_work_subtask_tx,
     queries::{
         count_open_subtasks_for_meta_task_tx, load_meta_task_annotations_tx,
         load_meta_task_dedupe_tx, load_meta_task_id_for_handle_tx, load_meta_task_source_link_tx,
@@ -35,6 +36,48 @@ use crate::{
 /// Largest page a discovery listing returns in one call.
 const MAX_LIST_LIMIT: usize = 500;
 
+/// Priority of a subtask filed without one; `subtask create` defaults to the
+/// same value.
+const DEFAULT_SUBTASK_PRIORITY: i64 = 100;
+
+/// What a submission stores for an idempotent replay.
+///
+/// A submission without subtasks stores the bare meta-task id, which is also
+/// the shape of every record written before subtasks could be filed with the
+/// task, so those records still replay.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredSubmission {
+    MetaTaskId(String),
+    WithSubtasks {
+        meta_task_id: String,
+        subtasks: Vec<SubmittedSubtask>,
+    },
+}
+
+impl StoredSubmission {
+    fn new(meta_task_id: String, subtasks: Vec<SubmittedSubtask>) -> Self {
+        if subtasks.is_empty() {
+            Self::MetaTaskId(meta_task_id)
+        } else {
+            Self::WithSubtasks {
+                meta_task_id,
+                subtasks,
+            }
+        }
+    }
+
+    fn into_parts(self) -> (String, Vec<SubmittedSubtask>) {
+        match self {
+            Self::MetaTaskId(meta_task_id) => (meta_task_id, Vec::new()),
+            Self::WithSubtasks {
+                meta_task_id,
+                subtasks,
+            } => (meta_task_id, subtasks),
+        }
+    }
+}
+
 impl Covey {
     /// Creates a new planning meta-task and returns its id.
     pub fn submit_meta_task(&self, req: SubmitMetaTaskReq) -> Result<String> {
@@ -44,6 +87,10 @@ impl Covey {
 
     /// Creates a new planning meta-task, reporting whether a dedupe key
     /// resolved the submission to a task the principal already filed.
+    ///
+    /// A request that names subtask titles files one work subtask per title in
+    /// the same transaction, after the `meta_task_submitted` event, and the
+    /// task is `active` when the call returns. A dedupe hit files nothing.
     pub fn submit_meta_task_reporting(&self, req: SubmitMetaTaskReq) -> Result<MetaTaskSubmission> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
@@ -63,22 +110,29 @@ impl Covey {
                     meta_task_id: existing.to_string(),
                     deduplicated: true,
                     state,
+                    subtasks: Vec::new(),
                 });
             }
-            let meta_task_id = crate::store::with_idempotent_mutation(
+            let (meta_task_id, subtasks) = crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
                 "submit_meta_task",
                 &req.idempotency_key,
                 &req,
                 TimestampMs::parse(now)?,
-                || submit_meta_task_with_tracking_tx(tx, &req, now),
-            )?;
+                || {
+                    let meta_task_id = submit_meta_task_with_tracking_tx(tx, &req, now)?;
+                    let subtasks = self.submit_subtasks_tx(tx, &req, &meta_task_id, now)?;
+                    Ok(StoredSubmission::new(meta_task_id, subtasks))
+                },
+            )?
+            .into_parts();
             let state = load_meta_task_tx(tx, meta_task_id.as_str())?.state();
             Ok(MetaTaskSubmission {
                 meta_task_id,
                 deduplicated: false,
                 state,
+                subtasks,
             })
         });
         self.log_operation(
@@ -89,6 +143,38 @@ impl Covey {
             |submission| vec![format!("meta_task:{}", submission.meta_task_id)],
         );
         result
+    }
+
+    /// Files the work subtasks a submission asked for under its new meta task,
+    /// one per title in request order, each resolved through the opened
+    /// workflow profile as [`Covey::create_subtask`] resolves it.
+    fn submit_subtasks_tx(
+        &self,
+        tx: &Transaction<'_>,
+        req: &SubmitMetaTaskReq,
+        meta_task_id: &str,
+        now: i64,
+    ) -> Result<Vec<SubmittedSubtask>> {
+        let meta_task_id = MetaTaskId::parse(meta_task_id.to_owned())?;
+        req.subtask_titles
+            .iter()
+            .map(|title| {
+                let create = self.resolve_subtask_request(CreateSubtaskRequest {
+                    session_token: req.session_token.clone(),
+                    meta_task_id: meta_task_id.clone(),
+                    subtask_id: None,
+                    title: title.clone(),
+                    priority: SubtaskPriority::parse(DEFAULT_SUBTASK_PRIORITY)?,
+                    depends_on: Vec::new(),
+                    idempotency_key: req.idempotency_key.clone(),
+                });
+                let subtask_id = create_work_subtask_tx(tx, &create, now)?;
+                Ok(SubmittedSubtask {
+                    subtask_id: SubtaskId::parse(subtask_id)?,
+                    title: title.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Cancels a meta-task that has not already reached a terminal state.

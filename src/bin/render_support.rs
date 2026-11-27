@@ -424,6 +424,9 @@ pub(crate) struct MetaTaskRef {
     /// State of the returned task: the fresh one, or the open task a dedupe
     /// key resolved to.
     pub(crate) state: covey::MetaTaskState,
+    /// The work subtasks filed with the task; empty when none were asked for
+    /// and when a dedupe key resolved to an existing task.
+    pub(crate) subtasks: Vec<covey::SubmittedSubtask>,
 }
 
 #[derive(Serialize)]

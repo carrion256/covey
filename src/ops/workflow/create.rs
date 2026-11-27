@@ -31,7 +31,16 @@ impl Covey {
     /// Resolved policies are persisted and included in the idempotency request
     /// and creation event, just as for explicit work creation.
     pub fn create_subtask(&self, req: CreateSubtaskRequest) -> Result<String> {
-        self.create_work_subtask(CreateWorkSubtaskReq {
+        self.create_work_subtask(self.resolve_subtask_request(req))
+    }
+
+    /// Completes a profile-relative request with the opened workflow's
+    /// completion policy, routing key, and evidence policy.
+    pub(crate) fn resolve_subtask_request(
+        &self,
+        req: CreateSubtaskRequest,
+    ) -> CreateWorkSubtaskReq {
+        CreateWorkSubtaskReq {
             session_token: req.session_token,
             meta_task_id: req.meta_task_id,
             subtask_id: req.subtask_id,
@@ -42,7 +51,7 @@ impl Covey {
             evidence_policy: self.workflow.evidence_policy,
             depends_on: req.depends_on,
             idempotency_key: req.idempotency_key,
-        })
+        }
     }
 
     /// Creates work with an explicit immutable completion policy and routing key.

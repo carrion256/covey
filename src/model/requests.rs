@@ -233,6 +233,11 @@ pub struct SubmitMetaTaskReq {
     /// Tasks this submission replaces, in replacement order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supersedes: Vec<MetaTaskId>,
+    /// Work subtasks filed together with the task, one per title, in order.
+    /// An empty list stays out of the serialized request, so a submission
+    /// without subtasks keeps its idempotency request hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtask_titles: Vec<SubtaskTitle>,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -256,6 +261,7 @@ impl SubmitMetaTaskReq {
             due_on: None,
             dedupe_key: None,
             supersedes: Vec::new(),
+            subtask_titles: Vec::new(),
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
@@ -312,6 +318,15 @@ impl SubmitMetaTaskReq {
             }
         }
         self.supersedes = ordered;
+        self
+    }
+
+    /// Files one work subtask per title together with the task, in the given
+    /// order. Each is resolved through the opened workflow profile, exactly as
+    /// a profile-relative subtask creation request is.
+    #[must_use]
+    pub fn with_subtask_titles(mut self, titles: impl IntoIterator<Item = SubtaskTitle>) -> Self {
+        self.subtask_titles = titles.into_iter().collect();
         self
     }
 }
