@@ -53,8 +53,11 @@ pub enum CoveyError {
         subtask_id: SubtaskId,
         held_by: SessionToken,
     },
-    #[error("session already active for principal {agent_principal_id}")]
-    SessionAlreadyActive { agent_principal_id: String },
+    #[error("session already active for principal {agent_principal_id} in role {role}")]
+    SessionAlreadyActive {
+        agent_principal_id: String,
+        role: SessionRole,
+    },
     #[error("session {session_token} is not active; current state is {state}")]
     SessionNotActive {
         session_token: SessionToken,
@@ -325,11 +328,13 @@ impl PartialEq for CoveyError {
             (
                 SessionAlreadyActive {
                     agent_principal_id: left_principal_id,
+                    role: left_role,
                 },
                 SessionAlreadyActive {
                     agent_principal_id: right_principal_id,
+                    role: right_role,
                 },
-            ) => left_principal_id == right_principal_id,
+            ) => left_principal_id == right_principal_id && left_role == right_role,
             (
                 SessionNotActive {
                     session_token: left_session_token,
@@ -875,9 +880,9 @@ mod tests {
         CoveyError::SubtaskAlreadyClaimed { subtask_id: subtask_id("subtask-2"), held_by: session_token("session-1") }
     )]
     #[case::session_already_active(
-        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into() },
-        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into() },
-        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-2".into() }
+        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into(), role: SessionRole::Executor },
+        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into(), role: SessionRole::Executor },
+        CoveyError::SessionAlreadyActive { agent_principal_id: "agent-1".into(), role: SessionRole::Reviewer }
     )]
     #[case::session_has_active_subtask(
         CoveyError::SessionAlreadyHasActiveSubtask { session_token: session_token("session-1"), active_subtask_id: subtask_id("subtask-1") },

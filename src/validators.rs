@@ -7,7 +7,6 @@ use crate::{
         FenceSeq, MetaTaskState, ObjectType, ReadyQueueState, ReservationState, ReviewState,
         RuntimeAttestation, Session, SessionRole, SessionState, SessionToken, StateValue,
         SubtaskId, SubtaskKind, SubtaskState, claim_state_name, review_state_name,
-        session_state_name,
     },
     queries::{
         load_artifact_tx, load_claim_tx, load_meta_task_tx, load_runtime_attestation_tx,
@@ -60,25 +59,6 @@ pub(crate) fn ensure_source_path(path: &str) -> std::result::Result<(), CoveyTyp
             "path",
             "must be an absolute path",
         ));
-    }
-    Ok(())
-}
-
-pub(crate) fn ensure_no_other_active_session(
-    tx: &Transaction<'_>,
-    principal_id: &str,
-) -> Result<()> {
-    let existing = tx
-        .query_row(
-            "SELECT session_token FROM sessions WHERE agent_principal_id = ?1 AND state = ?2",
-            params![principal_id, session_state_name(SessionState::Active)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if existing.is_some() {
-        return Err(CoveyError::SessionAlreadyActive {
-            agent_principal_id: principal_id.to_owned(),
-        });
     }
     Ok(())
 }

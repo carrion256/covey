@@ -16,8 +16,7 @@ use crate::{
     store::{append_session_event, reset_in_progress_review_for_expired_claim},
     validators::{
         MAX_AGENT_ID_LEN, MAX_RUNTIME_FIELD_LEN, close_claim_and_detach, ensure_length,
-        ensure_no_other_active_session, ensure_non_empty, ensure_transition,
-        require_active_session, require_session,
+        ensure_non_empty, ensure_transition, require_active_session, require_session,
     },
 };
 
@@ -31,7 +30,13 @@ const fn session_role_name(role: SessionRole) -> &'static str {
 }
 
 impl Covey {
-    /// Registers a new session or refreshes an already-active session with the same identity.
+    /// Registers a new session for a principal in one role.
+    ///
+    /// A principal holds at most one active session per role. A registration in
+    /// a role it already holds is refused with
+    /// [`CoveyError::SessionAlreadyActive`]; its sessions in other roles do not
+    /// count. Repeating a request with its idempotency key returns the session
+    /// that request registered.
     pub fn register_session(&self, req: RegisterSessionReq) -> Result<SessionHandle> {
         ensure_length(
             "agent_principal_id",
@@ -57,11 +62,11 @@ impl Covey {
 
     /// Ensures the principal holds an active session in the requested role.
     ///
-    /// The active session of `req.agent_principal_id` decides the outcome: none
-    /// present registers a session exactly as [`Covey::register_session`] does;
-    /// one present in the requested role is returned untouched, whatever instance
-    /// identity it carries, and nothing is written; one present in another role is
-    /// refused with [`CoveyError::WrongRole`].
+    /// An active session of `req.agent_principal_id` in `req.role` is returned
+    /// untouched, whatever instance identity it carries, and nothing is written.
+    /// Without one, a session is registered exactly as
+    /// [`Covey::register_session`] does. Sessions the principal holds in other
+    /// roles do not affect the outcome.
     pub fn ensure_session(&self, req: RegisterSessionReq) -> Result<SessionEnsured> {
         ensure_length(
             "agent_principal_id",
@@ -75,18 +80,14 @@ impl Covey {
         )?;
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            match active_session_for_principal_tx(tx, req.agent_principal_id())? {
-                None => register_session_in_tx(tx, &req, now).map(|session| SessionEnsured {
-                    session,
-                    registered: true,
-                }),
-                Some(session) if session.role == req.role => Ok(SessionEnsured {
+            match active_session_for_principal_tx(tx, req.agent_principal_id(), req.role)? {
+                Some(session) => Ok(SessionEnsured {
                     session,
                     registered: false,
                 }),
-                Some(session) => Err(CoveyError::WrongRole {
-                    expected: vec![req.role],
-                    actual: session.role,
+                None => register_session_in_tx(tx, &req, now).map(|session| SessionEnsured {
+                    session,
+                    registered: true,
                 }),
             }
         });
@@ -345,23 +346,8 @@ impl Covey {
     ) -> Result<Option<crate::model::SessionHandle>> {
         ensure_length("agent_principal_id", agent_principal_id, MAX_AGENT_ID_LEN)?;
         let started_at = Instant::now();
-        let result = self.with_read_tx(|tx| {
-            tx.query_row(
-                r#"
-                SELECT session_token, agent_principal_id, agent_instance_id, role
-                FROM sessions
-                WHERE agent_principal_id = ?1 AND role = ?2 AND state = ?3
-                "#,
-                params![
-                    agent_principal_id,
-                    session_role_name(role),
-                    session_state_name(SessionState::Active)
-                ],
-                session_handle_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-        });
+        let result =
+            self.with_read_tx(|tx| active_session_for_principal_tx(tx, agent_principal_id, role));
         self.log_operation(
             "active_session_for_principal",
             agent_principal_id,
@@ -396,7 +382,12 @@ fn register_session_in_tx(
         req,
         TimestampMs::parse(now)?,
         || {
-            ensure_no_other_active_session(tx, req.agent_principal_id())?;
+            if active_session_for_principal_tx(tx, req.agent_principal_id(), req.role)?.is_some() {
+                return Err(CoveyError::SessionAlreadyActive {
+                    agent_principal_id: req.agent_principal_id().to_owned(),
+                    role: req.role,
+                });
+            }
             let session_token = crate::model::make_id("session");
             tx.execute(
                 r#"
@@ -435,18 +426,23 @@ fn register_session_in_tx(
     )
 }
 
-/// Loads the one active session of a principal, whatever its role.
+/// Loads the active session a principal holds in one role.
 fn active_session_for_principal_tx(
     tx: &rusqlite::Transaction<'_>,
     agent_principal_id: &str,
+    role: SessionRole,
 ) -> Result<Option<SessionHandle>> {
     tx.query_row(
         r#"
         SELECT session_token, agent_principal_id, agent_instance_id, role
         FROM sessions
-        WHERE agent_principal_id = ?1 AND state = ?2
+        WHERE agent_principal_id = ?1 AND role = ?2 AND state = ?3
         "#,
-        params![agent_principal_id, session_state_name(SessionState::Active)],
+        params![
+            agent_principal_id,
+            session_role_name(role),
+            session_state_name(SessionState::Active)
+        ],
         session_handle_from_row,
     )
     .optional()

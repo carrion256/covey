@@ -292,9 +292,10 @@ NULL in every new column.
   under it, in any state), and a sort by creation order, due date (undated rows
   last), or urgency (`high` first, unset last). A compact page does not read
   `prompt_text` and omits it from every row.
-- `session ensure` looks up or registers in one transaction: an active session with
-  the requested role is returned unchanged, an absent one is registered, and an
-  active session with another role is refused with `WrongRole`.
+- `session ensure` looks up or registers in one transaction: the active session
+  the principal holds in the requested role is returned unchanged, and an absent
+  one is registered. Active sessions are unique per principal and role, so the
+  principal's sessions in other roles are left alone.
 
 ## Tracker Core And Settlement Half
 

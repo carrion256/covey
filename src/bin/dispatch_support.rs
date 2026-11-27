@@ -62,6 +62,11 @@ fn new_idempotency_key(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4().simple())
 }
 
+/// The instance id of a session whose caller named none.
+fn new_agent_instance_id() -> String {
+    format!("instance-{}", Uuid::new_v4().simple())
+}
+
 /// The idempotency key of a call fenced by one claim, used when the caller
 /// named none. Running the same command again for the same claim and fence
 /// replays the first result instead of running the operation a second time.

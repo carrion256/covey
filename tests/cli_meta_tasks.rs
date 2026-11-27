@@ -638,7 +638,7 @@ fn list_filters_and_sorts() {
 }
 
 #[test]
-fn session_ensure_registers_then_reuses_and_refuses_another_role() {
+fn session_ensure_registers_then_reuses_and_adds_another_role() {
     let tmp = TempDir::new().expect("tempdir");
     let db = tmp.path().join("covey.db");
 
@@ -677,21 +677,30 @@ fn session_ensure_registers_then_reuses_and_refuses_another_role() {
         Some(token.as_str())
     );
 
-    let other_role = run_db(
+    let other_role = success_data(&run_db(
         &db,
         &[
             "session",
             "ensure",
             "--agent-principal-id",
             "ensure-agent",
-            "--agent-instance-id",
-            "ensure-instance-3",
             "--role",
             "executor",
         ],
+    ));
+    assert_eq!(other_role["registered"], Value::Bool(true));
+    assert_eq!(other_role["session"]["role"], "executor");
+    assert_ne!(
+        other_role["session"]["session_token"].as_str(),
+        Some(token.as_str()),
+        "the executor session stands beside the orchestrator session"
     );
-    assert_eq!(exit_code(&other_role), 3);
-    assert_eq!(error_code(&other_role), "permission_denied");
+    assert!(
+        other_role["session"]["agent_instance_id"]
+            .as_str()
+            .is_some_and(|instance| !instance.is_empty()),
+        "an omitted instance id is generated"
+    );
 }
 
 #[test]

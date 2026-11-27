@@ -78,7 +78,8 @@ Schema changes are forward-only.
 
 Covey exists to make invalid states hard or impossible.
 
-- At most one active session per `agent_principal_id`
+- At most one active session per `agent_principal_id` and role; one principal
+  may hold sessions in several roles at the same time
 - At most one held claim per subtask
 - Fence tokens increase monotonically per subtask claim lifecycle
 - Completion policy, evidence policy, and routing key are immutable task facts
@@ -668,15 +669,20 @@ nothing else, for callers that scan many tasks before reading one.
 
 ### Session Ensure
 
-`session ensure` takes the `session register` flags and returns the principal's
-active session when it already has the requested role, registering one otherwise:
+`session ensure` returns the active session the principal holds in the requested
+role and registers one when there is none. Sessions the principal holds in
+other roles do not matter, so one principal can plan and execute:
 
 ```bash
-covey session ensure --agent-principal-id worker --agent-instance-id worker-2 --role executor
+covey session ensure --agent-principal-id me --role orchestrator
+covey session ensure --agent-principal-id me --role executor
 ```
 
-An active session with another role is refused with `permission_denied`. The JSON
-ack carries the session handle and `registered`.
+`--agent-instance-id` is optional here and generated when omitted; an existing
+session keeps the instance id it was registered with. `session register` always
+creates a session and answers `conflict` when the principal already has an
+active one in that role. The JSON ack of `session ensure` carries the session
+handle and `registered`.
 
 ### Subtask Dependencies
 

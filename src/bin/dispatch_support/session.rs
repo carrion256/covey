@@ -21,7 +21,7 @@ pub(super) fn dispatch_session(store: &Covey, command: SessionCommand) -> covey:
         SessionCommand::Ensure(args) => {
             let ensured = store.ensure_session(RegisterSessionReq::try_from_raw_parts(
                 args.agent_principal_id,
-                args.agent_instance_id,
+                args.agent_instance_id.unwrap_or_else(new_agent_instance_id),
                 args.role.into(),
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("ensure-session")),

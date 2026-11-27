@@ -1,10 +1,10 @@
-//! Session ensure: one active session per principal, carrying the requested role.
+//! Session ensure: one active session per principal and role.
 //!
 //! `ensure_session` answers one question inside one transaction: does this
-//! principal already hold an active session, and is that session in the role the
-//! caller needs? These cases pin the write-free paths, the single write path, the
-//! refusal, and the invariant that no sequence of ensure and exit leaves a
-//! principal with two active sessions.
+//! principal already hold an active session in the role the caller needs? These
+//! cases pin the write-free path, the single write path, a principal holding
+//! several roles at once, and the invariant that no sequence of ensure and exit
+//! leaves a principal with two active sessions in one role.
 
 use std::{
     path::PathBuf,
@@ -20,7 +20,7 @@ use covey::{
 };
 use proptest::prelude::*;
 use rstest::rstest;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 const NOW_MS: i64 = 1_700_000_000_000;
@@ -107,25 +107,28 @@ impl Rig {
             .expect("count idempotency rows")
     }
 
-    fn active_session_count(&self, principal: &str) -> i64 {
+    /// The `(principal, role)` of every active session, sorted.
+    fn active_sessions(&self) -> Vec<(String, String)> {
         self.database()
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE agent_principal_id = ?1 AND state = 'active'",
-                [principal],
-                |row| row.get(0),
+            .prepare(
+                "SELECT agent_principal_id, role FROM sessions WHERE state = 'active'
+                 ORDER BY agent_principal_id, role",
             )
-            .expect("count active sessions")
+            .expect("prepare active session query")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query active sessions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read active sessions")
     }
 
-    fn active_session_token(&self, principal: &str) -> Option<String> {
-        self.database()
-            .query_row(
-                "SELECT session_token FROM sessions WHERE agent_principal_id = ?1 AND state = 'active'",
-                [principal],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("read active session token")
+    fn active_session_count(&self, principal: &str, role: SessionRole) -> usize {
+        let role = role.to_string();
+        self.active_sessions()
+            .iter()
+            .filter(|(active_principal, active_role)| {
+                active_principal == principal && *active_role == role
+            })
+            .count()
     }
 }
 
@@ -133,7 +136,10 @@ impl Rig {
 fn ensure_registers_when_the_principal_has_no_active_session() {
     let rig = Rig::new();
     let before = rig.registered_event_count();
-    assert_eq!(rig.active_session_count(PRINCIPALS[0]), 0);
+    assert_eq!(
+        rig.active_session_count(PRINCIPALS[0], SessionRole::Orchestrator),
+        0
+    );
 
     let ensured = rig
         .ensure(PRINCIPALS[0], "alpha-instance-1", SessionRole::Orchestrator)
@@ -198,43 +204,46 @@ fn ensure_returns_an_active_session_from_another_instance_as_it_is() {
 }
 
 #[rstest]
-#[case::reviewer_against_orchestrator(SessionRole::Orchestrator, SessionRole::Reviewer)]
-#[case::executor_against_apply_gate(SessionRole::ApplyGate, SessionRole::Executor)]
-#[case::apply_gate_against_executor(SessionRole::Executor, SessionRole::ApplyGate)]
-fn ensure_refuses_another_role_for_the_same_principal(
-    #[case] active_role: SessionRole,
+#[case::reviewer_beside_orchestrator(SessionRole::Orchestrator, SessionRole::Reviewer)]
+#[case::executor_beside_apply_gate(SessionRole::ApplyGate, SessionRole::Executor)]
+#[case::executor_beside_orchestrator(SessionRole::Orchestrator, SessionRole::Executor)]
+fn ensure_registers_a_second_session_for_another_role(
+    #[case] held_role: SessionRole,
     #[case] requested_role: SessionRole,
 ) {
     let rig = Rig::new();
-    let active = rig
-        .ensure(PRINCIPALS[0], "alpha-instance-1", active_role)
-        .expect("register the active session");
+    let held = rig
+        .ensure(PRINCIPALS[0], "alpha-instance-1", held_role)
+        .expect("register the first session");
     let events = rig.registered_event_count();
 
-    let error = rig
+    let second = rig
         .ensure(PRINCIPALS[0], "alpha-instance-2", requested_role)
-        .expect_err("an active session in another role is refused");
+        .expect("a session in another role does not block the ensure");
 
-    match error {
-        CoveyError::WrongRole { expected, actual } => {
-            assert_eq!(
-                expected,
-                vec![requested_role],
-                "only the requested role is expected"
-            );
-            assert_eq!(actual, active_role, "the refusal names the active role");
-        }
-        other => panic!("expected a wrong-role refusal, got {other:?}"),
-    }
+    assert!(second.registered);
+    assert_eq!(second.session.role, requested_role);
+    assert_ne!(second.session.session_token, held.session.session_token);
     assert_eq!(
         rig.registered_event_count(),
-        events,
-        "a refused role appends no event"
+        events + 1,
+        "the second role appends its own session_registered event"
     );
-    assert_eq!(
-        rig.active_session_token(PRINCIPALS[0]),
-        Some(active.session.session_token.to_string())
-    );
+    for (role, session) in [
+        (held_role, &held.session),
+        (requested_role, &second.session),
+    ] {
+        assert_eq!(
+            rig.covey
+                .active_session_for_principal(PRINCIPALS[0], role)
+                .expect("look up the active session")
+                .as_ref(),
+            Some(session),
+            "each role keeps its own active session"
+        );
+    }
+    rig.heartbeat(held.session.session_token())
+        .expect("the first session stays usable");
 }
 
 #[test]
@@ -245,7 +254,10 @@ fn ensure_registers_a_new_session_after_the_active_one_exits() {
         .expect("first ensure registers");
     rig.exit(first.session.session_token())
         .expect("exit the active session");
-    assert_eq!(rig.active_session_count(PRINCIPALS[0]), 0);
+    assert_eq!(
+        rig.active_session_count(PRINCIPALS[0], SessionRole::Executor),
+        0
+    );
 
     let events = rig.registered_event_count();
     let second = rig
@@ -258,7 +270,10 @@ fn ensure_registers_a_new_session_after_the_active_one_exits() {
         "the exited session is not revived"
     );
     assert_eq!(rig.registered_event_count(), events + 1);
-    assert_eq!(rig.active_session_count(PRINCIPALS[0]), 1);
+    assert_eq!(
+        rig.active_session_count(PRINCIPALS[0], SessionRole::Executor),
+        1
+    );
 }
 
 #[test]
@@ -293,22 +308,52 @@ fn ensure_returns_a_session_registered_directly() {
     assert_eq!(ensured.session, registered);
 }
 
+#[test]
+fn register_refuses_a_second_session_only_in_the_same_role() {
+    let rig = Rig::new();
+    let executor = rig
+        .covey
+        .register_session(rig.request(PRINCIPALS[2], "gamma-instance-1", SessionRole::Executor))
+        .expect("register the executor session");
+
+    let orchestrator = rig
+        .covey
+        .register_session(rig.request(PRINCIPALS[2], "gamma-instance-1", SessionRole::Orchestrator))
+        .expect("the same principal registers in another role");
+    assert_ne!(orchestrator.session_token, executor.session_token);
+
+    let error = rig
+        .covey
+        .register_session(rig.request(PRINCIPALS[2], "gamma-instance-2", SessionRole::Executor))
+        .expect_err("a second executor session for the principal is refused");
+    assert!(
+        matches!(
+            &error,
+            CoveyError::SessionAlreadyActive { agent_principal_id, role }
+                if agent_principal_id == PRINCIPALS[2] && *role == SessionRole::Executor
+        ),
+        "the refusal names the principal and the role, got {error:?}"
+    );
+    assert_eq!(
+        rig.active_session_count(PRINCIPALS[2], SessionRole::Executor),
+        1
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Step {
     Ensure { principal: usize, role: usize },
-    Exit { principal: usize },
+    Exit { principal: usize, role: usize },
 }
 
 fn step_from_bytes(principal_byte: u8, choice_byte: u8) -> Step {
     let principal = usize::from(principal_byte) % PRINCIPALS.len();
     let choice = usize::from(choice_byte);
+    let role = (choice / 5) % ROLES.len();
     if choice % 5 == 0 {
-        Step::Exit { principal }
+        Step::Exit { principal, role }
     } else {
-        Step::Ensure {
-            principal,
-            role: (choice / 5) % ROLES.len(),
-        }
+        Step::Ensure { principal, role }
     }
 }
 
@@ -316,50 +361,60 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 
     /// Any run of up to twenty ensure and exit steps over three principals and
-    /// four roles leaves at most one active session per principal, and every
-    /// successful ensure returns the role it was asked for.
+    /// four roles leaves each principal with at most one active session per
+    /// role: every ensure succeeds in the role it was asked for, registers only
+    /// when that role had no active session, and leaves the other roles alone.
     #[test]
-    fn at_most_one_active_session_survives_any_ensure_and_exit_sequence(
+    fn at_most_one_active_session_per_role_survives_any_ensure_and_exit_sequence(
         steps in proptest::collection::vec((any::<u8>(), any::<u8>()), 0..=20),
     ) {
         let rig = Rig::new();
-        let mut active: [Option<String>; PRINCIPALS.len()] = [None, None, None];
+        let mut active: [[Option<String>; ROLES.len()]; PRINCIPALS.len()] = Default::default();
 
         for (index, (principal_byte, choice_byte)) in steps.iter().enumerate() {
             match step_from_bytes(*principal_byte, *choice_byte) {
                 Step::Ensure { principal, role } => {
-                    let requested = ROLES[role];
                     let instance = format!("{}-instance-{index}", PRINCIPALS[principal]);
-                    match rig.ensure(PRINCIPALS[principal], &instance, requested) {
-                        Ok(ensured) => {
-                            prop_assert_eq!(
-                                ensured.session.role,
-                                requested,
-                                "an ensured session carries the requested role"
-                            );
-                            active[principal] = Some(ensured.session.session_token.to_string());
+                    let ensured = rig
+                        .ensure(PRINCIPALS[principal], &instance, ROLES[role])
+                        .expect("ensure succeeds whatever other roles are active");
+                    prop_assert_eq!(
+                        ensured.session.role,
+                        ROLES[role],
+                        "an ensured session carries the requested role"
+                    );
+                    let session_token = ensured.session.session_token.to_string();
+                    match &active[principal][role] {
+                        Some(tracked) => {
+                            prop_assert!(!ensured.registered, "an active session is reused");
+                            prop_assert_eq!(&session_token, tracked);
                         }
-                        Err(CoveyError::WrongRole { expected, actual }) => {
-                            prop_assert_eq!(expected, vec![requested]);
-                            prop_assert_ne!(actual, requested);
-                        }
-                        Err(error) => prop_assert!(false, "unexpected ensure failure: {error}"),
+                        None => prop_assert!(ensured.registered, "an absent session is registered"),
                     }
+                    active[principal][role] = Some(session_token);
                 }
-                Step::Exit { principal } => {
-                    if let Some(session_token) = active[principal].take() {
+                Step::Exit { principal, role } => {
+                    if let Some(session_token) = active[principal][role].take() {
                         rig.exit(&session_token)
                             .expect("the tracked active session exits");
                     }
                 }
             }
 
-            for principal in PRINCIPALS {
-                prop_assert!(
-                    rig.active_session_count(principal) <= 1,
-                    "principal {principal} holds more than one active session"
-                );
+            let mut expected = Vec::new();
+            for (principal, roles) in PRINCIPALS.iter().zip(&active) {
+                for (role, tracked) in ROLES.iter().zip(roles) {
+                    if tracked.is_some() {
+                        expected.push(((*principal).to_owned(), role.to_string()));
+                    }
+                }
             }
+            expected.sort();
+            prop_assert_eq!(
+                rig.active_sessions(),
+                expected,
+                "each principal holds exactly its tracked sessions, one per role"
+            );
         }
     }
 }

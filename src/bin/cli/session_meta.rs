@@ -45,8 +45,9 @@ pub(crate) struct RegisterSessionArgs {
 pub(crate) struct EnsureSessionArgs {
     #[arg(long)]
     pub(crate) agent_principal_id: String,
+    /// Names the agent process; generated when omitted.
     #[arg(long)]
-    pub(crate) agent_instance_id: String,
+    pub(crate) agent_instance_id: Option<String>,
     #[arg(long)]
     pub(crate) role: SessionRoleArg,
     #[arg(long)]

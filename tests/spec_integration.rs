@@ -791,7 +791,8 @@ fn session_lifecycle_and_stale_reap_follow_spec() {
     );
     assert!(matches!(
         duplicate,
-        Err(CoveyError::SessionAlreadyActive { agent_principal_id }) if agent_principal_id == "principal_a"
+        Err(CoveyError::SessionAlreadyActive { agent_principal_id, role: SessionRole::Executor })
+            if agent_principal_id == "principal_a"
     ));
     let active = covey
         .active_session_for_principal("principal_a", SessionRole::Executor)
