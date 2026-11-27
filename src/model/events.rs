@@ -45,6 +45,9 @@ impl EventPayload {
             EventType::MetaTaskAnnotated => {
                 Self::MetaTaskAnnotated(serde_json::from_str(payload_json)?)
             }
+            EventType::MetaTaskUpdated => {
+                Self::MetaTaskUpdated(serde_json::from_str(payload_json)?)
+            }
             EventType::SubtaskCreated => Self::SubtaskCreated(serde_json::from_str(payload_json)?),
             EventType::WorkSubtaskCreated => {
                 Self::WorkSubtaskCreated(serde_json::from_str(payload_json)?)

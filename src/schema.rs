@@ -71,6 +71,7 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::MetaTaskSourceLinked => "meta_task_source_linked",
         EventType::MetaTaskCompleted => "meta_task_completed",
         EventType::MetaTaskAnnotated => "meta_task_annotated",
+        EventType::MetaTaskUpdated => "meta_task_updated",
     }
 }
 

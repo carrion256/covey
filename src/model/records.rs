@@ -28,10 +28,10 @@ use super::{
     SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
     SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
-    VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind,
-    VcsPrPublicationStatus, VcsWorkspaceCleanliness, VcsWorkspaceId, VcsWorkspaceKind,
-    VcsWorkspaceObservationReason, VcsWorkspacePath, VcsWorkspaceRef, VcsWorkspaceState,
-    VerifierId,
+    UpdateMetaTaskReq, VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId,
+    VcsPrPublicationKind, VcsPrPublicationStatus, VcsWorkspaceCleanliness, VcsWorkspaceId,
+    VcsWorkspaceKind, VcsWorkspaceObservationReason, VcsWorkspacePath, VcsWorkspaceRef,
+    VcsWorkspaceState, VerifierId,
 };
 
 /// Persisted session row.
@@ -5008,6 +5008,7 @@ pub enum EventPayload {
     MetaTaskSourceLinked(LinkMetaTaskSourceReq),
     MetaTaskCompleted(CompleteMetaTaskReq),
     MetaTaskAnnotated(AnnotateMetaTaskReq),
+    MetaTaskUpdated(UpdateMetaTaskReq),
     SubtaskCreated(CreateSubtaskRequest),
     WorkSubtaskCreated(CreateWorkSubtaskReq),
     SubtaskClaimed(ClaimResult),
@@ -5063,6 +5064,7 @@ impl EventPayload {
             Self::MetaTaskSourceLinked(_) => EventType::MetaTaskSourceLinked,
             Self::MetaTaskCompleted(_) => EventType::MetaTaskCompleted,
             Self::MetaTaskAnnotated(_) => EventType::MetaTaskAnnotated,
+            Self::MetaTaskUpdated(_) => EventType::MetaTaskUpdated,
             Self::SubtaskCreated(_) => EventType::SubtaskCreated,
             Self::WorkSubtaskCreated(_) => EventType::WorkSubtaskCreated,
             Self::SubtaskClaimed(_) => EventType::SubtaskClaimed,
@@ -5120,6 +5122,7 @@ impl EventPayload {
             | Self::MetaTaskCancelled(_)
             | Self::MetaTaskCompleted(_)
             | Self::MetaTaskAnnotated(_)
+            | Self::MetaTaskUpdated(_)
             | Self::MetaTaskSourceLinked(_) => ObjectType::MetaTask,
             Self::SubtaskCreated(_)
             | Self::WorkSubtaskCreated(_)

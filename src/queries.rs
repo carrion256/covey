@@ -12,9 +12,9 @@ use crate::{
         MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskListState, MetaTaskSort,
         MetaTaskSourceLink, MetaTaskState, MetaTaskSummary, MetaTaskSummaryParts,
         MutationIdempotencyRecord, ObjectType, OpenSpecImportProvenance,
-        OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
-        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
-        SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState, TimestampMs,
+        OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, PromptText, ReadyQueueItem,
+        Reservation, ReservationState, Review, RuntimeAttestation, Session, SessionState,
+        SessionToken, SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState, TimestampMs,
         claim_state_name, meta_task_state_name, object_type_name, parse_generated_members,
         reservation_state_name, session_state_name,
     },
@@ -186,26 +186,16 @@ fn meta_task_list_state_filter(state: MetaTaskListState) -> (Option<&'static str
     }
 }
 
-/// One page of the meta-task discovery query, ordered by the requested sort.
+/// Column list and joins of one meta-task discovery row.
 ///
-/// The page is one join over `meta_tasks` and its source link; subtask totals
-/// are counted from `subtasks` and the dedupe key is read from
-/// `meta_task_dedupe_keys`, so a page costs one query whatever it holds.
-fn meta_task_page_sql(sort: MetaTaskSort) -> String {
-    let order_by = match sort {
-        MetaTaskSort::CreatedAt => "m.created_at DESC, m.meta_task_id DESC",
-        MetaTaskSort::Due => {
-            "m.due_on IS NULL, m.due_on ASC, m.created_at DESC, m.meta_task_id DESC"
-        }
-        MetaTaskSort::Urgency => concat!(
-            "CASE m.urgency WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ",
-            "ELSE 3 END ASC, m.created_at DESC, m.meta_task_id DESC"
-        ),
-    };
+/// `compact` selects `NULL` instead of the prompt text, so a compact page never
+/// reads that column.
+fn meta_task_summary_select(compact: bool) -> String {
+    let prompt_column = if compact { "NULL" } else { "m.prompt_text" };
     format!(
         r#"
         SELECT m.meta_task_id AS meta_task_id,
-               m.prompt_text AS prompt_text,
+               {prompt_column} AS prompt_text,
                m.state AS state,
                m.created_at AS created_at,
                m.updated_at AS updated_at,
@@ -232,9 +222,35 @@ fn meta_task_page_sql(sort: MetaTaskSort) -> String {
                (SELECT COUNT(*)
                   FROM subtasks s
                  WHERE s.meta_task_id = m.meta_task_id
-                   AND s.state NOT IN ({})) AS subtask_open
+                   AND s.state NOT IN ({settled_subtask_states})) AS subtask_open
         FROM meta_tasks m
         LEFT JOIN meta_task_source_links l ON l.meta_task_id = m.meta_task_id
+        "#,
+        settled_subtask_states = SETTLED_SUBTASK_STATES,
+    )
+}
+
+/// One page of the meta-task discovery query, ordered by the requested sort.
+///
+/// The page is one join over `meta_tasks` and its source link; subtask totals
+/// are counted from `subtasks` and the dedupe key is read from
+/// `meta_task_dedupe_keys`, so a page costs one query whatever it holds. The
+/// dedupe projection is scoped to the row's own task, so several tasks filed
+/// under one key each report their own key.
+fn meta_task_page_sql(sort: MetaTaskSort, compact: bool) -> String {
+    let order_by = match sort {
+        MetaTaskSort::CreatedAt => "m.created_at DESC, m.meta_task_id DESC",
+        MetaTaskSort::Due => {
+            "m.due_on IS NULL, m.due_on ASC, m.created_at DESC, m.meta_task_id DESC"
+        }
+        MetaTaskSort::Urgency => concat!(
+            "CASE m.urgency WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ",
+            "ELSE 3 END ASC, m.created_at DESC, m.meta_task_id DESC"
+        ),
+    };
+    format!(
+        r#"
+        {select}
         WHERE (?1 IS NULL OR m.state = ?1)
           AND (?2 = 0 OR m.state IN ('planning', 'active'))
           AND (?3 IS NULL OR (m.due_on IS NOT NULL AND m.due_on < ?3))
@@ -246,7 +262,7 @@ fn meta_task_page_sql(sort: MetaTaskSort) -> String {
         ORDER BY {order_by}
         LIMIT ?6 OFFSET ?7
         "#,
-        SETTLED_SUBTASK_STATES,
+        select = meta_task_summary_select(compact),
     )
 }
 
@@ -272,7 +288,7 @@ fn map_meta_task_summary_parts_row(
     };
     Ok(MetaTaskSummaryParts {
         meta_task_id: row.get("meta_task_id")?,
-        prompt_text: row.get("prompt_text")?,
+        prompt_text: row.get::<_, Option<PromptText>>("prompt_text")?,
         state: parse_enum(row.get::<_, String>("state")?)?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -316,7 +332,7 @@ pub(crate) fn load_meta_task_summary_page_tx(
             "exceeds the maximum page offset",
         ))
     })?;
-    let mut stmt = tx.prepare(&meta_task_page_sql(query.sort()))?;
+    let mut stmt = tx.prepare(&meta_task_page_sql(query.sort(), query.compact()))?;
     let rows = stmt.query_map(
         params![
             state_name,
@@ -345,6 +361,25 @@ pub(crate) fn load_meta_task_summary_page_tx(
         );
     }
     Ok(summaries)
+}
+
+/// Reads one meta-task discovery row in the same shape a page returns.
+pub(crate) fn load_meta_task_summary_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+) -> Result<MetaTaskSummary> {
+    let sql = format!(
+        "{}\nWHERE m.meta_task_id = ?1",
+        meta_task_summary_select(false)
+    );
+    let mut part = map_missing_row(
+        tx.query_row(&sql, params![meta_task_id], map_meta_task_summary_parts_row),
+        CoveyError::MetaTaskNotFound,
+    )?;
+    let mut annotations =
+        load_meta_task_annotations_tx(tx, std::slice::from_ref(&part.meta_task_id))?;
+    part.annotations = annotations.remove(&part.meta_task_id).unwrap_or_default();
+    MetaTaskSummary::try_new(part).map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
 }
 
 /// Reads every annotation of the given meta tasks in one query.
@@ -440,16 +475,39 @@ pub(crate) fn load_meta_task_superseded_by_tx(
     .map_err(Into::into)
 }
 
-/// Reads the meta task one agent principal already filed under a dedupe key.
+/// Reads the open meta task one agent principal filed under a dedupe key.
+///
+/// Only `planning` and `active` rows match: a closed task keeps its key for
+/// audit and never resolves a submission again. When several open tasks were
+/// filed under the key, the most recently created one wins.
 pub(crate) fn load_meta_task_dedupe_tx(
     tx: &Transaction<'_>,
     agent_principal_id: &str,
     dedupe_key: &str,
-) -> Result<Option<MetaTaskId>> {
+) -> Result<Option<(MetaTaskId, MetaTaskState)>> {
     tx.query_row(
-        "SELECT meta_task_id FROM meta_task_dedupe_keys WHERE agent_principal_id = ?1 AND dedupe_key = ?2",
-        params![agent_principal_id, dedupe_key],
-        |row| row.get::<_, MetaTaskId>(0),
+        r#"
+        SELECT d.meta_task_id AS meta_task_id, m.state AS state
+          FROM meta_task_dedupe_keys d
+          JOIN meta_tasks m ON m.meta_task_id = d.meta_task_id
+         WHERE d.agent_principal_id = ?1
+           AND d.dedupe_key = ?2
+           AND m.state IN (?3, ?4)
+         ORDER BY m.created_at DESC, m.meta_task_id DESC
+         LIMIT 1
+        "#,
+        params![
+            agent_principal_id,
+            dedupe_key,
+            meta_task_state_name(MetaTaskState::Planning),
+            meta_task_state_name(MetaTaskState::Active),
+        ],
+        |row| {
+            Ok((
+                row.get::<_, MetaTaskId>(0)?,
+                parse_enum(row.get::<_, String>(1)?)?,
+            ))
+        },
     )
     .optional()
     .map_err(Into::into)

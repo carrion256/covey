@@ -236,6 +236,7 @@ pub enum EventType {
     MetaTaskSourceLinked,
     MetaTaskCompleted,
     MetaTaskAnnotated,
+    MetaTaskUpdated,
 }
 
 /// Covey-owned lifecycle state for apply worktrees retained as evidence.

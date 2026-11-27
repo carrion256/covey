@@ -57,9 +57,9 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
 - `ops/session.rs`
   Session registration, lookup-or-register, heartbeat, exit, and status logic.
 - `ops/meta_task.rs`
-  Meta-task submission, completion, cancellation, annotation, meta-task status,
-  the filtered list query, and the typed source backlink
-  (`meta_task_source_links`) written at submission or attached later
+  Meta-task submission, completion, cancellation, annotation, tracking-field
+  update, meta-task status, the filtered list query, and the typed source
+  backlink (`meta_task_source_links`) written at submission or attached later
   as a single backfill.
 - `ops/workflow/create.rs`
   Default-profile and explicit-policy work creation. Both persist a resolved
@@ -251,9 +251,15 @@ NULL in every new column.
   `superseded`, while a replaced task that already ended keeps its state and gains
   the link. An unknown id, or one already listed as replaced, refuses the whole
   submission with nothing written.
-- Dedupe keys are principal-scoped (`meta_task_dedupe_keys`, one row per key per
-  agent principal). A repeated key returns the existing task and writes nothing: no
-  task, no event, no idempotency row.
+- Dedupe keys are principal-scoped (`meta_task_dedupe_keys`, one row per key
+  per agent principal per task; migration 039). A submission under a key
+  resolves to the principal's open task under it, the newest when several are
+  open, and then writes nothing: no task, no event, no idempotency row. A task
+  that ended keeps its row for audit and never matches, so the key can file a
+  new task.
+- `meta update` sets or clears `title`, `urgency`, and `due_on` in any task
+  state. Each field change is a typed set-or-clear value, the whole request is
+  the payload of one `meta_task_updated` event, and `updated_at` moves.
 - Annotations (`meta_task_annotations`) are a closed key set — `verdict`, `acked`,
   `tier`, `entity` — with one value per key per task; `acked` holds `true` or
   `false`, the other keys hold trimmed text. Set and clear each append one
@@ -261,8 +267,10 @@ NULL in every new column.
   `meta status` renders them beside the supersedes and superseded-by projections.
 - `meta list` is one filtered page over `meta_tasks` joined to its source link and
   subtasks: state (`open` means `planning` or `active`), `--due-before` (rows
-  without a due date excluded), source thread, dedupe key, and a sort by creation
-  order, due date (undated rows last), or urgency (`high` first, unset last).
+  without a due date excluded), source thread, dedupe key (every task filed
+  under it, in any state), and a sort by creation order, due date (undated rows
+  last), or urgency (`high` first, unset last). A compact page does not read
+  `prompt_text` and omits it from every row.
 - `session ensure` looks up or registers in one transaction: an active session with
   the requested role is returned unchanged, an absent one is registered, and an
   active session with another role is refused with `WrongRole`.

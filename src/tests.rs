@@ -4689,7 +4689,10 @@ fn list_meta_tasks_orders_newest_first_and_tie_breaks_on_id() {
         vec!["meta-4", "meta-3", "meta-2", "meta-1"]
     );
     let newest = &page[0];
-    assert_eq!(newest.prompt_text().as_str(), "newest");
+    assert_eq!(
+        newest.prompt_text().map(|prompt| prompt.as_str()),
+        Some("newest")
+    );
     assert_eq!(newest.created_at().get(), 300);
     assert_eq!(newest.updated_at().get(), 300);
 }

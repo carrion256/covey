@@ -57,7 +57,8 @@ Covey tracks a fixed set of entities:
 - `meta_tasks`: top-level operator work items
 - `meta_task_source_links`, `meta_task_supersedes`, `meta_task_dedupe_keys`,
   `meta_task_annotations`: side rows holding a source backlink, supersede
-  links, a principal-scoped dedupe key, and annotations with a closed key set
+  links, the principal-scoped dedupe keys tasks were filed under, and
+  annotations with a closed key set
 - `subtasks`: decomposed units of work with immutable completion and evidence
   policies and exact routing keys, including first-class review subtasks
 - `claims`: fenced ownership of a subtask with leases
@@ -99,7 +100,9 @@ Covey exists to make invalid states hard or impossible.
   `done`, `upstream_closed`, `superseded`, or `dropped`; rows that predate
   migration 038 carry none
 - A replaced meta task has at most one replacement
-- At most one meta task exists per dedupe key per agent principal
+- A submission with a dedupe key resolves to the submitting principal's open
+  meta task under that key when one exists; a task that ended keeps its key and
+  never matches
 - A store opened with `--read-only` refuses every write
 
 These guarantees are enforced through database constraints plus transactional checks in the Covey API layer.
@@ -512,8 +515,8 @@ stripped, and exactly one of the two flags is required.
 
 The store numbers every meta task in creation order and gives it a positive
 numeric handle. `#N` names that task: `meta status`, `meta cancel`,
-`meta complete`, and `meta annotate` accept `--handle N` (or `#N`) in place of
-`--meta-task-id`, and every meta-task row carries `handle`.
+`meta complete`, `meta annotate`, and `meta update` accept `--handle N` (or
+`#N`) in place of `--meta-task-id`, and every meta-task row carries `handle`.
 
 ```bash
 covey meta status --handle 12
@@ -525,6 +528,20 @@ covey meta cancel --session-token <orch-session> --handle 12 --closure dropped
 default and refuses a task with open subtasks with the `conflict` code.
 `--closure` on `meta cancel` defaults to `dropped`.
 
+`meta update` sets or clears the typed fields of an existing task, whatever
+state it is in:
+
+```bash
+covey meta update --session-token <orch-session> --handle 12 --urgency high --due 2027-02-15
+covey meta update --session-token <orch-session> --handle 12 --clear-due
+```
+
+`--title`, `--urgency`, and `--due` each have a `--clear-<field>` twin
+(`--clear-title`, `--clear-urgency`, `--clear-due`). At least one change is
+required, and one call cannot both set and clear a field. The update needs an
+orchestrator session, appends one `meta_task_updated` event, and answers the
+task's row in the shape `meta list` returns.
+
 `--supersedes ID` is repeatable. Each replaced task is retired in the same
 transaction with closure `superseded` unless it already ended, and a task can be
 replaced once. An unknown id refuses the whole submit and writes nothing.
@@ -534,15 +551,18 @@ covey meta submit --session-token <orch-session> --prompt-text "ship feature aga
   --supersedes <meta-task-a> --supersedes <meta-task-b>
 ```
 
-`--dedupe-key` allows at most one meta task per key per agent principal:
+`--dedupe-key` allows at most one open meta task per key per agent principal:
 
 ```bash
 covey meta submit --session-token <orch-session> --prompt-text "ship feature" \
   --dedupe-key intake-77
 ```
 
-A repeated key returns the existing task id and writes nothing; the JSON ack
-then carries `deduplicated: true`.
+While the principal has an open task (`planning` or `active`) under the key, a
+repeated key returns that task and writes nothing; the JSON ack then carries
+`deduplicated: true`. A task that ended keeps its key for audit and no longer
+matches, so the next submission under the key files a new task. Every submit
+ack carries `state`, the state of the task it returns.
 
 `meta annotate` writes one annotation from the closed key set `verdict`,
 `acked`, `tier`, and `entity`:
@@ -567,10 +587,12 @@ covey meta list --source-thread-id <thread> --dedupe-key intake-77
 `--state` accepts `open`, `planning`, `active`, `completed`, and `cancelled`;
 `open` means a task that is `planning` or `active`. `--due-before`,
 `--source-thread-id`, and `--dedupe-key` filter, and `--sort` accepts
-`created_at`, `due`, or `urgency`. Each row carries `meta_task_id`,
-`prompt_text`, `state`, `created_at`, `updated_at`, `title`, `urgency`,
-`due_on`, `closure`, `handle`, `dedupe_key`, `source_link`, `annotations`,
-`subtask_total`, and `subtask_open`.
+`created_at`, `due`, or `urgency`. `--dedupe-key` lists every task filed under
+the key, open or ended. Each row carries `meta_task_id`, `prompt_text`,
+`state`, `created_at`, `updated_at`, `title`, `urgency`, `due_on`, `closure`,
+`handle`, `dedupe_key`, `source_link`, `annotations`, `subtask_total`, and
+`subtask_open`. `--compact` omits `prompt_text` from every row and changes
+nothing else, for callers that scan many tasks before reading one.
 
 ### Session Ensure
 

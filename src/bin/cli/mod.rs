@@ -143,6 +143,7 @@ impl Commands {
                 | MetaCommand::Cancel(_)
                 | MetaCommand::Complete(_)
                 | MetaCommand::Annotate(_)
+                | MetaCommand::Update(_)
                 | MetaCommand::LinkSource(_) => false,
             },
             Self::Subtask { command } => match command {

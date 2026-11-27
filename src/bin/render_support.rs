@@ -395,6 +395,9 @@ pub(crate) struct MetaTaskRef {
     pub(crate) meta_task_id: String,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) deduplicated: bool,
+    /// State of the returned task: the fresh one, or the open task a dedupe
+    /// key resolved to.
+    pub(crate) state: covey::MetaTaskState,
 }
 
 #[derive(Serialize)]

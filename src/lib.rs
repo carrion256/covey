@@ -90,9 +90,10 @@ pub use model::{
     VcsWorkspaceRef, VcsWorkspaceState, VerifierId, VerifyLandingAuthorizationReq, WorkSubtask,
 };
 pub use model::{
-    AnnotateMetaTaskReq, CompleteMetaTaskReq, DueDate, MetaTaskAnnotationChange,
+    AnnotateMetaTaskReq, CompleteMetaTaskReq, DueDate, FieldChange, MetaTaskAnnotationChange,
     MetaTaskAnnotationKey, MetaTaskAnnotationValue, MetaTaskAnnotations, MetaTaskClosure,
     MetaTaskDedupeKey, MetaTaskHandle, MetaTaskListQuery, MetaTaskListState, MetaTaskSort,
     MetaTaskSubmission, MetaTaskSummaryParts, MetaTaskTitle, MetaTaskUrgency, SessionEnsured,
+    UpdateMetaTaskReq,
 };
 pub use store::Covey;

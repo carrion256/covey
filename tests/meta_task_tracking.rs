@@ -15,11 +15,12 @@ use std::{
 
 use covey::{
     AnnotateMetaTaskReq, CancelMetaTaskReq, CompleteMetaTaskReq, CompletionPolicy, Covey,
-    CoveyError, CreateWorkSubtaskReq, DueDate, Event, EventPayload, EventType, ManualClock,
-    MetaTaskAnnotationChange, MetaTaskAnnotationValue, MetaTaskClosure, MetaTaskDedupeKey,
-    MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskListState, MetaTaskSort,
-    MetaTaskSourceLinkDraft, MetaTaskState, MetaTaskStatus, MetaTaskSummary, MetaTaskTitle,
-    MetaTaskUrgency, RegisterSessionReq, SessionRole, SubmitMetaTaskReq,
+    CoveyError, CreateWorkSubtaskReq, DueDate, Event, EventPayload, EventType, FieldChange,
+    ManualClock, MetaTaskAnnotationChange, MetaTaskAnnotationValue, MetaTaskClosure,
+    MetaTaskDedupeKey, MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskListState,
+    MetaTaskSort, MetaTaskSourceLinkDraft, MetaTaskState, MetaTaskStatus, MetaTaskSummary,
+    MetaTaskTitle, MetaTaskUrgency, RegisterSessionReq, SessionRole, SubmitMetaTaskReq,
+    UpdateMetaTaskReq,
 };
 use rstest::rstest;
 use rusqlite::Connection;
@@ -142,6 +143,15 @@ impl Rig {
             )
             .expect("valid annotate-meta-task request"),
         )
+    }
+
+    fn update_request(&self, meta_task_id: &str) -> UpdateMetaTaskReq {
+        UpdateMetaTaskReq::try_from_raw_parts(
+            self.orchestrator.clone(),
+            meta_task_id,
+            id_key("update-meta"),
+        )
+        .expect("valid update-meta-task request")
     }
 
     fn status(&self, meta_task_id: &str) -> MetaTaskStatus {
@@ -285,11 +295,13 @@ fn dedupe_hit_returns_the_same_id_and_writes_nothing() {
     let dedupe_key = MetaTaskDedupeKey::parse("intake-42".to_owned()).expect("valid dedupe key");
     let first = rig.submit(rig.request().with_dedupe_key(dedupe_key.clone()));
     assert!(!first.deduplicated);
+    assert_eq!(first.state, MetaTaskState::Planning);
     let tasks_after_first = rig.table_count("meta_tasks");
     let idempotency_after_first = rig.table_count("mutation_idempotency");
 
     let second = rig.submit(rig.request().with_dedupe_key(dedupe_key));
     assert!(second.deduplicated);
+    assert_eq!(second.state, MetaTaskState::Planning);
     assert_eq!(second.meta_task_id, first.meta_task_id);
     assert_eq!(rig.table_count("meta_tasks"), tasks_after_first);
     assert_eq!(
@@ -321,6 +333,291 @@ fn the_same_dedupe_key_from_another_principal_creates_a_new_task() {
     assert!(!second.deduplicated);
     assert_ne!(second.meta_task_id, first.meta_task_id);
     assert_eq!(rig.table_count("meta_tasks"), 2);
+}
+
+#[rstest]
+#[case::cancelled(false)]
+#[case::completed(true)]
+fn a_task_that_ended_keeps_its_dedupe_key_and_never_matches_again(#[case] complete: bool) {
+    let rig = Rig::new();
+    let dedupe_key = MetaTaskDedupeKey::parse("intake-21".to_owned()).expect("valid dedupe key");
+    let first = rig.submit(rig.request().with_dedupe_key(dedupe_key.clone()));
+    if complete {
+        rig.covey
+            .complete_meta_task(rig.complete_request(&first.meta_task_id))
+            .expect("complete the first task");
+    } else {
+        rig.covey
+            .cancel_meta_task(rig.cancel_request(&first.meta_task_id))
+            .expect("cancel the first task");
+    }
+
+    rig.clock.advance(1);
+    let second = rig.submit(rig.request().with_dedupe_key(dedupe_key.clone()));
+    assert!(
+        !second.deduplicated,
+        "a task that ended must not resolve the key"
+    );
+    assert_ne!(second.meta_task_id, first.meta_task_id);
+    assert_eq!(second.state, MetaTaskState::Planning);
+    assert_eq!(
+        rig.table_count("meta_task_dedupe_keys"),
+        2,
+        "the task that ended keeps its key row"
+    );
+
+    let third = rig.submit(rig.request().with_dedupe_key(dedupe_key.clone()));
+    assert!(third.deduplicated, "the open task resolves the key");
+    assert_eq!(third.meta_task_id, second.meta_task_id);
+
+    // The key lists every task filed under it, each under its own key.
+    let page = rig.list(MetaTaskListQuery::new(10, 0).with_dedupe_key(dedupe_key));
+    assert_eq!(
+        ids(&page),
+        [second.meta_task_id.clone(), first.meta_task_id.clone()]
+    );
+    for row in &page {
+        assert_eq!(
+            row.dedupe_key().map(MetaTaskDedupeKey::as_str),
+            Some("intake-21")
+        );
+    }
+}
+
+#[test]
+fn a_dedupe_hit_reports_the_state_of_the_task_it_returns() {
+    let rig = Rig::new();
+    let dedupe_key = MetaTaskDedupeKey::parse("intake-22".to_owned()).expect("valid dedupe key");
+    let first = rig.submit(rig.request().with_dedupe_key(dedupe_key.clone()));
+    rig.create_subtask(&first.meta_task_id);
+
+    let hit = rig.submit(rig.request().with_dedupe_key(dedupe_key));
+    assert!(hit.deduplicated);
+    assert_eq!(hit.meta_task_id, first.meta_task_id);
+    assert_eq!(hit.state, MetaTaskState::Active);
+}
+
+#[test]
+fn several_open_tasks_under_one_key_resolve_to_the_newest() {
+    let rig = Rig::new();
+    let older = rig.submit_id(rig.request());
+    rig.clock.advance(1);
+    let newer = rig.submit_id(rig.request());
+    // The API never files two open tasks under one key, so both rows are
+    // written straight to SQL, as a task that reopened would leave them.
+    {
+        let connection = Connection::open(&rig.db_path).expect("open database");
+        let principal: String = connection
+            .query_row(
+                "SELECT agent_principal_id FROM sessions WHERE session_token = ?1",
+                [rig.orchestrator.as_str()],
+                |row| row.get(0),
+            )
+            .expect("read the submitting principal");
+        for meta_task_id in [&older, &newer] {
+            connection
+                .execute(
+                    "INSERT INTO meta_task_dedupe_keys (agent_principal_id, dedupe_key,
+                         meta_task_id, created_at)
+                     VALUES (?1, 'intake-23', ?2, ?3)",
+                    rusqlite::params![principal, meta_task_id, NOW_MS],
+                )
+                .expect("file a task under the key");
+        }
+    }
+
+    let dedupe_key = MetaTaskDedupeKey::parse("intake-23".to_owned()).expect("valid dedupe key");
+    let hit = rig.submit(rig.request().with_dedupe_key(dedupe_key));
+    assert!(hit.deduplicated);
+    assert_eq!(hit.meta_task_id, newer);
+}
+
+#[test]
+fn update_sets_and_clears_tracking_fields_and_records_one_event() {
+    let rig = Rig::new();
+    let meta_task_id = rig.submit_id(
+        rig.request()
+            .with_title(MetaTaskTitle::parse("first title".to_owned()).expect("valid title"))
+            .with_urgency(MetaTaskUrgency::Low)
+            .with_due_on(DueDate::parse("2026-12-01".to_owned()).expect("valid due date")),
+    );
+    let submitted_at = rig.status(&meta_task_id).meta_task().updated_at().get();
+
+    rig.clock.advance(5);
+    let request = rig
+        .update_request(&meta_task_id)
+        .with_title(FieldChange::Set(
+            MetaTaskTitle::parse("second title".to_owned()).expect("valid title"),
+        ))
+        .with_urgency(FieldChange::Clear);
+    let row = rig
+        .covey
+        .update_meta_task(request.clone())
+        .expect("update the tracking fields");
+
+    assert_eq!(row.meta_task_id().as_str(), meta_task_id);
+    assert_eq!(row.title().map(MetaTaskTitle::as_str), Some("second title"));
+    assert_eq!(row.urgency(), None);
+    assert_eq!(
+        row.due_on().map(DueDate::as_str),
+        Some("2026-12-01"),
+        "a field the request does not name keeps its value"
+    );
+    assert_eq!(row.state(), MetaTaskState::Planning);
+    assert!(row.updated_at().get() > submitted_at);
+
+    let events = rig.events_of(&meta_task_id, EventType::MetaTaskUpdated);
+    assert_eq!(events.len(), 1);
+    match events[0].typed().expect("typed update payload").payload {
+        EventPayload::MetaTaskUpdated(recorded) => assert_eq!(recorded, request),
+        other => panic!("unexpected update payload: {other:?}"),
+    }
+    assert_eq!(
+        rig.list(MetaTaskListQuery::new(10, 0)),
+        [row],
+        "the update answers the row a list page returns"
+    );
+}
+
+#[rstest]
+#[case::completed(true)]
+#[case::cancelled(false)]
+fn update_is_allowed_on_a_task_that_ended(#[case] complete: bool) {
+    let rig = Rig::new();
+    let meta_task_id = rig.submit_id(rig.request());
+    if complete {
+        rig.covey
+            .complete_meta_task(rig.complete_request(&meta_task_id))
+            .expect("complete the task");
+    } else {
+        rig.covey
+            .cancel_meta_task(rig.cancel_request(&meta_task_id))
+            .expect("cancel the task");
+    }
+    let before = rig.status(&meta_task_id);
+
+    let row = rig
+        .covey
+        .update_meta_task(
+            rig.update_request(&meta_task_id)
+                .with_due_on(FieldChange::Set(
+                    DueDate::parse("2027-01-15".to_owned()).expect("valid due date"),
+                )),
+        )
+        .expect("update a task that ended");
+
+    assert_eq!(row.due_on().map(DueDate::as_str), Some("2027-01-15"));
+    assert_eq!(row.state(), before.meta_task().state());
+    assert_eq!(row.closure(), before.meta_task().closure);
+}
+
+#[test]
+fn update_without_a_change_is_refused_and_writes_nothing() {
+    let rig = Rig::new();
+    let meta_task_id = rig.submit_id(rig.request());
+
+    let error = rig
+        .covey
+        .update_meta_task(rig.update_request(&meta_task_id))
+        .expect_err("an update must change a field");
+    assert!(
+        matches!(error, CoveyError::TypeValidationError(_)),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        rig.events_of(&meta_task_id, EventType::MetaTaskUpdated)
+            .is_empty()
+    );
+}
+
+#[test]
+fn update_requires_an_orchestrator_session_and_a_known_task() {
+    let rig = Rig::new();
+    let meta_task_id = rig.submit_id(rig.request());
+    let executor = register(&rig.covey, "executor", SessionRole::Executor);
+
+    let refused = rig.covey.update_meta_task(
+        UpdateMetaTaskReq::try_from_raw_parts(
+            executor,
+            meta_task_id.as_str(),
+            id_key("update-meta"),
+        )
+        .expect("valid update request")
+        .with_urgency(FieldChange::Set(MetaTaskUrgency::High)),
+    );
+    assert!(
+        matches!(refused, Err(CoveyError::WrongRole { .. })),
+        "unexpected result: {refused:?}"
+    );
+
+    let unknown = rig.covey.update_meta_task(
+        rig.update_request("meta-missing")
+            .with_urgency(FieldChange::Set(MetaTaskUrgency::High)),
+    );
+    assert!(
+        matches!(unknown, Err(CoveyError::MetaTaskNotFound)),
+        "unexpected result: {unknown:?}"
+    );
+    assert_eq!(rig.status(&meta_task_id).meta_task().urgency, None);
+}
+
+#[test]
+fn a_replayed_update_key_appends_one_event() {
+    let rig = Rig::new();
+    let meta_task_id = rig.submit_id(rig.request());
+    let request = rig
+        .update_request(&meta_task_id)
+        .with_urgency(FieldChange::Set(MetaTaskUrgency::High));
+
+    let first = rig
+        .covey
+        .update_meta_task(request.clone())
+        .expect("update the urgency");
+    let replayed = rig
+        .covey
+        .update_meta_task(request)
+        .expect("replay the same update");
+
+    assert_eq!(replayed, first);
+    assert_eq!(
+        rig.events_of(&meta_task_id, EventType::MetaTaskUpdated)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_compact_page_omits_prompt_text_and_changes_nothing_else() {
+    let rig = Rig::new();
+    rig.submit_id(
+        rig.request()
+            .with_title(MetaTaskTitle::parse("titled".to_owned()).expect("valid title"))
+            .with_urgency(MetaTaskUrgency::Low),
+    );
+    rig.clock.advance(1);
+    rig.submit_id(rig.request());
+
+    let full = rig.list(MetaTaskListQuery::new(10, 0));
+    let compact = rig.list(MetaTaskListQuery::new(10, 0).with_compact(true));
+    assert_eq!(full.len(), 2);
+    assert_eq!(ids(&compact), ids(&full));
+    for (full_row, compact_row) in full.iter().zip(&compact) {
+        assert_eq!(
+            full_row.prompt_text().map(|prompt| prompt.as_str()),
+            Some("typed meta task")
+        );
+        assert_eq!(compact_row.prompt_text(), None);
+        let mut expected = serde_json::to_value(full_row).expect("serialize the full row");
+        expected
+            .as_object_mut()
+            .expect("a row is a JSON object")
+            .remove("prompt_text")
+            .expect("the full row carries prompt_text");
+        assert_eq!(
+            serde_json::to_value(compact_row).expect("serialize the compact row"),
+            expected
+        );
+    }
 }
 
 #[test]

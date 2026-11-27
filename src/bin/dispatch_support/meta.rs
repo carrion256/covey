@@ -4,9 +4,10 @@ use crate::cli::MetaTaskAnnotationKeyArg;
 use crate::render_support::MetaTaskAnnotationAck;
 
 use covey::{
-    AnnotateMetaTaskReq, CompleteMetaTaskReq, DueDate, MetaTaskAnnotationChange,
+    AnnotateMetaTaskReq, CompleteMetaTaskReq, DueDate, FieldChange, MetaTaskAnnotationChange,
     MetaTaskAnnotationKey, MetaTaskAnnotationValue, MetaTaskClosure, MetaTaskDedupeKey,
     MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskTitle, MetaTaskUrgency,
+    UpdateMetaTaskReq,
 };
 
 pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Result<Rendered> {
@@ -60,8 +61,8 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             let human = if submission.deduplicated {
                 match dedupe_key {
                     Some(dedupe_key) => format!(
-                        "meta_task {} already filed (dedupe key {dedupe_key})",
-                        submission.meta_task_id
+                        "meta_task {} already filed (dedupe key {dedupe_key}, state {})",
+                        submission.meta_task_id, submission.state
                     ),
                     None => format!("meta_task {}", submission.meta_task_id),
                 }
@@ -72,6 +73,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
                 MetaTaskRef {
                     meta_task_id: submission.meta_task_id,
                     deduplicated: submission.deduplicated,
+                    state: submission.state,
                 },
                 human,
             ))
@@ -150,6 +152,32 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
                 human,
             ))
         }
+        MetaCommand::Update(args) => {
+            let meta_task_id = resolve_meta_task_id(store, args.meta_task_id, args.handle)?;
+            let mut request = UpdateMetaTaskReq::try_from_raw_parts(
+                args.session_token,
+                meta_task_id.clone(),
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("update-meta-task")),
+            )?;
+            let title = args.title.map(MetaTaskTitle::parse).transpose()?;
+            if let Some(change) = field_change(title, args.clear_title) {
+                request = request.with_title(change);
+            }
+            let urgency = args.urgency.map(MetaTaskUrgency::from);
+            if let Some(change) = field_change(urgency, args.clear_urgency) {
+                request = request.with_urgency(change);
+            }
+            let due_on = args.due.map(DueDate::parse).transpose()?;
+            if let Some(change) = field_change(due_on, args.clear_due) {
+                request = request.with_due_on(change);
+            }
+            let summary = store.update_meta_task(request)?;
+            Ok(Rendered::summary(
+                summary,
+                format!("meta_task updated {meta_task_id}"),
+            ))
+        }
         MetaCommand::LinkSource(args) => {
             store.link_meta_task_source(LinkMetaTaskSourceReq::try_from_raw_parts(
                 args.session_token.clone(),
@@ -190,10 +218,22 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             if let Some(dedupe_key) = args.dedupe_key {
                 query = query.with_dedupe_key(MetaTaskDedupeKey::parse(dedupe_key)?);
             }
-            query = query.with_sort(args.sort.into());
+            query = query.with_sort(args.sort.into()).with_compact(args.compact);
             let summaries = store.list_meta_tasks_with(&query)?;
             Ok(Rendered::pretty(&summaries))
         }
+    }
+}
+
+/// The change one `--<field> VALUE` and `--clear-<field>` flag pair describes.
+///
+/// The argument parser refuses both flags of a pair together, so a value wins
+/// only where the parser let it through alone.
+fn field_change<T>(value: Option<T>, clear: bool) -> Option<FieldChange<T>> {
+    match (value, clear) {
+        (Some(value), _) => Some(FieldChange::Set(value)),
+        (None, true) => Some(FieldChange::Clear),
+        (None, false) => None,
     }
 }
 

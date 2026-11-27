@@ -23,6 +23,8 @@ pub(crate) enum MetaCommand {
     Cancel(CancelMetaArgs),
     Complete(CompleteMetaArgs),
     Annotate(AnnotateMetaArgs),
+    /// Set or clear the title, urgency, or due date of a meta task.
+    Update(UpdateMetaArgs),
     LinkSource(LinkSourceMetaArgs),
     Status(MetaStatusArgs),
     List(MetaListArgs),
@@ -283,6 +285,49 @@ pub(crate) struct AnnotateMetaArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("field_change")
+        .required(true)
+        .multiple(true)
+        .args(["title", "clear_title", "urgency", "clear_urgency", "due", "clear_due"])
+))]
+pub(crate) struct UpdateMetaArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    /// Meta-task id to update.
+    #[arg(long, conflicts_with_all = ["handle"], required_unless_present_any = ["handle"])]
+    pub(crate) meta_task_id: Option<String>,
+    /// Store-issued handle to update, as `12` or `#12`.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with_all = ["meta_task_id"],
+        required_unless_present_any = ["meta_task_id"]
+    )]
+    pub(crate) handle: Option<String>,
+    /// Set the one-line title.
+    #[arg(long, conflicts_with = "clear_title")]
+    pub(crate) title: Option<String>,
+    /// Remove the title.
+    #[arg(long)]
+    pub(crate) clear_title: bool,
+    /// Set the declared urgency.
+    #[arg(long, value_enum, conflicts_with = "clear_urgency")]
+    pub(crate) urgency: Option<MetaTaskUrgencyArg>,
+    /// Remove the urgency.
+    #[arg(long)]
+    pub(crate) clear_urgency: bool,
+    /// Set the calendar due date.
+    #[arg(long, value_name = "YYYY-MM-DD", conflicts_with = "clear_due")]
+    pub(crate) due: Option<String>,
+    /// Remove the due date.
+    #[arg(long)]
+    pub(crate) clear_due: bool,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct MetaStatusArgs {
     /// Meta-task id to read.
     #[arg(long, conflicts_with_all = ["handle"], required_unless_present_any = ["handle"])]
@@ -318,6 +363,9 @@ pub(crate) struct MetaListArgs {
     /// Ordering of the page.
     #[arg(long, value_enum, default_value = "created_at")]
     pub(crate) sort: MetaTaskSortArg,
+    /// Omit `prompt_text` from every row.
+    #[arg(long)]
+    pub(crate) compact: bool,
 }
 
 /// Reads the prompt text behind `--prompt-file`, with `-` naming stdin.

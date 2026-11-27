@@ -226,8 +226,8 @@ pub struct SubmitMetaTaskReq {
     pub due_on: Option<DueDate>,
     /// Optional dedupe key scoping this task to one submitting principal.
     ///
-    /// A principal that already holds the key receives the existing task
-    /// instead of a second row.
+    /// A principal with an open task under the key receives that task instead
+    /// of a second row. A closed task keeps its key and never matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<MetaTaskDedupeKey>,
     /// Tasks this submission replaces, in replacement order.
@@ -758,6 +758,81 @@ impl AnnotateMetaTaskReq {
             change,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+}
+
+/// One change to an optional tracking field: store a value or remove it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldChange<T> {
+    Set(T),
+    Clear,
+}
+
+/// Request to change the typed tracking fields of one meta task.
+///
+/// A field without a change keeps its stored value. A request must change at
+/// least one field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateMetaTaskReq {
+    pub session_token: SessionToken,
+    pub meta_task_id: MetaTaskId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<FieldChange<MetaTaskTitle>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgency: Option<FieldChange<MetaTaskUrgency>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<FieldChange<DueDate>>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl UpdateMetaTaskReq {
+    /// Builds an update request from unvalidated scalar values. It changes
+    /// nothing until a `with_*` setter adds a field change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or meta-task id is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
+            title: None,
+            urgency: None,
+            due_on: None,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Sets or clears the one-line title.
+    #[must_use]
+    pub fn with_title(mut self, change: FieldChange<MetaTaskTitle>) -> Self {
+        self.title = Some(change);
+        self
+    }
+
+    /// Sets or clears the declared urgency.
+    #[must_use]
+    pub fn with_urgency(mut self, change: FieldChange<MetaTaskUrgency>) -> Self {
+        self.urgency = Some(change);
+        self
+    }
+
+    /// Sets or clears the calendar due date.
+    #[must_use]
+    pub fn with_due_on(mut self, change: FieldChange<DueDate>) -> Self {
+        self.due_on = Some(change);
+        self
+    }
+
+    /// Returns whether the request changes at least one field.
+    #[must_use]
+    pub const fn has_changes(&self) -> bool {
+        self.title.is_some() || self.urgency.is_some() || self.due_on.is_some()
     }
 }
 

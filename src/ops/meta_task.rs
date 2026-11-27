@@ -11,18 +11,19 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         AnnotateMetaTaskReq, CancelMetaTaskReq, ClaimState, CompleteMetaTaskReq,
-        CoveyTypeValidationError, DueDate, EventType, LinkMetaTaskSourceReq, MetaTask,
+        CoveyTypeValidationError, DueDate, EventType, FieldChange, LinkMetaTaskSourceReq, MetaTask,
         MetaTaskAnnotationChange, MetaTaskAnnotationValue, MetaTaskClosure, MetaTaskHandle,
         MetaTaskId, MetaTaskListQuery, MetaTaskSourceLinkDraft, MetaTaskSourceLinkProvenance,
         MetaTaskState, MetaTaskStatus, MetaTaskSubmission, MetaTaskSummary, MetaTaskTitle,
         MetaTaskUrgency, ObjectType, ReadyQueueState, SessionRole, SubmitMetaTaskReq, SubtaskState,
-        TimestampMs, claim_state_name, meta_task_annotation_key_name, meta_task_closure_name,
-        meta_task_state_name, meta_task_urgency_name, ready_queue_state_name, subtask_state_name,
+        TimestampMs, UpdateMetaTaskReq, claim_state_name, meta_task_annotation_key_name,
+        meta_task_closure_name, meta_task_state_name, meta_task_urgency_name,
+        ready_queue_state_name, subtask_state_name,
     },
     queries::{
         count_open_subtasks_for_meta_task_tx, load_meta_task_annotations_tx,
         load_meta_task_dedupe_tx, load_meta_task_id_for_handle_tx, load_meta_task_source_link_tx,
-        load_meta_task_summary_page_tx, load_meta_task_superseded_by_tx,
+        load_meta_task_summary_page_tx, load_meta_task_summary_tx, load_meta_task_superseded_by_tx,
         load_meta_task_supersedes_tx, load_meta_task_tx, load_subtasks_for_meta_task_tx,
     },
     store::{append_session_event, load_claims_for_meta_task},
@@ -48,10 +49,11 @@ impl Covey {
         let result = self.with_write_tx(|tx, now| {
             let session =
                 require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
-            // A dedupe key resolves first and writes nothing at all: no task, no
-            // event, and no idempotency row.
+            // A dedupe key resolves to the principal's open task under that key
+            // first and writes nothing at all: no task, no event, and no
+            // idempotency row.
             if let Some(dedupe_key) = req.dedupe_key.as_ref()
-                && let Some(existing) = load_meta_task_dedupe_tx(
+                && let Some((existing, state)) = load_meta_task_dedupe_tx(
                     tx,
                     session.agent_principal_id.as_str(),
                     dedupe_key.as_str(),
@@ -60,6 +62,7 @@ impl Covey {
                 return Ok(MetaTaskSubmission {
                     meta_task_id: existing.to_string(),
                     deduplicated: true,
+                    state,
                 });
             }
             let meta_task_id = crate::store::with_idempotent_mutation(
@@ -71,9 +74,11 @@ impl Covey {
                 TimestampMs::parse(now)?,
                 || submit_meta_task_with_tracking_tx(tx, &req, now),
             )?;
+            let state = load_meta_task_tx(tx, meta_task_id.as_str())?.state();
             Ok(MetaTaskSubmission {
                 meta_task_id,
                 deduplicated: false,
+                state,
             })
         });
         self.log_operation(
@@ -154,6 +159,35 @@ impl Covey {
         });
         self.log_operation(
             "annotate_meta_task",
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |_| vec![format!("meta_task:{}", req.meta_task_id)],
+        );
+        result
+    }
+
+    /// Sets or clears the typed tracking fields of a meta task: title, urgency,
+    /// and due date.
+    ///
+    /// The task may be in any state. One `meta_task_updated` event records the
+    /// request. Returns the task's summary row as it reads after the update.
+    pub fn update_meta_task(&self, req: UpdateMetaTaskReq) -> Result<MetaTaskSummary> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                req.session_token.as_str(),
+                "update_meta_task",
+                &req.idempotency_key,
+                &req,
+                TimestampMs::parse(now)?,
+                || update_meta_task_tx(tx, &req, now),
+            )?;
+            load_meta_task_summary_tx(tx, req.meta_task_id.as_str())
+        });
+        self.log_operation(
+            "update_meta_task",
             req.session_token.as_str(),
             started_at,
             &result,
@@ -431,6 +465,73 @@ fn stored_annotation_value(value: &MetaTaskAnnotationValue) -> String {
         | MetaTaskAnnotationValue::Tier(text)
         | MetaTaskAnnotationValue::Entity(text) => text.clone(),
         MetaTaskAnnotationValue::Acked(flag) => flag.to_string(),
+    }
+}
+
+/// Applies the field changes of one update request and records the request as
+/// one event.
+///
+/// The task may be in any state: tracking fields describe a task, they do not
+/// move it.
+fn update_meta_task_tx(tx: &Transaction<'_>, req: &UpdateMetaTaskReq, now: i64) -> Result<()> {
+    require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
+    ensure_length("meta_task_id", req.meta_task_id.as_str(), MAX_OBJECT_ID_LEN)?;
+    if !req.has_changes() {
+        return Err(CoveyTypeValidationError::new(
+            "changes",
+            "at least one of title, urgency, or due_on must change",
+        )
+        .into());
+    }
+    load_meta_task_tx(tx, req.meta_task_id.as_str())?;
+    let (writes_title, title) =
+        column_change(req.title.as_ref(), |title| title.as_str().to_owned());
+    let (writes_urgency, urgency) = column_change(req.urgency.as_ref(), |urgency| {
+        meta_task_urgency_name(*urgency).to_owned()
+    });
+    let (writes_due_on, due_on) = column_change(req.due_on.as_ref(), ToString::to_string);
+    tx.execute(
+        r#"
+        UPDATE meta_tasks
+        SET title = CASE WHEN ?2 THEN ?3 ELSE title END,
+            urgency = CASE WHEN ?4 THEN ?5 ELSE urgency END,
+            due_on = CASE WHEN ?6 THEN ?7 ELSE due_on END,
+            updated_at = ?8
+        WHERE meta_task_id = ?1
+        "#,
+        params![
+            req.meta_task_id.as_str(),
+            writes_title,
+            title,
+            writes_urgency,
+            urgency,
+            writes_due_on,
+            due_on,
+            now,
+        ],
+    )?;
+    append_session_event(
+        tx,
+        EventType::MetaTaskUpdated,
+        ObjectType::MetaTask,
+        req.meta_task_id.as_str(),
+        req.session_token.as_str(),
+        req,
+        now,
+    )?;
+    Ok(())
+}
+
+/// The SQL parameters of one optional field change: whether the column is
+/// rewritten, and the text it is rewritten to, where `None` writes NULL.
+fn column_change<T>(
+    change: Option<&FieldChange<T>>,
+    text: impl Fn(&T) -> String,
+) -> (bool, Option<String>) {
+    match change {
+        Some(FieldChange::Set(value)) => (true, Some(text(value))),
+        Some(FieldChange::Clear) => (true, None),
+        None => (false, None),
     }
 }
 

@@ -1216,7 +1216,9 @@ impl TryFrom<RawMetaTaskStatus> for MetaTaskStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetaTaskSummary {
     meta_task_id: MetaTaskId,
-    prompt_text: PromptText,
+    /// Prompt text of the row; absent from a compact page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_text: Option<PromptText>,
     state: MetaTaskState,
     created_at: TimestampMs,
     updated_at: TimestampMs,
@@ -1237,7 +1239,7 @@ pub struct MetaTaskSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaTaskSummaryParts {
     pub meta_task_id: MetaTaskId,
-    pub prompt_text: PromptText,
+    pub prompt_text: Option<PromptText>,
     pub state: MetaTaskState,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
@@ -1292,10 +1294,10 @@ impl MetaTaskSummary {
         &self.meta_task_id
     }
 
-    /// Returns the meta-task prompt text.
+    /// Returns the meta-task prompt text, absent from a compact page.
     #[must_use]
-    pub const fn prompt_text(&self) -> &PromptText {
-        &self.prompt_text
+    pub const fn prompt_text(&self) -> Option<&PromptText> {
+        self.prompt_text.as_ref()
     }
 
     /// Returns the meta-task lifecycle state.
@@ -1410,6 +1412,7 @@ pub struct MetaTaskListQuery {
     source_thread_id: Option<String>,
     dedupe_key: Option<MetaTaskDedupeKey>,
     sort: MetaTaskSort,
+    compact: bool,
 }
 
 impl MetaTaskListQuery {
@@ -1423,6 +1426,7 @@ impl MetaTaskListQuery {
             source_thread_id: None,
             dedupe_key: None,
             sort: MetaTaskSort::CreatedAt,
+            compact: false,
         }
     }
 
@@ -1453,6 +1457,12 @@ impl MetaTaskListQuery {
     /// Orders the page by the given sort.
     pub const fn with_sort(mut self, sort: MetaTaskSort) -> Self {
         self.sort = sort;
+        self
+    }
+
+    /// Omits the prompt text from every row of this page.
+    pub const fn with_compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 
@@ -1497,6 +1507,12 @@ impl MetaTaskListQuery {
     pub const fn sort(&self) -> MetaTaskSort {
         self.sort
     }
+
+    /// Returns whether the page omits prompt text.
+    #[must_use]
+    pub const fn compact(&self) -> bool {
+        self.compact
+    }
 }
 
 /// Outcome of filing a meta task.
@@ -1504,6 +1520,7 @@ impl MetaTaskListQuery {
 pub struct MetaTaskSubmission {
     pub meta_task_id: String,
     pub deduplicated: bool,
+    pub state: MetaTaskState,
 }
 
 /// Outcome of ensuring the active session of an agent principal.

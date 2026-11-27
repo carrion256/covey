@@ -192,7 +192,11 @@ fn pre_038_database_upgrades_and_numbers_existing_meta_tasks() {
         .connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read schema version");
-    assert_eq!(user_version, TRACKING_VERSION as i64);
+    let migration_files =
+        fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/migrations"))
+            .expect("read migrations")
+            .count();
+    assert_eq!(user_version, migration_files as i64);
 
     let handles = db
         .connection

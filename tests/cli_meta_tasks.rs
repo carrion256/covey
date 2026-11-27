@@ -693,3 +693,145 @@ fn session_ensure_registers_then_reuses_and_refuses_another_role() {
     assert_eq!(exit_code(&other_role), 3);
     assert_eq!(error_code(&other_role), "permission_denied");
 }
+
+#[test]
+fn submit_ack_carries_the_state_and_an_ended_task_frees_its_dedupe_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let orch = register_orchestrator(&db, "dedupe-state-orch");
+    let submit_keyed = || {
+        success_data(&run_db(
+            &db,
+            &[
+                "meta",
+                "submit",
+                "--session-token",
+                &orch,
+                "--prompt-text",
+                "keyed intake",
+                "--dedupe-key",
+                "intake-31",
+            ],
+        ))
+    };
+
+    let first = submit_keyed();
+    assert_eq!(first["state"], "planning");
+    assert!(
+        first.get("deduplicated").is_none(),
+        "a fresh task omits deduplicated"
+    );
+
+    let hit = submit_keyed();
+    assert_eq!(hit["meta_task_id"], first["meta_task_id"]);
+    assert_eq!(hit["deduplicated"], Value::Bool(true));
+    assert_eq!(hit["state"], "planning");
+
+    success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "cancel",
+            "--session-token",
+            &orch,
+            "--meta-task-id",
+            &id_of(&first, "meta_task_id"),
+        ],
+    ));
+    let after_cancel = submit_keyed();
+    assert_ne!(after_cancel["meta_task_id"], first["meta_task_id"]);
+    assert!(after_cancel.get("deduplicated").is_none());
+    assert_eq!(list_ids(&db, &["--dedupe-key", "intake-31"]).len(), 2);
+}
+
+#[test]
+fn list_compact_omits_prompt_text_and_changes_nothing_else() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let orch = register_orchestrator(&db, "compact-orch");
+    submit(&db, &orch, "a long prompt nobody scans");
+
+    let full = success_data(&run_db(&db, &["meta", "list"]));
+    let compact = success_data(&run_db(&db, &["meta", "list", "--compact"]));
+
+    assert_eq!(full[0]["prompt_text"], "a long prompt nobody scans");
+    let mut expected = full.clone();
+    expected[0]
+        .as_object_mut()
+        .expect("a row is a JSON object")
+        .remove("prompt_text")
+        .expect("the full row carries prompt_text");
+    assert_eq!(compact, expected);
+}
+
+#[test]
+fn update_sets_and_clears_fields_and_answers_the_list_row() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let orch = register_orchestrator(&db, "update-orch");
+    success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "submit",
+            "--session-token",
+            &orch,
+            "--prompt-text",
+            "update me",
+            "--title",
+            "First title",
+            "--urgency",
+            "low",
+            "--due",
+            "2026-12-01",
+        ],
+    ));
+
+    let updated = success_data(&run_db(
+        &db,
+        &[
+            "meta",
+            "update",
+            "--session-token",
+            &orch,
+            "--handle",
+            "1",
+            "--title",
+            "Second title",
+            "--clear-urgency",
+        ],
+    ));
+
+    assert_eq!(updated["title"], "Second title");
+    assert!(updated["urgency"].is_null(), "the urgency is cleared");
+    assert_eq!(updated["due_on"], "2026-12-01");
+    let listed = success_data(&run_db(&db, &["meta", "list"]));
+    assert_eq!(
+        listed[0], updated,
+        "the update answers the row a list page returns"
+    );
+}
+
+#[test]
+fn update_without_a_change_or_with_a_set_and_clear_pair_is_invalid_args() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db = tmp.path().join("covey.db");
+    let orch = register_orchestrator(&db, "update-usage-orch");
+    submit(&db, &orch, "left alone");
+    let before = success_data(&run_db(&db, &["meta", "list"]));
+
+    let refused_changes: [&[&str]; 3] = [
+        &[],
+        &["--title", "Named", "--clear-title"],
+        &["--due", "2026-12-01", "--clear-due"],
+    ];
+    for changes in refused_changes {
+        let mut args = vec!["meta", "update", "--session-token", &orch, "--handle", "1"];
+        args.extend_from_slice(changes);
+        let output = run_db(&db, &args);
+        assert_eq!(exit_code(&output), 2, "refused changes: {changes:?}");
+        assert_eq!(error_code(&output), "invalid_args");
+    }
+
+    assert_eq!(success_data(&run_db(&db, &["meta", "list"])), before);
+}
