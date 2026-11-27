@@ -18,6 +18,25 @@ pub(super) fn dispatch_session(store: &Covey, command: SessionCommand) -> covey:
                 ),
             ))
         }
+        SessionCommand::Ensure(args) => {
+            let ensured = store.ensure_session(RegisterSessionReq::try_from_raw_parts(
+                args.agent_principal_id,
+                args.agent_instance_id,
+                args.role.into(),
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("ensure-session")),
+            )?)?;
+            Ok(Rendered::summary(
+                &ensured,
+                format!(
+                    "session {} role={} principal={} registered={}",
+                    ensured.session.session_token,
+                    ensured.session.role,
+                    ensured.session.agent_principal_id,
+                    ensured.registered
+                ),
+            ))
+        }
         SessionCommand::ActiveForPrincipal(args) => {
             let role = args.role.into();
             let handle = store.active_session_for_principal(&args.agent_principal_id, role)?;

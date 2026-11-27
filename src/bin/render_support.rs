@@ -374,12 +374,30 @@ pub(crate) struct SessionTokenAck {
 #[derive(Serialize)]
 pub(crate) struct MetaTaskRef {
     pub(crate) meta_task_id: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub(crate) deduplicated: bool,
 }
 
 #[derive(Serialize)]
 pub(crate) struct MetaTaskAck {
     pub(crate) operation: &'static str,
     pub(crate) meta_task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) closure: Option<covey::MetaTaskClosure>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct MetaTaskAnnotationAck {
+    pub(crate) operation: &'static str,
+    pub(crate) meta_task_id: String,
+    pub(crate) key: String,
+    pub(crate) value: Option<String>,
+}
+
+/// Keeps an ordinary submission ack byte-identical to one without dedupe
+/// reporting.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize)]
