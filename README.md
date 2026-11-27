@@ -485,9 +485,8 @@ covey session register --agent-principal-id worker --agent-instance-id worker-1 
 covey meta submit --session-token <orch-session> --prompt-text "ship feature"
 covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "implement"
 
-# Take and start work. The default claim lease is 30000 ms.
-covey subtask claim-next --session-token <worker-session>
-covey subtask start --session-token <worker-session> --claim-id <claim> --fence-seq <fence>
+# Take and start work in one call. The default claim lease is 30000 ms.
+covey subtask claim-next --session-token <worker-session> --start
 
 # Record the result. Evidence is optional unless the task requires it.
 covey subtask finish --session-token <worker-session> --claim-id <claim> \
@@ -500,6 +499,11 @@ Every call a worker makes with its session token also heartbeats the session
 and extends its claim, so only a worker that stays silent for longer than its
 lease needs `session heartbeat` or `claim renew`. The workflow profile does not
 change ownership, expiry, or dependency rules.
+
+`subtask claim-next --start` and `subtask claim --subtask-id <subtask> --start`
+claim and start in one transaction: `subtask_claimed` and `subtask_started` are
+appended together and the ack is the claim ack. Without `--start` the subtask
+stays `claimed` until `subtask start` is called with the claim id and fence.
 
 Every write that takes a session token accepts `--idempotency-key`. When it is
 omitted, `subtask start`, `finish`, `retry`, `fail`, `abandon`, and

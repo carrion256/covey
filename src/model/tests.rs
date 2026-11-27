@@ -3043,9 +3043,19 @@ fn claim_acquisition_payloads_reject_invalid_targets_and_leases() {
     let value = serde_json::to_value(&claim_next).expect("claim-next request serializes");
     assert_eq!(value["session_token"], "session-1");
     assert_eq!(value["lease_duration_ms"], 30_000);
+    assert!(
+        value.get("start").is_none(),
+        "a claim that does not start serializes as it did before the flag existed"
+    );
     let decoded: ClaimNextReq =
         serde_json::from_value(value).expect("claim-next request deserializes");
     assert_eq!(decoded, claim_next);
+    let starting = serde_json::to_value(claim_next.clone().with_start(true))
+        .expect("starting claim-next request serializes");
+    assert_eq!(starting["start"], true);
+    let decoded: ClaimNextReq =
+        serde_json::from_value(starting).expect("starting claim-next request deserializes");
+    assert!(decoded.start);
 
     let scoped_claim_next = ClaimNextReq::try_from_raw_parts_scoped(
         "session-1",

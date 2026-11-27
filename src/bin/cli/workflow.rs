@@ -83,6 +83,9 @@ pub(crate) struct ClaimNextArgs {
     pub(crate) idempotency_key: Option<String>,
     #[arg(long)]
     pub(crate) routing_key: Option<String>,
+    /// Start the claimed subtask in the same call.
+    #[arg(long)]
+    pub(crate) start: bool,
 }
 
 #[derive(Args, Debug)]
@@ -95,6 +98,9 @@ pub(crate) struct ClaimSubtaskArgs {
     pub(crate) lease_duration_ms: i64,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
+    /// Start the claimed subtask in the same call.
+    #[arg(long)]
+    pub(crate) start: bool,
 }
 
 #[derive(Args, Debug)]

@@ -318,6 +318,74 @@ fn a_repeated_fenced_command_replays_instead_of_running_twice() {
 }
 
 #[test]
+fn claim_next_with_start_leaves_only_the_finish_to_do() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    let orchestrator = register_orchestrator(&dir, &db);
+    let meta_task_id = submit_meta_task(&dir, &db, &orchestrator, "started on claim");
+    let run = |args: &[&str]| {
+        covey(&dir)
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+    success_data::<serde::de::IgnoredAny>(&run(&[
+        "subtask",
+        "create",
+        "--session-token",
+        &orchestrator,
+        "--meta-task-id",
+        &meta_task_id,
+        "--title",
+        "work",
+    ]));
+    let worker = success_data::<SessionData>(&run(&[
+        "session",
+        "register",
+        "--agent-principal-id",
+        "worker",
+        "--agent-instance-id",
+        "worker-1",
+        "--role",
+        "executor",
+    ]))
+    .session_token;
+
+    let claim = success_data::<ClaimData>(&run(&[
+        "subtask",
+        "claim-next",
+        "--session-token",
+        &worker,
+        "--start",
+    ]));
+    success_data::<serde::de::IgnoredAny>(&run(&[
+        "subtask",
+        "finish",
+        "--session-token",
+        &worker,
+        "--claim-id",
+        &claim.claim_id,
+        "--fence-seq",
+        &claim.fence_seq.to_string(),
+        "--summary",
+        "done",
+    ]));
+
+    let events = success_data::<Vec<EventRow>>(&run(&["events", "list", "--limit", "200"]));
+    let subtask_events: Vec<&str> = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .filter(|event_type| event_type.starts_with("subtask_"))
+        .collect();
+    assert_eq!(
+        subtask_events,
+        ["subtask_claimed", "subtask_started", "subtask_finished"]
+    );
+}
+
+#[test]
 fn maint_prune_reports_both_counts_and_refuses_a_non_positive_age() {
     let dir = TempDir::new().expect("tempdir");
     let db = dir.path().join("covey.db");

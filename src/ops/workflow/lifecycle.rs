@@ -32,7 +32,8 @@ use crate::{
 use super::artifact_review::ensure_changes_requested_followup_blocks_tx;
 
 impl Covey {
-    /// Claims the next available subtask on the opened workflow's route.
+    /// Claims the next available subtask on the opened workflow's route, and
+    /// starts it in the same transaction when the request asks for that.
     pub fn claim_next_subtask(&self, req: ClaimNextReq) -> Result<Option<ClaimResult>> {
         let started_at = Instant::now();
         let routing_key = &self.workflow.routing_key;
@@ -45,6 +46,7 @@ impl Covey {
             &req.idempotency_key,
             &(&req, routing_key),
             &[SessionRole::Executor, SessionRole::Reviewer],
+            req.start,
         );
         self.log_operation(
             "claim_next_subtask",
@@ -81,6 +83,7 @@ impl Covey {
             &req.idempotency_key,
             &req,
             &[SessionRole::Executor, SessionRole::Reviewer],
+            req.start,
         );
         self.log_operation(
             "claim_next_routed_subtask",
@@ -113,6 +116,7 @@ impl Covey {
         idempotency_key: &crate::model::IdempotencyKey,
         request: &Req,
         allowed_roles: &[SessionRole],
+        start: bool,
     ) -> Result<Option<ClaimResult>> {
         self.with_write_tx(|tx, now| {
             let lease_now = advance_lease_clock(tx, now)?;
@@ -163,7 +167,7 @@ impl Covey {
                     else {
                         return Ok(None);
                     };
-                    match claim_selected_subtask_tx(
+                    let claim = match claim_selected_subtask_tx(
                         tx,
                         &session,
                         session_token,
@@ -172,22 +176,27 @@ impl Covey {
                         lease_now,
                         now,
                     ) {
-                        Ok(result) => Ok(Some(result)),
-                        Err(CoveyError::SubtaskAlreadyClaimed { .. }) => Ok(None),
+                        Ok(claim) => claim,
+                        Err(CoveyError::SubtaskAlreadyClaimed { .. }) => return Ok(None),
                         Err(CoveyError::IllegalTransition { to, object, .. })
                             if to == SubtaskState::Claimed.into()
                                 && object == ObjectType::Subtask =>
                         {
-                            Ok(None)
+                            return Ok(None);
                         }
-                        Err(err) => Err(err),
+                        Err(err) => return Err(err),
+                    };
+                    if start {
+                        start_claimed_subtask_tx(tx, &session, &claim, idempotency_key, now)?;
                     }
+                    Ok(Some(claim))
                 },
             )
         })
     }
 
-    /// Claims a specific known subtask.
+    /// Claims a specific known subtask, and starts it in the same transaction
+    /// when the request asks for that.
     pub fn claim_subtask(&self, req: ClaimSubtaskReq) -> Result<ClaimResult> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
@@ -215,7 +224,7 @@ impl Covey {
                         return Err(CoveyError::SubtaskNotFound);
                     }
 
-                    claim_selected_subtask_tx(
+                    let claim = claim_selected_subtask_tx(
                         tx,
                         &session,
                         req.session_token.as_str(),
@@ -223,7 +232,11 @@ impl Covey {
                         req.lease_duration_ms,
                         lease_now,
                         now,
-                    )
+                    )?;
+                    if req.start {
+                        start_claimed_subtask_tx(tx, &session, &claim, &req.idempotency_key, now)?;
+                    }
+                    Ok(claim)
                 },
             )
         });
@@ -253,80 +266,7 @@ impl Covey {
                 &req.idempotency_key,
                 &req,
                 crate::model::TimestampMs::parse(now)?,
-                || {
-                    ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
-                    let claim = require_current_claim(
-                        tx,
-                        req.session_token.as_str(),
-                        &req.claim_id,
-                        req.fence_seq,
-                    )?;
-                    let session = require_active_session(tx, req.session_token.as_str())?;
-                    let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
-                    ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
-                    require_session_can_claim_kind(&session, subtask.kind())?;
-                    ensure_subtask_transition(
-                        subtask.kind(),
-                        subtask.state(),
-                        SubtaskState::InProgress,
-                    )?;
-                    let updated = tx.execute(
-                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4",
-                        params![
-                            subtask.subtask_id,
-                            subtask_state_name(SubtaskState::InProgress),
-                            now,
-                            subtask_state_name(subtask.state())
-                        ],
-                    )?;
-                    if updated != 1 {
-                        return Err(CoveyError::IllegalTransition {
-                            from: subtask.state().into(),
-                            to: SubtaskState::InProgress.into(),
-                            object: ObjectType::Subtask,
-                        });
-                    }
-                    if subtask.kind() == SubtaskKind::Review {
-                        let review_state_raw = tx.query_row(
-                            "SELECT state FROM reviews WHERE review_subtask_id = ?1",
-                            params![subtask.subtask_id],
-                            |row| row.get::<_, String>(0),
-                        )?;
-                        let review_state = match review_state_raw.as_str() {
-                            "requested" => ReviewState::Requested,
-                            "in_progress" => ReviewState::InProgress,
-                            "decided" => ReviewState::Decided,
-                            "superseded" => ReviewState::Superseded,
-                            _ => return Err(CoveyError::DatabaseError(rusqlite::Error::InvalidQuery)),
-                        };
-                        if review_state != ReviewState::InProgress {
-                            crate::validators::ensure_review_transition(
-                                review_state,
-                                ReviewState::InProgress,
-                            )?;
-                            tx.execute(
-                                "UPDATE reviews SET state = ?2, reviewer_session = ?3, updated_at = ?4 WHERE review_subtask_id = ?1 AND state = ?5",
-                                params![
-                                    subtask.subtask_id,
-                                    review_state_name(ReviewState::InProgress),
-                                    req.session_token.as_str(),
-                                    now,
-                                    review_state_name(review_state)
-                                ],
-                            )?;
-                        }
-                    }
-                    append_session_event(
-                        tx,
-                        EventType::SubtaskStarted,
-                        ObjectType::Subtask,
-                        &subtask.subtask_id,
-                        req.session_token.as_str(),
-                        &req,
-                        now,
-                    )?;
-                    Ok(())
-                },
+                || start_subtask_tx(tx, &req, now),
             )
         });
         self.log_operation(
@@ -630,6 +570,92 @@ impl Covey {
         );
         result
     }
+}
+
+/// Moves a claimed subtask into execution and appends `subtask_started`.
+fn start_subtask_tx(tx: &Transaction<'_>, req: &StartSubtaskReq, now: i64) -> Result<()> {
+    ensure_length("claim_id", &req.claim_id, MAX_OBJECT_ID_LEN)?;
+    let claim =
+        require_current_claim(tx, req.session_token.as_str(), &req.claim_id, req.fence_seq)?;
+    let session = require_active_session(tx, req.session_token.as_str())?;
+    let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
+    ensure_meta_task_is_schedulable(tx, &subtask.meta_task_id)?;
+    require_session_can_claim_kind(&session, subtask.kind())?;
+    ensure_subtask_transition(subtask.kind(), subtask.state(), SubtaskState::InProgress)?;
+    let updated = tx.execute(
+        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4",
+        params![
+            subtask.subtask_id,
+            subtask_state_name(SubtaskState::InProgress),
+            now,
+            subtask_state_name(subtask.state())
+        ],
+    )?;
+    if updated != 1 {
+        return Err(CoveyError::IllegalTransition {
+            from: subtask.state().into(),
+            to: SubtaskState::InProgress.into(),
+            object: ObjectType::Subtask,
+        });
+    }
+    if subtask.kind() == SubtaskKind::Review {
+        let review_state_raw = tx.query_row(
+            "SELECT state FROM reviews WHERE review_subtask_id = ?1",
+            params![subtask.subtask_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let review_state = match review_state_raw.as_str() {
+            "requested" => ReviewState::Requested,
+            "in_progress" => ReviewState::InProgress,
+            "decided" => ReviewState::Decided,
+            "superseded" => ReviewState::Superseded,
+            _ => return Err(CoveyError::DatabaseError(rusqlite::Error::InvalidQuery)),
+        };
+        if review_state != ReviewState::InProgress {
+            crate::validators::ensure_review_transition(review_state, ReviewState::InProgress)?;
+            tx.execute(
+                "UPDATE reviews SET state = ?2, reviewer_session = ?3, updated_at = ?4 WHERE review_subtask_id = ?1 AND state = ?5",
+                params![
+                    subtask.subtask_id,
+                    review_state_name(ReviewState::InProgress),
+                    req.session_token.as_str(),
+                    now,
+                    review_state_name(review_state)
+                ],
+            )?;
+        }
+    }
+    append_session_event(
+        tx,
+        EventType::SubtaskStarted,
+        ObjectType::Subtask,
+        &subtask.subtask_id,
+        req.session_token.as_str(),
+        req,
+        now,
+    )
+}
+
+/// Starts the subtask a claim was just issued for, inside the claiming
+/// transaction. The `subtask_started` event carries the request a separate
+/// start call would have sent, under the claim request's idempotency key.
+fn start_claimed_subtask_tx(
+    tx: &Transaction<'_>,
+    session: &Session,
+    claim: &ClaimResult,
+    idempotency_key: &crate::model::IdempotencyKey,
+    now: i64,
+) -> Result<()> {
+    start_subtask_tx(
+        tx,
+        &StartSubtaskReq {
+            session_token: session.session_token.clone(),
+            claim_id: claim.claim_id.clone(),
+            fence_seq: claim.fence_seq,
+            idempotency_key: idempotency_key.clone(),
+        },
+        now,
+    )
 }
 
 fn claim_selected_subtask_tx(

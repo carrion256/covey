@@ -86,7 +86,8 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
 - `ops/workflow/lifecycle.rs`
   Exact-route claim selection plus the held-claim, lease, fence, start,
   release, and abandon lifecycle, and the retirement of available work that
-  nobody holds.
+  nobody holds. A claim request can ask for the start in the same transaction,
+  which appends `subtask_claimed` and then `subtask_started`.
 - `ops/workflow/completion.rs`
   Fenced direct-work success, retryable-failure, and terminal-failure receipts.
 - `ops/workflow/artifact_review.rs`

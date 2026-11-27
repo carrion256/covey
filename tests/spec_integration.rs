@@ -1393,6 +1393,101 @@ fn a_mutation_by_another_session_leaves_a_claim_and_its_owner_alone() {
     );
 }
 
+/// The types of the events appended after the first `from` events.
+fn event_types_since(covey: &Covey, from: usize) -> Vec<EventType> {
+    covey
+        .fetch_events(0, 1_000)
+        .expect("events")
+        .iter()
+        .skip(from)
+        .map(|event| event.event_type())
+        .collect()
+}
+
+#[test]
+fn claim_next_with_start_claims_and_starts_in_one_mutation() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (_meta_task_id, subtask_id) = seed_work_subtask(&rig);
+    let worker = register(&covey, "worker", "worker", SessionRole::Executor);
+    let events = covey.fetch_events(0, 1_000).expect("events").len();
+    let request = ClaimNextReq::try_from_raw_parts(
+        worker.clone(),
+        LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+        id_key("claim-next"),
+    )
+    .expect("valid claim-next request")
+    .with_start(true);
+
+    let claim = covey
+        .claim_next_subtask(request.clone())
+        .expect("claim and start")
+        .expect("claim result");
+
+    assert_eq!(
+        event_types_since(&covey, events),
+        [EventType::SubtaskClaimed, EventType::SubtaskStarted]
+    );
+    let status = covey.subtask_status(&subtask_id).expect("status");
+    assert_eq!(status.subtask().state(), SubtaskState::InProgress);
+    let started = covey
+        .fetch_events(0, 1_000)
+        .expect("events")
+        .pop()
+        .expect("the started event")
+        .typed()
+        .expect("the started event decodes");
+    match started.payload {
+        EventPayload::SubtaskStarted(start) => {
+            assert_eq!(start.claim_id, claim.claim_id);
+            assert_eq!(start.fence_seq, claim.fence_seq);
+        }
+        other => panic!("expected the start request as payload, got {other:?}"),
+    }
+
+    rig.tick(1);
+    let replayed = covey
+        .claim_next_subtask(request)
+        .expect("replay the claim")
+        .expect("claim result");
+    assert_eq!(replayed, claim, "the replay answers the first claim");
+    assert_eq!(
+        event_types_since(&covey, events).len(),
+        2,
+        "a replayed claim starts nothing a second time"
+    );
+}
+
+#[test]
+fn claim_by_id_with_start_claims_and_starts_in_one_mutation() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (_meta_task_id, subtask_id) = seed_work_subtask(&rig);
+    let worker = register(&covey, "worker", "worker", SessionRole::Executor);
+    let events = covey.fetch_events(0, 1_000).expect("events").len();
+
+    let claim = covey
+        .claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker,
+                subtask_id.clone(),
+                LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-subtask"),
+            )
+            .expect("valid claim-subtask request")
+            .with_start(true),
+        )
+        .expect("claim and start");
+
+    assert_eq!(claim.subtask_id.to_string(), subtask_id);
+    assert_eq!(
+        event_types_since(&covey, events),
+        [EventType::SubtaskClaimed, EventType::SubtaskStarted]
+    );
+    let status = covey.subtask_status(&subtask_id).expect("status");
+    assert_eq!(status.subtask().state(), SubtaskState::InProgress);
+}
+
 #[test]
 fn import_repeat_is_deterministic() {
     let rig = Rig::new();

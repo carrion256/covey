@@ -45,47 +45,47 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 .idempotency_key
                 .unwrap_or_else(|| new_idempotency_key("claim-next-subtask"));
             let claim = if let Some(routing_key) = args.routing_key {
-                store.claim_next_routed_subtask(ClaimNextRoutedReq::try_from_raw_parts(
-                    args.session_token.clone(),
-                    args.lease_duration_ms,
-                    routing_key,
-                    args.meta_task_id.clone(),
-                    idempotency_key,
-                )?)?
+                store.claim_next_routed_subtask(
+                    ClaimNextRoutedReq::try_from_raw_parts(
+                        args.session_token.clone(),
+                        args.lease_duration_ms,
+                        routing_key,
+                        args.meta_task_id.clone(),
+                        idempotency_key,
+                    )?
+                    .with_start(args.start),
+                )?
             } else {
-                store.claim_next_subtask(ClaimNextReq::try_from_raw_parts_scoped(
-                    args.session_token.clone(),
-                    args.lease_duration_ms,
-                    args.meta_task_id.clone(),
-                    idempotency_key,
-                )?)?
+                store.claim_next_subtask(
+                    ClaimNextReq::try_from_raw_parts_scoped(
+                        args.session_token.clone(),
+                        args.lease_duration_ms,
+                        args.meta_task_id.clone(),
+                        idempotency_key,
+                    )?
+                    .with_start(args.start),
+                )?
             };
             Ok(Rendered::summary(
                 &claim,
                 match &claim {
-                    Some(claim) => format!(
-                        "claim {} subtask={} fence={}",
-                        claim.claim_id, claim.subtask_id, claim.fence_seq
-                    ),
+                    Some(claim) => claim_summary(claim, args.start),
                     None => "no subtask available".into(),
                 },
             ))
         }
         SubtaskCommand::Claim(args) => {
-            let claim = store.claim_subtask(ClaimSubtaskReq::try_from_raw_parts(
-                args.session_token.clone(),
-                args.subtask_id.clone(),
-                args.lease_duration_ms,
-                args.idempotency_key
-                    .unwrap_or_else(|| new_idempotency_key("claim-subtask")),
-            )?)?;
-            Ok(Rendered::summary(
-                &claim,
-                format!(
-                    "claim {} subtask={} fence={}",
-                    claim.claim_id, claim.subtask_id, claim.fence_seq
-                ),
-            ))
+            let claim = store.claim_subtask(
+                ClaimSubtaskReq::try_from_raw_parts(
+                    args.session_token.clone(),
+                    args.subtask_id.clone(),
+                    args.lease_duration_ms,
+                    args.idempotency_key
+                        .unwrap_or_else(|| new_idempotency_key("claim-subtask")),
+                )?
+                .with_start(args.start),
+            )?;
+            Ok(Rendered::summary(&claim, claim_summary(&claim, args.start)))
         }
         SubtaskCommand::Start(args) => {
             store.start_subtask(StartSubtaskReq::try_from_raw_parts(
@@ -224,6 +224,17 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             Ok(Rendered::pretty(&subtasks))
         }
     }
+}
+
+/// The human line of a claim ack; `started` says the subtask is in progress.
+fn claim_summary(claim: &covey::ClaimResult, started: bool) -> String {
+    format!(
+        "claim {} subtask={} fence={}{}",
+        claim.claim_id,
+        claim.subtask_id,
+        claim.fence_seq,
+        if started { " started" } else { "" }
+    )
 }
 
 pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Result<Rendered> {
@@ -510,6 +521,7 @@ mod tests {
                 meta_task_id: None,
                 idempotency_key: None,
                 routing_key: None,
+                start: false,
             }),
         )
         .expect("claim next should render");
@@ -544,6 +556,7 @@ mod tests {
                 subtask_id: "work-b".to_owned(),
                 lease_duration_ms: 60_000,
                 idempotency_key: None,
+                start: false,
             }),
         )
         .expect("claim exact should render");
@@ -588,6 +601,7 @@ mod tests {
                 subtask_id: "work-review".to_owned(),
                 lease_duration_ms: 60_000,
                 idempotency_key: None,
+                start: false,
             }),
         )
         .expect("claim work for artifact");
@@ -643,6 +657,7 @@ mod tests {
                 subtask_id: "review-work-review".to_owned(),
                 lease_duration_ms: 60_000,
                 idempotency_key: None,
+                start: false,
             }),
         )
         .expect("claim review subtask");

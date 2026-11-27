@@ -1274,6 +1274,9 @@ pub struct ClaimNextReq {
     pub lease_duration_ms: LeaseDurationMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta_task_id: Option<MetaTaskId>,
+    /// Also starts the claimed subtask in the same transaction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start: bool,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -1293,6 +1296,7 @@ impl ClaimNextReq {
             session_token: SessionToken::parse(session_token.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
             meta_task_id: None,
+            start: false,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
@@ -1313,8 +1317,16 @@ impl ClaimNextReq {
             session_token: SessionToken::parse(session_token.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
             meta_task_id: meta_task_id.map(MetaTaskId::parse).transpose()?,
+            start: false,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+
+    /// Asks for the claimed subtask to be started in the same transaction.
+    #[must_use]
+    pub fn with_start(mut self, start: bool) -> Self {
+        self.start = start;
+        self
     }
 }
 
@@ -1326,6 +1338,9 @@ pub struct ClaimNextRoutedReq {
     pub routing_key: RoutingKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta_task_id: Option<MetaTaskId>,
+    /// Also starts the claimed subtask in the same transaction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start: bool,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -1348,8 +1363,16 @@ impl ClaimNextRoutedReq {
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
             routing_key: RoutingKey::parse(routing_key.into())?,
             meta_task_id: meta_task_id.map(MetaTaskId::parse).transpose()?,
+            start: false,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+
+    /// Asks for the claimed subtask to be started in the same transaction.
+    #[must_use]
+    pub fn with_start(mut self, start: bool) -> Self {
+        self.start = start;
+        self
     }
 }
 
@@ -1359,6 +1382,9 @@ pub struct ClaimSubtaskReq {
     pub session_token: SessionToken,
     pub subtask_id: SubtaskId,
     pub lease_duration_ms: LeaseDurationMs,
+    /// Also starts the claimed subtask in the same transaction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start: bool,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -1378,8 +1404,16 @@ impl ClaimSubtaskReq {
             session_token: SessionToken::parse(session_token.into())?,
             subtask_id: SubtaskId::parse(subtask_id.into())?,
             lease_duration_ms: LeaseDurationMs::parse(lease_duration_ms.into())?,
+            start: false,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
+    }
+
+    /// Asks for the claimed subtask to be started in the same transaction.
+    #[must_use]
+    pub fn with_start(mut self, start: bool) -> Self {
+        self.start = start;
+        self
     }
 }
 
