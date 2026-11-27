@@ -208,10 +208,13 @@ impl Covey {
     }
 
     /// Records a heartbeat for an already-active session.
+    ///
+    /// The heartbeat itself, and the lease extension that goes with it, is the
+    /// liveness update every successful session mutation gets; this call adds
+    /// the `session_heartbeat` event for a session with nothing else to say.
     pub fn heartbeat(&self, req: HeartbeatReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
@@ -226,10 +229,6 @@ impl Covey {
                         SessionState::Active,
                         ObjectType::Session,
                         session.state() == SessionState::Active,
-                    )?;
-                    tx.execute(
-                        "UPDATE sessions SET last_heartbeat_at = ?2, last_heartbeat_tick = ?3, updated_at = ?2 WHERE session_token = ?1",
-                        params![req.session_token.as_str(), now, lease_now],
                     )?;
                     append_session_event(
                         tx,

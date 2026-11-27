@@ -584,14 +584,15 @@ impl Covey {
                     )?;
                     let renewed_deadline = claim.lease_deadline.get().max(lease_now) + req.extend_by_ms.get();
                     let updated = tx.execute(
-                        "UPDATE claims SET lease_deadline = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4 AND owner_session_token = ?5 AND fence_seq = ?6",
+                        "UPDATE claims SET lease_deadline = ?2, lease_duration_ms = ?7, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4 AND owner_session_token = ?5 AND fence_seq = ?6",
                         params![
                             req.claim_id,
                             renewed_deadline,
                             now,
                             claim_state_name(ClaimState::Held),
                             req.session_token.as_str(),
-                            req.fence_seq
+                            req.fence_seq,
+                            req.extend_by_ms.get()
                         ],
                     )?;
                     if updated != 1 {
@@ -667,8 +668,8 @@ fn claim_selected_subtask_tx(
         r#"
         INSERT INTO claims (
             claim_id, subtask_id, owner_session_token, fence_seq, lease_deadline,
-            state, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            lease_duration_ms, state, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?8, ?6, ?7, ?7)
         "#,
         params![
             claim_id,
@@ -677,7 +678,8 @@ fn claim_selected_subtask_tx(
             fence_seq,
             lease_deadline,
             claim_state_name(ClaimState::Held),
-            now
+            now,
+            lease_duration_ms.get()
         ],
     )?;
 

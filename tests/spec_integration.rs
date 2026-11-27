@@ -1192,6 +1192,207 @@ fn claim_renewal_extends_the_active_lease() {
         .expect("start after renewal");
 }
 
+/// Registers a worker and claims the seeded work subtask on a 10 s lease.
+fn claim_seeded_work(rig: &Rig, covey: &Covey) -> (String, ClaimResult) {
+    seed_work_subtask(rig);
+    let worker = register(covey, "worker", "worker", SessionRole::Executor);
+    let claim = covey
+        .claim_next_subtask(
+            ClaimNextReq::try_from_raw_parts(
+                worker.clone(),
+                LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key("claim-next"),
+            )
+            .expect("valid claim-next request"),
+        )
+        .expect("claim")
+        .expect("claim result");
+    (worker, claim)
+}
+
+/// The lease deadline and the stored lease duration of one claim.
+fn stored_lease(rig: &Rig, claim: &ClaimResult) -> (i64, Option<i64>) {
+    Connection::open(&rig.db_path)
+        .expect("open database")
+        .query_row(
+            "SELECT lease_deadline, lease_duration_ms FROM claims WHERE claim_id = ?1",
+            params![claim.claim_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read the claim's lease")
+}
+
+fn stored_heartbeat(rig: &Rig, session_token: &str) -> i64 {
+    Connection::open(&rig.db_path)
+        .expect("open database")
+        .query_row(
+            "SELECT last_heartbeat_at FROM sessions WHERE session_token = ?1",
+            params![session_token],
+            |row| row.get(0),
+        )
+        .expect("read the session's heartbeat")
+}
+
+#[test]
+fn a_session_mutation_is_a_liveness_signal_for_the_session_and_its_claims() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (worker, claim) = claim_seeded_work(&rig, &covey);
+    let claimed_at = stored_heartbeat(&rig, &worker);
+    assert_eq!(
+        stored_lease(&rig, &claim),
+        (claimed_at + 10_000, Some(10_000)),
+        "a claim stores the lease its owner asked for"
+    );
+
+    rig.tick(8_000);
+    let start_key = id_key("start-subtask");
+    let start = || {
+        covey.start_subtask(
+            StartSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                start_key.clone(),
+            )
+            .expect("valid start-subtask request"),
+        )
+    };
+    let events = covey.fetch_events(0, 1_000).expect("events").len();
+    start().expect("start");
+
+    assert_eq!(stored_heartbeat(&rig, &worker), claimed_at + 8_000);
+    assert_eq!(stored_lease(&rig, &claim).0, claimed_at + 18_000);
+    assert_eq!(
+        covey.fetch_events(0, 1_000).expect("events").len(),
+        events + 1,
+        "the liveness update appends no event of its own"
+    );
+
+    rig.tick(5_000);
+    start().expect("replay the start");
+    assert_eq!(
+        (
+            stored_heartbeat(&rig, &worker),
+            stored_lease(&rig, &claim).0
+        ),
+        (claimed_at + 8_000, claimed_at + 18_000),
+        "a replayed mutation is not a liveness signal"
+    );
+
+    rig.tick(4_999);
+    assert_eq!(
+        covey
+            .expire_old_claims()
+            .expect("expire claims")
+            .expired_count,
+        0,
+        "the claim outlives the lease it was first given"
+    );
+    rig.tick(2);
+    assert_eq!(
+        covey
+            .expire_old_claims()
+            .expect("expire claims")
+            .expired_count,
+        1
+    );
+}
+
+#[test]
+fn heartbeat_and_renewal_extend_a_claim_by_its_own_lease_duration() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (worker, claim) = claim_seeded_work(&rig, &covey);
+    let claimed_at = stored_heartbeat(&rig, &worker);
+
+    rig.tick(9_000);
+    send_heartbeat(&covey, &worker).expect("heartbeat");
+    assert_eq!(
+        stored_lease(&rig, &claim),
+        (claimed_at + 19_000, Some(10_000)),
+        "a heartbeat extends the lease by the claim's own duration from now"
+    );
+
+    let renewed = covey
+        .renew_claim(
+            RenewClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                LeaseDurationMs::parse(60_000).expect("valid lease duration"),
+                id_key("renew-claim"),
+            )
+            .expect("valid renew-claim request"),
+        )
+        .expect("renew claim");
+    assert_eq!(renewed.lease_deadline.get(), claimed_at + 79_000);
+    assert_eq!(
+        stored_lease(&rig, &claim),
+        (claimed_at + 79_000, Some(60_000)),
+        "a renewal stores the duration it asked for"
+    );
+
+    rig.tick(30_000);
+    send_heartbeat(&covey, &worker).expect("heartbeat after the renewal");
+    assert_eq!(stored_lease(&rig, &claim).0, claimed_at + 99_000);
+}
+
+#[test]
+fn a_claim_without_a_stored_duration_extends_by_the_default_lease() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (worker, claim) = claim_seeded_work(&rig, &covey);
+    let claimed_at = stored_heartbeat(&rig, &worker);
+    // A claim written before leases were stored names no duration.
+    Connection::open(&rig.db_path)
+        .expect("open database")
+        .execute(
+            "UPDATE claims SET lease_duration_ms = NULL WHERE claim_id = ?1",
+            params![claim.claim_id.to_string()],
+        )
+        .expect("clear the stored duration");
+
+    rig.tick(1_000);
+    send_heartbeat(&covey, &worker).expect("heartbeat");
+
+    assert_eq!(stored_lease(&rig, &claim), (claimed_at + 31_000, None));
+}
+
+#[test]
+fn a_mutation_by_another_session_leaves_a_claim_and_its_owner_alone() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (worker, claim) = claim_seeded_work(&rig, &covey);
+    let claimed_at = stored_heartbeat(&rig, &worker);
+    let orch = covey
+        .active_session_for_principal("orch", SessionRole::Orchestrator)
+        .expect("look up the orchestrator")
+        .expect("the seeded orchestrator session")
+        .session_token
+        .to_string();
+
+    rig.tick(8_000);
+    covey
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orch.clone(),
+                "unrelated work",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
+        .expect("the orchestrator submits other work");
+
+    assert_eq!(stored_heartbeat(&rig, &worker), claimed_at);
+    assert_eq!(stored_lease(&rig, &claim).0, claimed_at + 10_000);
+    assert_eq!(
+        stored_heartbeat(&rig, &orch),
+        claimed_at + 8_000,
+        "the orchestrator's own heartbeat moves"
+    );
+}
+
 #[test]
 fn import_repeat_is_deterministic() {
     let rig = Rig::new();

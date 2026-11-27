@@ -60,7 +60,11 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   bounded number of times and hands every mutation the store time described
   under `src/clock.rs`. It also owns the read-only open, which creates nothing,
   migrates nothing, and refuses every write, and the pragmas applied to read
-  connections. This file should not grow back into the full API surface.
+  connections. The idempotent-mutation wrapper is also where liveness is
+  recorded: a first, successful run refreshes the acting session's heartbeat
+  and extends the leases of the subtask claims that session holds, each by the
+  duration stored on the claim, so no operation module does this for itself.
+  This file should not grow back into the full API surface.
 
 ### Operation modules
 

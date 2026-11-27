@@ -1354,12 +1354,13 @@ impl Covey {
                         r#"
                         INSERT INTO claims (
                             claim_id, subtask_id, owner_session_token, fence_seq,
-                            lease_deadline, state, created_at, updated_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                            lease_deadline, lease_duration_ms, state, created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?8, ?6, ?7, ?7)
                         ON CONFLICT(claim_id) DO UPDATE SET
                             owner_session_token = excluded.owner_session_token,
                             fence_seq = excluded.fence_seq,
                             lease_deadline = excluded.lease_deadline,
+                            lease_duration_ms = excluded.lease_duration_ms,
                             state = excluded.state,
                             updated_at = excluded.updated_at
                         "#,
@@ -1371,6 +1372,7 @@ impl Covey {
                             lease_deadline,
                             claim_state_name(ClaimState::Held),
                             now,
+                            CLEANUP_LEASE_MS,
                         ],
                     )?;
                     tx.execute(

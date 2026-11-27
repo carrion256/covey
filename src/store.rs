@@ -53,6 +53,10 @@ static_assertions::assert_impl_all!(Covey: Send, Sync);
 /// `busy_timeout`.
 const WRITE_LOCK_ATTEMPTS: usize = 3;
 
+/// The lease of a claim whose row names no duration: one written before
+/// claims recorded the lease their owner asked for.
+const DEFAULT_CLAIM_LEASE_MS: i64 = 30_000;
+
 pub(crate) const LIST_CONFLICTS_LIMIT: usize = 1_000;
 
 impl Covey {
@@ -276,6 +280,50 @@ fn apply_read_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Counts a successful mutation by `actor_key` as a liveness signal.
+///
+/// When `actor_key` is the token of an active session, that session's
+/// heartbeat moves to the store's current time and every subtask claim the
+/// session holds has its lease extended to at least the lease clock plus the
+/// claim's own lease duration. An actor key that names no active session
+/// changes nothing. No event is appended.
+fn record_session_liveness(tx: &Transaction<'_>, actor_key: &str, now: i64) -> Result<()> {
+    let lease_now = advance_lease_clock(tx, now)?;
+    let heartbeats = tx.execute(
+        "UPDATE sessions SET last_heartbeat_at = ?2, last_heartbeat_tick = ?3, updated_at = ?2
+         WHERE session_token = ?1 AND state = ?4",
+        params![
+            actor_key,
+            now,
+            lease_now,
+            session_state_name(SessionState::Active)
+        ],
+    )?;
+    if heartbeats == 0 {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE claims
+         SET lease_deadline = ?2 + COALESCE(lease_duration_ms, ?3), updated_at = ?4
+         WHERE owner_session_token = ?1 AND state = ?5
+           AND lease_deadline < ?2 + COALESCE(lease_duration_ms, ?3)",
+        params![
+            actor_key,
+            lease_now,
+            DEFAULT_CLAIM_LEASE_MS,
+            now,
+            claim_state_name(ClaimState::Held)
+        ],
+    )?;
+    Ok(())
+}
+
+/// Runs `f` once per `(actor_key, operation, idempotency_key)`.
+///
+/// A repeated key with the same request returns the stored response without
+/// running `f`; with a different request it is refused. A first, successful
+/// run also counts as a liveness signal for the acting session (see
+/// [`record_session_liveness`]); a replay and a refusal do not.
 pub(crate) fn with_idempotent_mutation<T, Req, F>(
     tx: &Transaction<'_>,
     actor_key: &str,
@@ -306,6 +354,7 @@ where
     }
 
     let value = f()?;
+    record_session_liveness(tx, actor_key, created_at.get())?;
     tx.execute(
         r#"
         INSERT INTO mutation_idempotency (

@@ -61,7 +61,8 @@ Covey tracks a fixed set of entities:
   annotations with a closed key set
 - `subtasks`: decomposed units of work with immutable completion and evidence
   policies and exact routing keys, including first-class review subtasks
-- `claims`: fenced ownership of a subtask with leases
+- `claims`: fenced ownership of a subtask, with a lease and the lease duration
+  its owner asked for
 - `subtask_attempt_outcomes`: immutable success, retryable-failure, or
   terminal-failure receipts for direct work attempts
 - `artifacts`: immutable outputs identified by digest
@@ -287,7 +288,15 @@ Covey relies on single-writer transactional serialization in the local deploymen
   on the sidecar file `<db path>.migrate.lock`, so concurrent openers migrate
   it once; an opener that waits longer than 15 s answers `StoreBusy`. A
   foreign-key violation found by a migration rolls that migration back
-- Sessions heartbeat every 10s
+- Every successful mutation made with a session token is a liveness signal: it
+  refreshes that session's heartbeat and extends the lease of each subtask
+  claim the session holds to at least the store's current time plus that
+  claim's lease duration. The update appends no event. A replayed call and a
+  refused call are not signals, and ready-queue apply claims and reservations
+  are not extended
+- A session that makes no other call for longer than its lease or the stale
+  threshold heartbeats explicitly; `session heartbeat` extends its claims the
+  same way and appends a `session_heartbeat` event
 - Sessions older than the stale threshold are marked `stale`
 - Reservations and apply claims are rejected on command paths once their
   leases expire. A subtask claim is not: a lapsed lease only makes it
@@ -487,8 +496,10 @@ covey subtask finish --session-token <worker-session> --claim-id <claim> \
 
 `subtask retry` and `subtask fail` take the same ownership fields, a summary,
 and a `--failure-code`. All three accept `--evidence-digest` when needed.
-Workers still renew leases and heartbeat their sessions for long-running work;
-the workflow profile does not change ownership, expiry, or dependency rules.
+Every call a worker makes with its session token also heartbeats the session
+and extends its claim, so only a worker that stays silent for longer than its
+lease needs `session heartbeat` or `claim renew`. The workflow profile does not
+change ownership, expiry, or dependency rules.
 
 Every write that takes a session token accepts `--idempotency-key`. When it is
 omitted, `subtask start`, `finish`, `retry`, `fail`, `abandon`, and
