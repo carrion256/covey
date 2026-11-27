@@ -21,8 +21,15 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   Strict named workflow profiles composing completion mode, routing, and direct
   evidence requirements. No implicit file discovery; the library default is
   direct completion on `default` with optional evidence.
-- `src/model.rs`
-  Typed domain records, request DTOs, status payloads, event payloads, and persisted-state enums.
+- `src/clock.rs`
+  The injectable wall clock: a production clock and a manually advanced one for
+  tests. Lease ordering does not depend on it — ordering is a monotonic logical
+  clock inside SQLite — so wall-clock skew cannot resurrect an expired lease.
+- `src/model/`
+  Typed domain records, request DTOs, status payloads, event payloads, and
+  persisted-state enums, split by concern behind the re-export root
+  `src/model.rs`: `records.rs`, `requests.rs`, `views.rs`, `state.rs`,
+  `types.rs`, `events.rs`, `imports.rs`, and `helpers.rs`.
 - `src/error.rs`
   Typed domain errors for invalid transitions, ownership violations, lease failures, and storage issues.
 - `src/schema.rs`
@@ -33,18 +40,26 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   Transaction-scoped invariant checks and transition guards.
 - `src/overlap.rs`
   Reservation overlap normalization, lookup, and conflict recording logic.
+- `src/proof_apply.rs`
+  Apply-proof verification: the request contract, single and batch verification
+  against the queue, review, and artifact rows plus the recorded evidence, and
+  the typed error reported instead of a partial verdict.
 - `src/store.rs`
-  Connection ownership, transaction helpers, idempotency persistence, and shared mutation utilities. This file should not grow back into the full API surface.
+  Connection ownership, transaction helpers, idempotency persistence, and shared
+  mutation utilities. It also owns the read-only open, which creates nothing,
+  migrates nothing, and refuses every write, and the pragmas applied to read
+  connections. This file should not grow back into the full API surface.
 
 ### Operation modules
 
 All library mutations and read workflows hang off `Covey`, but the implementation is split by domain under `src/ops/`.
 
 - `ops/session.rs`
-  Session register, heartbeat, exit, and status logic.
+  Session registration, lookup-or-register, heartbeat, exit, and status logic.
 - `ops/meta_task.rs`
-  Meta-task submission, cancellation, meta-task status, and the typed source
-  backlink (`meta_task_source_links`) written at submission or attached later
+  Meta-task submission, completion, cancellation, annotation, meta-task status,
+  the filtered list query, and the typed source backlink
+  (`meta_task_source_links`) written at submission or attached later
   as a single backfill.
 - `ops/workflow/create.rs`
   Default-profile and explicit-policy work creation. Both persist a resolved
@@ -65,17 +80,46 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
   Reservation lifecycle, overlap lookup, event listing, and conflict resolution.
 - `ops/maintenance.rs`
   Lease-based cleanup and stale-session/claim/reservation maintenance.
-- `ops/import/openspec.rs`
-  OpenSpec-to-Covey import. Better Droid changes are imported from compiled mission JSON artifacts
-  and import-owned provenance only; this module must not claim work, schedule workers, enqueue apply
-  work, mutate OpenSpec source, or become a settlement authority.
+- `ops/current_work.rs`
+  Current-work projection for one imported change set: its blockers, the held
+  claims that have gone stale past an explicit threshold, and the resolution of
+  each, all derived from Covey rows rather than from the imported source.
+- `ops/import/`
+  The two governed import adapters. Neither claims work, schedules workers,
+  enqueues apply work, mutates the imported source, or becomes a settlement
+  authority. The change-set adapter imports Better Droid changes from compiled
+  mission JSON artifacts and import-owned provenance only.
+- `ops/operator_blocker.rs`
+  Operator blockade records, resolution, and lookup, tied to the subtask or
+  queue item they block.
+- `ops/prose_intake.rs`
+  Prose intake: free-text work admitted as canonical-apply tasks with required
+  evidence on the configured route, plus its current-work projection and apply
+  blockade.
+- `ops/repoops.rs`
+  Repository-operations authority snapshots over claims, git context, locks,
+  policy, and scope facts.
+- `ops/vcs_projection.rs`
+  VCS pull-request publication and packet-stack projections recorded against
+  reviewed work.
+- `ops/vcs_workspace.rs`
+  VCS workspace registration and observation records.
 
 ### CLI boundary
 
 - `src/bin/covey.rs`
-  Process startup plus clap command and argument definitions.
+  Process startup, help and example text, and the top-level dispatch. Argument
+  definitions live under `src/bin/cli/`.
+- `src/bin/cli/`
+  Clap command and argument definitions: `mod.rs` holds the parser, the global
+  flags, and the top-level command enum, and one file per related group holds that
+  group's arguments.
 - `src/bin/dispatch_support.rs`
-  CLI-to-library dispatch. This translates parsed clap args into typed `Covey` requests and typed success acks.
+  The dispatch router: one arm per parsed command group, each handing off to the
+  group's own module.
+- `src/bin/dispatch_support/`
+  Per-group translation of parsed arguments into typed `Covey` requests and typed
+  success acks, one file per related command group.
 - `src/bin/render_support.rs`
   Output-mode selection, human/json rendering, structured error reporting, and typed CLI envelope payloads.
 
@@ -150,7 +194,7 @@ inherit their source's completion policy and route.
 
 Specialized governed imports retain their explicit completion requirements.
 Lightweight prose intake keeps canonical apply with required evidence while
-using the configured route. Consumer-specific OpenSpec settlement paths retain
+using the configured route. Consumer-specific change-set settlement paths retain
 their explicit routing and apply contracts.
 
 Covey contains no Hermes adapter. A later adapter may register its own sessions
@@ -177,6 +221,78 @@ convention inside `prompt_text`, and it is independent of import provenance.
 - `meta status --json` renders `data.meta_task.source_link` or `null`; the
   linking session is stored and never rendered, and rows predating migration 037
   simply have no link.
+
+## Meta-Task Tracking
+
+A meta task carries typed tracking facts beside its prompt: a one-line title, an
+urgency, a calendar due date, and the typed reason a finished task closed. They are
+columns on `meta_tasks` (migration 038), not conventions inside `prompt_text`:
+nothing parses or rewrites that column, and rows that predate the migration keep
+NULL in every new column.
+
+- `title`, `urgency` (`low`, `medium`, `high`), `due_on` (`YYYY-MM-DD`, the day
+  checked against the Gregorian leap rule), and `closure` (`done`,
+  `upstream_closed`, `superseded`, `dropped`) are optional typed values, each
+  restated by a table CHECK constraint.
+- `handle` is a store-issued positive number, unique per store. The migration
+  backfills existing rows in creation order (`created_at`, then `meta_task_id`),
+  and an `AFTER INSERT` trigger numbers every later row the same way, so a raw SQL
+  insert, an import, and an API write are numbered alike. Every meta-task verb
+  accepts either an id or a handle.
+- `meta complete` refuses a task that still has open subtasks and a task that is
+  already cancelled; `--closure` is accepted on both terminal verbs, and an
+  unspecified closure means `done` for complete and `dropped` for cancel. The
+  stored closure is the value the event payload carries.
+- A refresh never reopens a completed task that has no subtasks, and whenever a
+  refresh moves a task out of a terminal state it clears the closure.
+- Supersede links (`meta_task_supersedes`) give a replaced task at most one
+  replacement and are written in the same transaction that retires it: a task still
+  `planning` or `active` is retired exactly as `meta cancel` retires it, with closure
+  `superseded`, while a replaced task that already ended keeps its state and gains
+  the link. An unknown id, or one already listed as replaced, refuses the whole
+  submission with nothing written.
+- Dedupe keys are principal-scoped (`meta_task_dedupe_keys`, one row per key per
+  agent principal). A repeated key returns the existing task and writes nothing: no
+  task, no event, no idempotency row.
+- Annotations (`meta_task_annotations`) are a closed key set — `verdict`, `acked`,
+  `tier`, `entity` — with one value per key per task; `acked` holds `true` or
+  `false`, the other keys hold trimmed text. Set and clear each append one
+  `meta_task_annotated` event, and clearing a key that is not set succeeds.
+  `meta status` renders them beside the supersedes and superseded-by projections.
+- `meta list` is one filtered page over `meta_tasks` joined to its source link and
+  subtasks: state (`open` means `planning` or `active`), `--due-before` (rows
+  without a due date excluded), source thread, dedupe key, and a sort by creation
+  order, due date (undated rows last), or urgency (`high` first, unset last).
+- `session ensure` looks up or registers in one transaction: an active session with
+  the requested role is returned unchanged, an absent one is registered, and an
+  active session with another role is refused with `WrongRole`.
+
+## Tracker Core And Settlement Half
+
+The crate ships one library with two halves, and both ship together.
+
+- The tracker core: sessions, meta tasks and their side tables, subtasks, claims,
+  attempt outcomes, events, and conflicts.
+- The settlement half: the ready queue and its apply claims, apply worktrees,
+  apply-gate and settlement blockers, landing receipts, repository-operations
+  snapshots and reservations, VCS workspace and packet-stack projections, and
+  apply-proof verification in `src/proof_apply.rs`.
+
+Measured 2026-11-26, before migration 038, the store this CLI serves held rows in 10
+of its 36 tables. Every settlement-half table was empty, as were the import and
+governance records; the only empty tracker-core tables were `conflicts` and
+`subtask_dependencies`.
+
+- The halves are not feature-gated and not split into separate crates. Library
+  consumers still pin this crate for the settlement flows, so a gate or a split is
+  either breaking or churn for them.
+- The boundary is documented instead: a tracker operation does not take a settlement
+  decision, and a settlement operation does not restate a tracker invariant.
+- Revisit only on a concrete consumer need — a request for a tracker-only build, or a
+  measured build-time or binary-size cost dominated by the settlement half. Until one
+  exists, the conditional-compilation churn buys nothing.
+- What to avoid in the meantime is movement across that boundary: settlement behaviour
+  added to the tracker core, or tracker behaviour moved into the settlement half.
 
 ## What To Avoid
 

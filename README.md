@@ -17,7 +17,7 @@ stacks embed: schedulers, apply gates, and settlement/landing authorities all
 talk to Covey for the state that must never be ambiguous. It is intentionally
 not an orchestrator — it is the floor underneath one.
 
-Version: `0.1` draft.
+Version: `0.1.0`.
 
 ## Scope
 
@@ -55,6 +55,9 @@ Covey tracks a fixed set of entities:
 
 - `sessions`: who is connected, what role they have, and when they last heartbeated
 - `meta_tasks`: top-level operator work items
+- `meta_task_source_links`, `meta_task_supersedes`, `meta_task_dedupe_keys`,
+  `meta_task_annotations`: side rows holding a source backlink, supersede
+  links, a principal-scoped dedupe key, and annotations with a closed key set
 - `subtasks`: decomposed units of work with immutable completion and evidence
   policies and exact routing keys, including first-class review subtasks
 - `claims`: fenced ownership of a subtask with leases
@@ -90,6 +93,14 @@ Covey exists to make invalid states hard or impossible.
 - At most one queued or in-flight ready-queue entry per subtask
 - Every successful mutation appends exactly one event-log row
 - Failed validations append no event-log row and leave no partial state
+- Every meta task carries a unique numeric handle issued by the store and
+  numbered by the schema in creation order
+- A meta task ends in `completed` or `cancelled` with a typed closure reason:
+  `done`, `upstream_closed`, `superseded`, or `dropped`; rows that predate
+  migration 038 carry none
+- A replaced meta task has at most one replacement
+- At most one meta task exists per dedupe key per agent principal
+- A store opened with `--read-only` refuses every write
 
 These guarantees are enforced through database constraints plus transactional checks in the Covey API layer.
 
@@ -215,12 +226,17 @@ For library consumers, direct outcome request constructors now accept
 `Option<String>` evidence, and result records expose an optional digest
 (`null` in JSON when absent). Historical evidence-bearing outcomes remain readable.
 
+Migration 038 adds the typed meta-task columns and three side tables, numbers
+existing meta tasks in creation order, leaves every other new column NULL, and
+parses nothing out of `prompt_text`.
+
 ## API Shape
 
 The crate exposes a narrow `Covey` API grouped around:
 
-- session lifecycle: register, heartbeat, exit
-- meta-task lifecycle: submit and cancel
+- session lifecycle: register, ensure, heartbeat, exit
+- meta-task lifecycle: submit, complete, annotate, and cancel, plus filtered
+  listing and handle lookup
 - subtask lifecycle: create with policy/routing, claim by exact route, start,
   finish, retry, fail, abandon, and release claim
 - lease lifecycle: renew claim and reservation leases
@@ -235,6 +251,13 @@ The crate exposes a narrow `Covey` API grouped around:
 All mutating requests carry a `session_token`. Ownership-sensitive operations
 also require a fence token. Routing keys partition candidate and claim-next
 selection; they are coordination selectors, not credentials or authorization.
+
+Session tokens are coordination handles, not a security boundary in the
+single-user local deployment model: anyone who can read the store file can
+already change it. `meta list` summaries omit the creator session token.
+`events list` and `session active-for-principal` return live session tokens by
+design, the second so that a principal's next process can find its own active
+session. `--read-only` is the enforced write fence.
 
 ## Concurrency And Liveness
 
@@ -266,9 +289,15 @@ There are three intended observation surfaces:
 
 - `event_log` for subscribers
 - point-in-time status queries for sessions, subtasks, and meta-tasks
-- structured process logs with operation name, session, duration, result, and affected objects
+- structured process logs with operation name, redacted actor, duration, result, and affected object ids
 
 The database is authoritative. Logs are for diagnosis.
+
+The third surface is switched on by `COVEY_LOG`:
+`COVEY_LOG=off|error|warn|info|debug|trace` installs a line-per-operation
+formatter on stderr, without ANSI colours; unset means no log output. Each line
+carries the operation name, the redacted actor, the duration, the result, and
+the affected object ids.
 
 ## Repository Shape
 
@@ -352,7 +381,25 @@ The CLI is transport-thin by design:
 
 - it maps directly onto the embedded `Covey` API
 - it defaults to JSON when stdout is not a TTY
-- it returns stable exit codes for success, not-found, invalid-args, permission, conflict, and internal errors
+- `--db` falls back to `COVEY_DB_PATH`, then `./covey.db`
+- `--read-only` opens an existing store without creating or migrating it and
+  refuses writes with the `store_read_only` code
+- a command that only reads, run against a store file that does not exist,
+  answers `store_not_found` and creates nothing; a write command still creates
+  and migrates the store
+- `--version` prints the version, the short commit, and `-dirty` when built
+  from a modified tree
+
+Exit codes are stable:
+
+| Outcome | Exit |
+|---|---|
+| success | 0 |
+| `not_found`, `store_not_found` | 1 |
+| `invalid_args` | 2 |
+| `permission_denied`, `store_read_only` | 3 |
+| `conflict`, `source_link_exists`, `store_migration_required` | 4 |
+| `internal_error` | 5 |
 
 Short help:
 
@@ -406,12 +453,12 @@ Worklist discovery is also read-only:
 covey meta list --limit 50 --offset 0
 ```
 
-`meta list` returns a deterministic page of safe meta-task summaries
-(`meta_task_id`, `prompt_text`, `state`, `created_at`, `updated_at`) newest
+`meta list` returns a deterministic page of safe meta-task summaries newest
 first, ordered by `created_at DESC, meta_task_id DESC`. `--limit` defaults
 to 50 and accepts 1–500; `--offset` defaults to 0 and must be non-negative.
 Summaries never expose the creator session token, and listing writes no
-domain events.
+domain events. Each row also carries the typed tracking fields and side-table
+projections described under [Meta-Task Tracking](#meta-task-tracking).
 
 A meta task can carry one typed source backlink: where the intake request
 came from, instead of a `Backlink:` line inside `prompt_text`. The link is a
@@ -435,8 +482,8 @@ requires them; a partial set is a usage error. A link is set once: a task that
 already has one is refused with the `source_link_exists` error code, and both
 writers need the same orchestrator authority as `meta cancel`. `meta status
 --json` renders it as `data.meta_task.source_link`, or `null` when the task has
-none; the linking session is stored but never rendered. `meta list` is
-unchanged.
+none; the linking session is stored but never rendered. `meta list` renders
+the same link as `source_link` on each row.
 
 Apply-queue reconciliation is an explicit write path for operator and scheduler
 bootstrap:
@@ -447,6 +494,95 @@ covey queue reconcile-apply --session-token <orch-or-apply-gate-session>
 
 It advances approved artifacts to `ready_for_apply` and enqueues missing
 ready-for-apply items exactly once.
+
+### Meta-Task Tracking
+
+A meta task carries typed fields, so callers stop encoding them as lines inside
+`prompt_text`:
+
+```bash
+covey meta submit --session-token <orch-session> --prompt-file notes/task.md \
+  --title "ship feature" --urgency high --due 2027-01-31
+```
+
+`--title`, `--urgency low|medium|high`, and `--due YYYY-MM-DD` are optional and
+stored on the row. `--prompt-text` and `--prompt-file PATH` are the two ways to
+supply the prompt; `-` reads it from standard input, one trailing newline is
+stripped, and exactly one of the two flags is required.
+
+The store numbers every meta task in creation order and gives it a positive
+numeric handle. `#N` names that task: `meta status`, `meta cancel`,
+`meta complete`, and `meta annotate` accept `--handle N` (or `#N`) in place of
+`--meta-task-id`, and every meta-task row carries `handle`.
+
+```bash
+covey meta status --handle 12
+covey meta complete --session-token <orch-session> --handle '#12'
+covey meta cancel --session-token <orch-session> --handle 12 --closure dropped
+```
+
+`meta complete` closes a task and appends one event. It stores closure `done` by
+default and refuses a task with open subtasks with the `conflict` code.
+`--closure` on `meta cancel` defaults to `dropped`.
+
+`--supersedes ID` is repeatable. Each replaced task is retired in the same
+transaction with closure `superseded` unless it already ended, and a task can be
+replaced once. An unknown id refuses the whole submit and writes nothing.
+
+```bash
+covey meta submit --session-token <orch-session> --prompt-text "ship feature again" \
+  --supersedes <meta-task-a> --supersedes <meta-task-b>
+```
+
+`--dedupe-key` allows at most one meta task per key per agent principal:
+
+```bash
+covey meta submit --session-token <orch-session> --prompt-text "ship feature" \
+  --dedupe-key intake-77
+```
+
+A repeated key returns the existing task id and writes nothing; the JSON ack
+then carries `deduplicated: true`.
+
+`meta annotate` writes one annotation from the closed key set `verdict`,
+`acked`, `tier`, and `entity`:
+
+```bash
+covey meta annotate --session-token <orch-session> --handle 12 --verdict pass
+covey meta annotate --session-token <orch-session> --handle 12 --acked true
+covey meta annotate --session-token <orch-session> --handle 12 --clear verdict
+```
+
+Supply exactly one of `--verdict`, `--acked true|false`, `--tier`, `--entity`, or
+`--clear KEY`. An annotation needs an orchestrator session, and `meta status`
+shows the current values under `annotations`.
+
+`meta list` pages, filters, and sorts:
+
+```bash
+covey meta list --state open --due-before 2027-02-01 --sort due --limit 20
+covey meta list --source-thread-id <thread> --dedupe-key intake-77
+```
+
+`--state` accepts `open`, `planning`, `active`, `completed`, and `cancelled`;
+`open` means a task that is `planning` or `active`. `--due-before`,
+`--source-thread-id`, and `--dedupe-key` filter, and `--sort` accepts
+`created_at`, `due`, or `urgency`. Each row carries `meta_task_id`,
+`prompt_text`, `state`, `created_at`, `updated_at`, `title`, `urgency`,
+`due_on`, `closure`, `handle`, `dedupe_key`, `source_link`, `annotations`,
+`subtask_total`, and `subtask_open`.
+
+### Session Ensure
+
+`session ensure` takes the `session register` flags and returns the principal's
+active session when it already has the requested role, registering one otherwise:
+
+```bash
+covey session ensure --agent-principal-id worker --agent-instance-id worker-2 --role executor
+```
+
+An active session with another role is refused with `permission_denied`. The JSON
+ack carries the session handle and `registered`.
 
 ### Subtask Dependencies
 
