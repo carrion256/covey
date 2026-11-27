@@ -65,6 +65,7 @@ impl EventPayload {
             EventType::SubtaskAbandoned => {
                 Self::SubtaskAbandoned(serde_json::from_str(payload_json)?)
             }
+            EventType::SubtaskRetired => Self::SubtaskRetired(serde_json::from_str(payload_json)?),
             EventType::ClaimReleased => Self::ClaimReleased(serde_json::from_str(payload_json)?),
             EventType::ClaimRenewed => Self::ClaimRenewed(serde_json::from_str(payload_json)?),
             EventType::ArtifactPublished => {

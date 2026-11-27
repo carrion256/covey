@@ -1579,6 +1579,33 @@ impl AbandonSubtaskReq {
     }
 }
 
+/// Request to retire an available subtask that no session holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetireSubtaskReq {
+    pub session_token: SessionToken,
+    pub subtask_id: SubtaskId,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl RetireSubtaskReq {
+    /// Builds a retire-subtask request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or subtask id is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        subtask_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            subtask_id: SubtaskId::parse(subtask_id.into())?,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+}
+
 /// Request to release a held claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseClaimReq {

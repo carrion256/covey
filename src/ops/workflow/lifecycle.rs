@@ -10,9 +10,10 @@ use crate::{
     error::{CoveyError, Result},
     model::{
         AbandonSubtaskReq, ClaimNextReq, ClaimNextRoutedReq, ClaimResult, ClaimState,
-        ClaimSubtaskReq, EventType, ObjectType, ReservationState, ReviewState, RoutingKey, Session,
-        SessionRole, SessionState, StartSubtaskReq, SubtaskKind, SubtaskState, claim_state_name,
-        reservation_state_name, review_state_name, session_state_name, subtask_state_name,
+        ClaimSubtaskReq, EventType, ObjectType, ReservationState, RetireSubtaskReq, ReviewState,
+        RoutingKey, Session, SessionRole, SessionState, StartSubtaskReq, SubtaskKind, SubtaskState,
+        claim_state_name, reservation_state_name, review_state_name, session_state_name,
+        subtask_state_name,
     },
     queries::load_subtask_tx,
     schema::advance_lease_clock,
@@ -24,7 +25,7 @@ use crate::{
         MAX_OBJECT_ID_LEN, clear_session_active_subtask, close_claim_and_detach, ensure_length,
         ensure_meta_task_is_schedulable, ensure_positive_lease_duration, ensure_subtask_transition,
         ensure_transition, held_claim_owner, issue_fence_seq, require_active_session,
-        require_current_claim, require_session_can_claim_kind, subtask_exists,
+        require_current_claim, require_role, require_session_can_claim_kind, subtask_exists,
     },
 };
 
@@ -410,6 +411,76 @@ impl Covey {
             started_at,
             &result,
             |_| vec![format!("claim:{}", req.claim_id)],
+        );
+        result
+    }
+
+    /// Retires an available subtask that no session holds: it moves to
+    /// `abandoned` without a claim.
+    ///
+    /// This is how an orchestrator removes work that can no longer run, such as
+    /// a subtask waiting on a dependency that failed. A subtask in any other
+    /// state is refused: held work is abandoned by its owner.
+    pub fn retire_subtask(&self, req: RetireSubtaskReq) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                req.session_token.as_str(),
+                "retire_subtask",
+                &req.idempotency_key,
+                &req,
+                crate::model::TimestampMs::parse(now)?,
+                || {
+                    require_role(
+                        tx,
+                        req.session_token.as_str(),
+                        &[SessionRole::Orchestrator],
+                    )?;
+                    ensure_length("subtask_id", req.subtask_id.as_str(), MAX_OBJECT_ID_LEN)?;
+                    let subtask = load_subtask_tx(tx, req.subtask_id.as_str())?;
+                    ensure_transition(
+                        subtask.state(),
+                        SubtaskState::Abandoned,
+                        ObjectType::Subtask,
+                        subtask.state() == SubtaskState::Available,
+                    )?;
+                    let updated = tx.execute(
+                        "UPDATE subtasks SET state = ?2, updated_at = ?3 WHERE subtask_id = ?1 AND state = ?4 AND current_claim_id IS NULL",
+                        params![
+                            subtask.subtask_id,
+                            subtask_state_name(SubtaskState::Abandoned),
+                            now,
+                            subtask_state_name(SubtaskState::Available)
+                        ],
+                    )?;
+                    if updated != 1 {
+                        return Err(CoveyError::IllegalTransition {
+                            from: subtask.state().into(),
+                            to: SubtaskState::Abandoned.into(),
+                            object: ObjectType::Subtask,
+                        });
+                    }
+                    refresh_meta_task_state(tx, &subtask.meta_task_id, now)?;
+                    append_session_event(
+                        tx,
+                        EventType::SubtaskRetired,
+                        ObjectType::Subtask,
+                        &subtask.subtask_id,
+                        req.session_token.as_str(),
+                        &req,
+                        now,
+                    )?;
+                    Ok(())
+                },
+            )
+        });
+        self.log_operation(
+            "retire_subtask",
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |_| vec![format!("subtask:{}", req.subtask_id)],
         );
         result
     }

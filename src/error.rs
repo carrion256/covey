@@ -1,6 +1,7 @@
 use crate::model::{
     ArtifactDigest, ClaimId, ClaimState, CompletionPolicy, CoveyTypeValidationError, MetaTaskState,
     ObjectType, QueueId, SessionRole, SessionState, SessionToken, StateValue, SubtaskId,
+    SubtaskState,
 };
 use thiserror::Error;
 
@@ -116,6 +117,13 @@ pub enum CoveyError {
     SubtaskDependencyNotFound {
         subtask_id: SubtaskId,
         depends_on_subtask_id: SubtaskId,
+    },
+    /// The dependency ended without succeeding and nothing can stand in for
+    /// it, so a subtask that waits on it would never become claimable.
+    #[error("dependency subtask {depends_on_subtask_id} is {state} and can never be satisfied")]
+    SubtaskDependencyUnsatisfiable {
+        depends_on_subtask_id: SubtaskId,
+        state: SubtaskState,
     },
     #[error("invalid subtask dependency: {reason}")]
     InvalidSubtaskDependency { reason: String },
@@ -274,8 +282,8 @@ impl PartialEq for CoveyError {
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact, StoreBusy,
             StoreMigrationRequired, StoreNotFound, StoreReadOnly, SubtaskAlreadyClaimed,
-            SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
-            WrongRole,
+            SubtaskDependencyNotFound, SubtaskDependencyUnsatisfiable, SubtaskNotFound,
+            TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         match (self, other) {
@@ -476,6 +484,16 @@ impl PartialEq for CoveyError {
                     depends_on_subtask_id: right_dependency,
                 },
             ) => left_subtask_id == right_subtask_id && left_dependency == right_dependency,
+            (
+                SubtaskDependencyUnsatisfiable {
+                    depends_on_subtask_id: left_dependency,
+                    state: left_state,
+                },
+                SubtaskDependencyUnsatisfiable {
+                    depends_on_subtask_id: right_dependency,
+                    state: right_state,
+                },
+            ) => left_dependency == right_dependency && left_state == right_state,
             (
                 CompletionPolicyViolation {
                     operation: left_operation,

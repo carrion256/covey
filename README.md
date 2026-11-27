@@ -681,7 +681,8 @@ ack carries the session handle and `registered`.
 ### Subtask Dependencies
 
 `subtask create --depends-on` declares prerequisite subtasks. Repeat the flag
-for more than one; a dependency may live in any meta-task and be in any state.
+for more than one; a dependency may live in any meta-task and be in any state
+that can still satisfy the claim gate.
 
 ```bash
 covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "integrate"
@@ -691,9 +692,21 @@ covey subtask create --session-token <orch-session> --meta-task-id <meta-task> \
 
 Dependencies gate CLAIMING only: they delay when a subtask becomes claimable and
 add no review, evidence, or other requirement. Unknown or self-referential
-dependencies are rejected and nothing is created. `subtask status` reports the
-declared edges under `dependencies`, each with the dependency's state and
-whether it currently satisfies the claim gate.
+dependencies are rejected and nothing is created. So is a dependency that can
+never satisfy the gate: a `failed` or `abandoned` subtask with no review
+follow-up, which includes work abandoned by a cancelled meta task. That refusal
+answers `conflict` with the reason `subtask_dependency_unsatisfiable`.
+`subtask status` reports the declared edges under `dependencies`, each with the
+dependency's state and whether it currently satisfies the claim gate.
+
+A subtask that was created before its dependency ended badly keeps waiting. An
+orchestrator removes it with `subtask retire`, which moves an `available`
+subtask that nobody holds to `abandoned` and appends one `subtask_retired`
+event; work that is claimed is abandoned by its owner instead:
+
+```bash
+covey subtask retire --session-token <orch-session> --subtask-id <subtask>
+```
 
 ### OpenSpec Import
 

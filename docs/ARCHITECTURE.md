@@ -75,10 +75,14 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
   as a single backfill.
 - `ops/workflow/create.rs`
   Default-profile and explicit-policy work creation. Both persist a resolved
-  execution contract and emit the same typed `WorkSubtaskCreated` payload.
+  execution contract and emit the same typed `WorkSubtaskCreated` payload. A
+  declared dependency must exist and must still be able to satisfy the claim
+  gate: a `failed` or `abandoned` dependency without a review follow-up is
+  refused, since the new subtask would wait on it for ever.
 - `ops/workflow/lifecycle.rs`
   Exact-route claim selection plus the held-claim, lease, fence, start,
-  release, and abandon lifecycle.
+  release, and abandon lifecycle, and the retirement of available work that
+  nobody holds.
 - `ops/workflow/completion.rs`
   Fenced direct-work success, retryable-failure, and terminal-failure receipts.
 - `ops/workflow/artifact_review.rs`

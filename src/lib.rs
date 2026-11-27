@@ -93,7 +93,7 @@ pub use model::{
     AnnotateMetaTaskReq, CompleteMetaTaskReq, DueDate, FieldChange, MetaTaskAnnotationChange,
     MetaTaskAnnotationKey, MetaTaskAnnotationValue, MetaTaskAnnotations, MetaTaskClosure,
     MetaTaskDedupeKey, MetaTaskHandle, MetaTaskListQuery, MetaTaskListState, MetaTaskSort,
-    MetaTaskSubmission, MetaTaskSummaryParts, MetaTaskTitle, MetaTaskUrgency, SessionEnsured,
-    UpdateMetaTaskReq,
+    MetaTaskSubmission, MetaTaskSummaryParts, MetaTaskTitle, MetaTaskUrgency, PruneResult,
+    RetireSubtaskReq, SessionEnsured, UpdateMetaTaskReq,
 };
 pub use store::Covey;

@@ -23,8 +23,8 @@ use super::{
     RecordProseApplyBlockerReq, RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq,
     RecordVcsPacketStackEntryReq, RecordVcsPrPublicationReq, RecordVcsWorkspaceReq,
     ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationId, ReservationState,
-    ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict,
-    RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
+    ResolveConflictReq, ResolveOperatorBlockerReq, RetireSubtaskReq, ReviewId, ReviewState,
+    ReviewVerdict, RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
     SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
     SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
@@ -5027,6 +5027,7 @@ pub enum EventPayload {
     SubtaskRetried(AttemptOutcome),
     SubtaskFailed(AttemptOutcome),
     SubtaskAbandoned(AbandonSubtaskReq),
+    SubtaskRetired(RetireSubtaskReq),
     ClaimReleased(ReleaseClaimReq),
     ClaimRenewed(ClaimResult),
     ArtifactPublished(PublishArtifactReq),
@@ -5085,6 +5086,7 @@ impl EventPayload {
             Self::SubtaskRetried(_) => EventType::SubtaskRetried,
             Self::SubtaskFailed(_) => EventType::SubtaskFailed,
             Self::SubtaskAbandoned(_) => EventType::SubtaskAbandoned,
+            Self::SubtaskRetired(_) => EventType::SubtaskRetired,
             Self::ClaimReleased(_) => EventType::ClaimReleased,
             Self::ClaimRenewed(_) => EventType::ClaimRenewed,
             Self::ArtifactPublished(_) => EventType::ArtifactPublished,
@@ -5144,7 +5146,8 @@ impl EventPayload {
             | Self::SubtaskFinished(_)
             | Self::SubtaskRetried(_)
             | Self::SubtaskFailed(_)
-            | Self::SubtaskAbandoned(_) => ObjectType::Subtask,
+            | Self::SubtaskAbandoned(_)
+            | Self::SubtaskRetired(_) => ObjectType::Subtask,
             Self::SubtaskClaimed(_)
             | Self::ClaimReleased(_)
             | Self::ClaimRenewed(_)

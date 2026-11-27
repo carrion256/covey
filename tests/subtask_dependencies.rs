@@ -15,8 +15,9 @@ use std::{
 mod support;
 
 use covey::{
-    ClaimNextReq, Covey, CoveyError, CreateSubtaskRequest, EventType, FinishSubtaskReq,
-    ManualClock, RegisterSessionReq, SessionRole, StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
+    CancelMetaTaskReq, ClaimNextReq, Covey, CoveyError, CreateSubtaskRequest, EventType,
+    FinishSubtaskReq, ManualClock, RegisterSessionReq, RetireSubtaskReq, SessionRole,
+    StartSubtaskReq, SubmitMetaTaskReq, SubtaskState,
 };
 use proptest::prelude::*;
 use rstest::rstest;
@@ -102,6 +103,25 @@ impl Harness {
             .try_with_dependencies(&depends_on)
             .expect("valid dependency declaration"),
         )
+    }
+
+    fn retire(&self, subtask_id: &str) -> covey::Result<()> {
+        self.covey.retire_subtask(
+            RetireSubtaskReq::try_from_raw_parts(
+                self.orchestrator.clone(),
+                subtask_id,
+                id_key("retire-subtask"),
+            )
+            .expect("valid retire-subtask request"),
+        )
+    }
+
+    fn state_of(&self, subtask_id: &str) -> SubtaskState {
+        self.covey
+            .subtask_status(subtask_id)
+            .expect("subtask status")
+            .subtask()
+            .state()
     }
 
     fn created(&self, subtask_id: &str, title: &str, depends_on: &[&str]) -> String {
@@ -422,6 +442,139 @@ fn already_finished_dependencies_are_accepted_at_create_time() {
     let mut claimable = harness.candidates();
     claimable.sort();
     assert_eq!(claimable, vec!["after-finish", "keeps-meta-task-open"]);
+}
+
+#[test]
+fn a_dependency_that_can_never_be_satisfied_is_refused_and_creates_nothing() {
+    let harness = Harness::new();
+    harness.created(
+        "dead-dependency",
+        "retired before anything waited on it",
+        &[],
+    );
+    harness.created("keeps-meta-task-open", "still pending", &[]);
+    harness
+        .retire("dead-dependency")
+        .expect("retire the available subtask");
+
+    let error = harness.create_fails("dependent", "waits on dead work", &["dead-dependency"]);
+
+    assert!(
+        matches!(
+            error,
+            CoveyError::SubtaskDependencyUnsatisfiable {
+                ref depends_on_subtask_id,
+                state: SubtaskState::Abandoned,
+            } if depends_on_subtask_id.as_str() == "dead-dependency"
+        ),
+        "the error must name the dead dependency and its state: {error}"
+    );
+    assert_eq!(
+        harness.subtask_rows(),
+        vec![
+            String::from("dead-dependency"),
+            String::from("keeps-meta-task-open")
+        ],
+        "the refused subtask must not be stored"
+    );
+    assert_eq!(harness.dependency_row_count(), 0);
+}
+
+#[test]
+fn work_abandoned_by_a_cancelled_meta_task_is_refused_as_a_dependency() {
+    let harness = Harness::new();
+    let cancelled_meta_task = harness.second_meta_task();
+    harness
+        .create(
+            &cancelled_meta_task,
+            Some("cancelled-work"),
+            "abandoned by the cancel",
+            &[],
+        )
+        .expect("create work in the meta task that is cancelled next");
+    harness
+        .covey
+        .cancel_meta_task(
+            CancelMetaTaskReq::try_from_raw_parts(
+                harness.orchestrator.clone(),
+                cancelled_meta_task,
+                id_key("cancel-meta"),
+            )
+            .expect("valid cancel-meta-task request"),
+        )
+        .expect("cancel the meta task");
+
+    let error = harness.create_fails("dependent", "waits on cancelled work", &["cancelled-work"]);
+
+    assert!(
+        matches!(
+            error,
+            CoveyError::SubtaskDependencyUnsatisfiable {
+                state: SubtaskState::Abandoned,
+                ..
+            }
+        ),
+        "work abandoned by a cancel can never satisfy a dependency: {error}"
+    );
+}
+
+#[test]
+fn retire_abandons_available_work_and_records_one_event() {
+    let harness = Harness::new();
+    harness.created("retired", "no longer needed", &[]);
+    harness.created("kept", "still pending", &[]);
+
+    harness.retire("retired").expect("retire available work");
+
+    assert_eq!(harness.state_of("retired"), SubtaskState::Abandoned);
+    assert_eq!(harness.candidates(), vec!["kept"]);
+    let retired_events: Vec<_> = harness
+        .covey
+        .fetch_events(0, 1_000)
+        .expect("fetch events")
+        .into_iter()
+        .filter(|event| event.event_type() == EventType::SubtaskRetired)
+        .collect();
+    assert_eq!(retired_events.len(), 1);
+    assert_eq!(retired_events[0].object_id(), "retired");
+    let _typed = retired_events[0]
+        .typed()
+        .expect("the retire event replays as typed");
+}
+
+#[test]
+fn retire_refuses_held_work_and_sessions_that_do_not_plan() {
+    let harness = Harness::new();
+    harness.created("held", "someone works on it", &[]);
+    let worker = register(&harness.covey, "worker", SessionRole::Executor);
+
+    let by_executor = harness.covey.retire_subtask(
+        RetireSubtaskReq::try_from_raw_parts(worker.clone(), "held", id_key("retire-subtask"))
+            .expect("valid retire-subtask request"),
+    );
+    assert!(
+        matches!(by_executor, Err(CoveyError::WrongRole { .. })),
+        "unexpected result: {by_executor:?}"
+    );
+
+    let _claim = harness
+        .covey
+        .claim_subtask(
+            covey::ClaimSubtaskReq::try_from_raw_parts(
+                worker,
+                "held".to_owned(),
+                LEASE_MS,
+                id_key("claim-subtask"),
+            )
+            .expect("valid claim request"),
+        )
+        .expect("claim the work");
+    let held = harness.retire("held");
+    assert!(
+        matches!(held, Err(CoveyError::IllegalTransition { .. })),
+        "unexpected result: {held:?}"
+    );
+    assert_eq!(harness.state_of("held"), SubtaskState::Claimed);
 }
 
 #[test]

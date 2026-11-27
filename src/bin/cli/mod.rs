@@ -153,7 +153,8 @@ impl Commands {
                 | SubtaskCommand::Finish(_)
                 | SubtaskCommand::Retry(_)
                 | SubtaskCommand::Fail(_)
-                | SubtaskCommand::Abandon(_) => false,
+                | SubtaskCommand::Abandon(_)
+                | SubtaskCommand::Retire(_) => false,
             },
             Self::Claim { command } => match command {
                 ClaimCommand::Expiring(_) => true,

@@ -44,6 +44,7 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::SubtaskRetried => "subtask_retried",
         EventType::SubtaskFailed => "subtask_failed",
         EventType::SubtaskAbandoned => "subtask_abandoned",
+        EventType::SubtaskRetired => "subtask_retired",
         EventType::ClaimReleased => "claim_released",
         EventType::ClaimRenewed => "claim_renewed",
         EventType::ArtifactPublished => "artifact_published",

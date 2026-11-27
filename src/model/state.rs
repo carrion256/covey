@@ -204,6 +204,7 @@ pub enum EventType {
     SubtaskRetried,
     SubtaskFailed,
     SubtaskAbandoned,
+    SubtaskRetired,
     ClaimReleased,
     ClaimRenewed,
     ArtifactPublished,

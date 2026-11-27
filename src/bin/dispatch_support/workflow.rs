@@ -176,6 +176,20 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 format!("subtask abandoned claim={}", args.claim_id),
             ))
         }
+        SubtaskCommand::Retire(args) => {
+            store.retire_subtask(RetireSubtaskReq::try_from_raw_parts(
+                args.session_token,
+                args.subtask_id.clone(),
+                args.idempotency_key
+                    .unwrap_or_else(|| new_idempotency_key("retire-subtask")),
+            )?)?;
+            Ok(Rendered::summary(
+                SubtaskRef {
+                    subtask_id: args.subtask_id.clone(),
+                },
+                format!("subtask retired {}", args.subtask_id),
+            ))
+        }
         SubtaskCommand::Status(args) => {
             let status = store.subtask_status(&args.subtask_id)?;
             Ok(Rendered::pretty(&status))

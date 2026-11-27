@@ -13,6 +13,7 @@ use crate::{
         RoutingKey, SessionRole, SubtaskId, SubtaskKind, SubtaskState, completion_policy_name,
         subtask_kind_name, subtask_state_name,
     },
+    queries::load_subtask_tx,
     store::{append_session_event, refresh_meta_task_state},
     validators::{
         MAX_OBJECT_ID_LEN, MAX_TITLE_LEN, ensure_length, ensure_meta_task_exists,
@@ -101,7 +102,8 @@ pub(crate) fn create_work_subtask_tx(
 /// possible at create time and no cycle machinery is needed: the existing
 /// claim-time satisfaction gate in `store::subtask_dependencies_satisfied` is
 /// the only place ordering is enforced. Dependencies may live on any meta-task
-/// and be in any state; the existing satisfaction rules decide claimability.
+/// and be in any state that can still satisfy the gate; one that never can is
+/// refused, because the new subtask would wait on it for ever.
 fn insert_subtask_dependencies_tx(
     tx: &Transaction<'_>,
     subtask_id: &SubtaskId,
@@ -114,6 +116,12 @@ fn insert_subtask_dependencies_tx(
             return Err(CoveyError::SubtaskDependencyNotFound {
                 subtask_id: subtask_id.clone(),
                 depends_on_subtask_id: dependency.clone(),
+            });
+        }
+        if let Some(state) = dead_dependency_state(tx, dependency.as_str())? {
+            return Err(CoveyError::SubtaskDependencyUnsatisfiable {
+                depends_on_subtask_id: dependency.clone(),
+                state,
             });
         }
         tx.execute(
@@ -131,6 +139,23 @@ fn insert_subtask_dependencies_tx(
         )?;
     }
     Ok(())
+}
+
+/// The state of a dependency that can never satisfy the claim gate, when it is
+/// one: a `failed` or `abandoned` subtask with no review follow-up that could
+/// stand in for it. Cancelling a meta task abandons its open subtasks, so this
+/// also covers work whose meta task was cancelled.
+fn dead_dependency_state(tx: &Transaction<'_>, subtask_id: &str) -> Result<Option<SubtaskState>> {
+    let state = load_subtask_tx(tx, subtask_id)?.state();
+    if !matches!(state, SubtaskState::Failed | SubtaskState::Abandoned) {
+        return Ok(None);
+    }
+    let has_followup: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM review_followup_subtasks WHERE source_subtask_id = ?1)",
+        params![subtask_id],
+        |row| row.get(0),
+    )?;
+    Ok((!has_followup).then_some(state))
 }
 
 #[allow(clippy::too_many_arguments)]

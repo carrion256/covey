@@ -145,8 +145,8 @@ impl From<CoveyError> for ReportableError {
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact,
-            SubtaskAlreadyClaimed, SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError,
-            UnknownArtifactDigest, WrongRole,
+            SubtaskAlreadyClaimed, SubtaskDependencyNotFound, SubtaskDependencyUnsatisfiable,
+            SubtaskNotFound, TypeValidationError, UnknownArtifactDigest, WrongRole,
         };
 
         use CoveyError::{
@@ -223,6 +223,7 @@ impl From<CoveyError> for ReportableError {
             | MetaTaskUnavailable { .. }
             | ArtifactDigestCollision { .. }
             | DuplicateSubtaskId { .. }
+            | SubtaskDependencyUnsatisfiable { .. }
             | CompletionPolicyViolation { .. }
             | IdempotencyConflict { .. }
             | ImportDuplicate { .. }

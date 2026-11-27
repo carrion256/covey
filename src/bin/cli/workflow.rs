@@ -12,6 +12,8 @@ pub(crate) enum SubtaskCommand {
     Retry(RetrySubtaskArgs),
     Fail(FailSubtaskArgs),
     Abandon(AbandonSubtaskArgs),
+    /// Move an available subtask that nobody holds to abandoned.
+    Retire(RetireSubtaskArgs),
     Status(SubtaskStatusArgs),
     Candidates(SubtaskCandidatesArgs),
     Availability(SubtaskAvailabilityArgs),
@@ -167,6 +169,16 @@ pub(crate) struct AbandonSubtaskArgs {
     pub(crate) claim_id: String,
     #[arg(long)]
     pub(crate) fence_seq: i64,
+    #[arg(long)]
+    pub(crate) idempotency_key: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RetireSubtaskArgs {
+    #[arg(long)]
+    pub(crate) session_token: String,
+    #[arg(long)]
+    pub(crate) subtask_id: String,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }
