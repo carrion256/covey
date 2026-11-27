@@ -19,7 +19,6 @@ use crate::{
         enqueue_approved_subtask_for_apply_tx, record_direct_applied_openspec_archive_blocker_tx,
     },
     queries::{load_artifact_tx, load_claim_tx, load_review_tx, load_session_tx, load_subtask_tx},
-    schema::advance_lease_clock,
     store::{append_session_event, refresh_meta_task_state},
     validators::{
         MAX_BASE_REV_LEN, MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, MAX_PATH_LEN,
@@ -83,7 +82,6 @@ impl Covey {
     pub fn publish_artifact(&self, req: PublishArtifactReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 &req.session_token,
@@ -106,7 +104,6 @@ impl Covey {
                         &req.session_token,
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let session = require_active_session(tx, &req.session_token)?;
                     let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
@@ -399,7 +396,6 @@ impl Covey {
     pub fn decide_review(&self, req: DecideReviewReq) -> Result<ReviewDecisionResult> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 &req.session_token,
@@ -421,7 +417,6 @@ impl Covey {
                         &req.session_token,
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let review = load_review_tx(tx, &req.review_id)?;
                     let review_subtask_id = review.review_subtask_id();
@@ -664,7 +659,6 @@ impl Covey {
     ) -> Result<ReviewDecisionResult> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 &req.session_token,
@@ -696,7 +690,6 @@ impl Covey {
                         &req.session_token,
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let review = load_review_tx(tx, &req.review_id)?;
                     let review_subtask_id = review.review_subtask_id();

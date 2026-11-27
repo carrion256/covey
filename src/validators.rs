@@ -324,12 +324,19 @@ pub(crate) fn issue_fence_seq(tx: &Transaction<'_>, subtask_id: &str) -> Result<
     .map_err(Into::into)
 }
 
+/// Loads the claim a fenced call presents and checks that the caller still
+/// owns it: the claim is `held`, by this session, under this fence.
+///
+/// A lapsed lease does not invalidate a held claim. The lease only decides
+/// when the claim may be taken away (`expire_old_claims`, stale-session
+/// reaping, the lazy expiry inside a claim). Until one of those has expired
+/// it, the owner keeps every claim-fenced call; afterwards the owner gets
+/// [`CoveyError::ClaimNotHeld`].
 pub(crate) fn require_current_claim(
     tx: &Transaction<'_>,
     session_token: &str,
     claim_id: &str,
     fence_seq: FenceSeq,
-    now: i64,
 ) -> Result<Claim> {
     let session = require_active_session(tx, session_token)?;
     let claim = load_claim_tx(tx, claim_id)?;
@@ -350,11 +357,6 @@ pub(crate) fn require_current_claim(
         return Err(CoveyError::ClaimNotHeld {
             claim_id: claim.claim_id,
             state,
-        });
-    }
-    if claim.lease_deadline <= now {
-        return Err(CoveyError::LeaseExpired {
-            object_id: claim_id.to_owned(),
         });
     }
     Ok(claim)

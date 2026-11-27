@@ -867,7 +867,7 @@ fn direct_policy_cannot_publish_request_review_or_enter_apply_queue() {
 }
 
 #[test]
-fn direct_finish_rejects_wrong_owner_and_expired_lease_without_receipt() {
+fn direct_finish_rejects_wrong_owner_without_receipt_and_accepts_a_lapsed_held_claim() {
     let rig = Rig::new();
     let work = start_work(&rig, CompletionPolicy::Direct, 10);
     let other = register(&rig.covey, "other-worker", SessionRole::Executor);
@@ -885,21 +885,60 @@ fn direct_finish_rejects_wrong_owner_and_expired_lease_without_receipt() {
     );
     assert!(matches!(wrong_owner, Err(CoveyError::NotClaimOwner { .. })));
 
-    rig.tick(10);
-    let expired = rig
+    let status = rig
         .covey
-        .finish_subtask(finish_request(&work, "late result", "finish-expired"));
-    assert!(matches!(expired, Err(CoveyError::LeaseExpired { .. })));
+        .subtask_status(&work.subtask_id)
+        .expect("status after the rejected finish");
+    assert_eq!(status.subtask().state(), SubtaskState::InProgress);
+    assert!(status.attempt_outcomes().is_empty());
+    let connection = rig.read_connection();
+    assert_eq!(table_count(&connection, "subtask_attempt_outcomes"), 0);
+    assert_eq!(outcome_idempotency_count(&connection), 0);
+    assert_eq!(
+        outcome_event_count(&rig.covey, EventType::SubtaskFinished),
+        0
+    );
+
+    // The lease lapses, but nothing expired the claim: the owner still holds
+    // it and the late result is recorded.
+    rig.tick(10);
+    let outcome = rig
+        .covey
+        .finish_subtask(finish_request(&work, "late result", "finish-late"))
+        .expect("a held claim outlives its lapsed lease");
+    assert_eq!(outcome.claim_id, work.claim.claim_id);
 
     let status = rig
         .covey
         .subtask_status(&work.subtask_id)
-        .expect("status after rejected finishes");
-    assert_eq!(status.subtask().state(), SubtaskState::InProgress);
-    assert_eq!(
-        status.claim().map(|claim| &claim.claim_id),
-        Some(&work.claim.claim_id)
-    );
+        .expect("status after the late finish");
+    assert_eq!(status.subtask().state(), SubtaskState::Completed);
+    assert_eq!(status.attempt_outcomes().len(), 1);
+}
+
+#[test]
+fn direct_finish_is_refused_once_the_lapsed_claim_was_expired() {
+    let rig = Rig::new();
+    let work = start_work(&rig, CompletionPolicy::Direct, 10);
+
+    rig.tick(10);
+    let expired = rig.covey.expire_old_claims().expect("expire lapsed claims");
+    assert_eq!(expired.expired_count, 1);
+
+    let refused = rig
+        .covey
+        .finish_subtask(finish_request(&work, "late result", "finish-expired"));
+    assert!(matches!(
+        refused,
+        Err(CoveyError::ClaimNotHeld { claim_id, .. }) if claim_id == work.claim.claim_id
+    ));
+
+    let status = rig
+        .covey
+        .subtask_status(&work.subtask_id)
+        .expect("status after the refused finish");
+    assert_eq!(status.subtask().state(), SubtaskState::Available);
+    assert!(status.claim().is_none());
     assert!(status.attempt_outcomes().is_empty());
     let connection = rig.read_connection();
     assert_eq!(table_count(&connection, "subtask_attempt_outcomes"), 0);

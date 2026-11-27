@@ -83,8 +83,12 @@ Covey exists to make invalid states hard or impossible.
 - Completion policy, evidence policy, and routing key are immutable task facts
 - Candidate reads and `claim-next` match one exact routing key; without
   configuration, that route is `default`
-- Direct attempt outcomes require the current held claim, live lease, and exact
-  fence, and close that claim in the same transaction
+- Direct attempt outcomes require the current held claim and exact fence, and
+  close that claim in the same transaction
+- A held claim stays valid for its owner after its lease lapses. The lease
+  decides only when the claim may be taken away: once `maint expire-claims`,
+  stale-session reaping, or the next claim on that subtask has expired it, the
+  old owner's calls answer `claim_not_held`
 - `direct` work cannot publish artifacts, request review, or enter the apply
   queue; `reviewed` work cannot enter the apply queue; only
   `canonical_apply` work can reach `applied`
@@ -271,7 +275,10 @@ Covey relies on single-writer transactional serialization in the local deploymen
 - Write contention must be handled with bounded retry or blocking semantics
 - Sessions heartbeat every 10s
 - Sessions older than the stale threshold are marked `stale`
-- Claims, reservations, and apply claims are rejected on command paths once their leases expire; maintenance only cleans persisted rows lazily
+- Reservations and apply claims are rejected on command paths once their
+  leases expire. A subtask claim is not: a lapsed lease only makes it
+  expirable, and its owner keeps it until maintenance or another claim on the
+  subtask expires it. Maintenance cleans persisted rows lazily
 
 This keeps safety in the substrate and policy in the orchestrator. Covey does
 not poll a route, launch a process, renew a worker session on its behalf, or

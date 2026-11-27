@@ -16,7 +16,6 @@ use crate::{
     },
     overlap::resolve_reservation_overlap_conflicts,
     queries::load_subtask_tx,
-    schema::advance_lease_clock,
     store::{append_session_event, refresh_meta_task_state},
     validators::{
         clear_session_active_subtask, close_claim_and_detach, ensure_meta_task_is_schedulable,
@@ -107,7 +106,6 @@ impl Covey {
     ) -> Result<AttemptOutcome> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 session_token.as_str(),
@@ -115,7 +113,7 @@ impl Covey {
                 idempotency_key.as_str(),
                 req,
                 TimestampMs::parse(now)?,
-                || record_direct_outcome_tx(tx, event_type, &input, lease_now, now),
+                || record_direct_outcome_tx(tx, event_type, &input, now),
             )
         });
         self.log_operation(
@@ -138,7 +136,6 @@ fn record_direct_outcome_tx(
     tx: &Transaction<'_>,
     event_type: EventType,
     input: &OutcomeInput<'_>,
-    lease_now: i64,
     now: i64,
 ) -> Result<AttemptOutcome> {
     let claim = require_current_claim(
@@ -146,7 +143,6 @@ fn record_direct_outcome_tx(
         input.session_token.as_str(),
         input.claim_id.as_str(),
         input.fence_seq,
-        lease_now,
     )?;
     let session = require_active_session(tx, input.session_token.as_str())?;
     let subtask = load_subtask_tx(tx, claim.subtask_id.as_str())?;

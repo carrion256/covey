@@ -245,7 +245,6 @@ impl Covey {
     pub fn start_subtask(&self, req: StartSubtaskReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
@@ -260,7 +259,6 @@ impl Covey {
                         req.session_token.as_str(),
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let session = require_active_session(tx, req.session_token.as_str())?;
                     let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
@@ -344,7 +342,6 @@ impl Covey {
     pub fn abandon_subtask(&self, req: AbandonSubtaskReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
@@ -359,7 +356,6 @@ impl Covey {
                         req.session_token.as_str(),
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let session = require_active_session(tx, req.session_token.as_str())?;
                     let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
@@ -422,7 +418,6 @@ impl Covey {
     pub fn release_claim(&self, req: crate::model::ReleaseClaimReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            let lease_now = advance_lease_clock(tx, now)?;
             crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
@@ -437,7 +432,6 @@ impl Covey {
                         req.session_token.as_str(),
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let session = require_active_session(tx, req.session_token.as_str())?;
                     let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
@@ -516,7 +510,6 @@ impl Covey {
                         req.session_token.as_str(),
                         &req.claim_id,
                         req.fence_seq,
-                        lease_now,
                     )?;
                     let renewed_deadline = claim.lease_deadline.get().max(lease_now) + req.extend_by_ms.get();
                     let updated = tx.execute(

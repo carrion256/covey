@@ -1039,7 +1039,6 @@ fn stale_fence_tokens_are_rejected_after_reclaim() {
         stale,
         Err(CoveyError::ClaimNotFound)
             | Err(CoveyError::StaleFenceToken { .. })
-            | Err(CoveyError::LeaseExpired { .. })
             | Err(CoveyError::ClaimNotHeld { .. })
     ));
     assert!(second.fence_seq > 0);
@@ -5238,9 +5237,10 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
             if session_token == other && claim_owner == worker
     ));
 
+    // A lapsed lease does not cost the owner a claim that nothing took away.
     rig.tick(10);
-    assert!(matches!(
-        covey.start_subtask(
+    covey
+        .start_subtask(
             StartSubtaskReq::try_from_raw_parts(
                 worker.clone(),
                 claim.claim_id.clone(),
@@ -5248,8 +5248,29 @@ fn error_variants_are_reachable_for_authz_missing_objects_and_conflicts() {
                 id_key("start-subtask"),
             )
             .expect("valid start-subtask request"),
+        )
+        .expect("the owner starts work on a held claim whose lease lapsed");
+
+    // Expiry takes the claim away; after that the old owner's fence is refused.
+    rig.tick(10);
+    assert_eq!(
+        covey
+            .expire_old_claims()
+            .expect("expire lapsed claims")
+            .expired_count,
+        1
+    );
+    assert!(matches!(
+        covey.release_claim(
+            ReleaseClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                id_key("release-claim"),
+            )
+            .expect("valid release-claim request"),
         ),
-        Err(CoveyError::LeaseExpired { object_id }) if object_id == claim.claim_id
+        Err(CoveyError::ClaimNotHeld { claim_id, .. }) if claim_id == claim.claim_id
     ));
 
     assert!(matches!(

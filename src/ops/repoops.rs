@@ -34,7 +34,7 @@ impl Covey {
         let now = self.clock.wall_now_ms();
         let result = self.with_read_tx(|tx| {
             let claim =
-                require_current_claim(tx, &req.session_token, &req.claim_id, req.fence_seq, now)?;
+                require_current_claim(tx, &req.session_token, &req.claim_id, req.fence_seq)?;
             let subtask = load_subtask_tx(tx, &claim.subtask_id)?;
             let session = crate::queries::load_session_tx(tx, &req.session_token)?;
             let paths = normalize_requested_paths(req.paths());

@@ -1527,7 +1527,6 @@ impl Covey {
                         &req.session_token,
                         &req.cleanup_claim_id,
                         req.fence_seq,
-                        now,
                     )?;
                     let open_blockers = load_open_openspec_archive_blockers_for_change_tx(
                         tx,
