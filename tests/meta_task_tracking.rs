@@ -927,7 +927,7 @@ fn handle_resolves_the_meta_task_and_unknown_handles_are_refused() {
         MetaTaskHandle::parse(handle.to_string()).expect("handle text round-trips")
     );
 
-    let unknown = MetaTaskHandle::parse("9999".to_owned()).expect("valid handle");
+    let unknown = MetaTaskHandle::parse("9999").expect("valid handle");
     let error = rig
         .covey
         .meta_task_id_for_handle(unknown)
