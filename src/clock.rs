@@ -4,10 +4,11 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Time source used by Covey for wall-clock timestamps.
+/// Time source Covey reads the wall clock from.
 ///
-/// Lease ordering is maintained separately inside SQLite via a monotonic
-/// logical clock, so wall-clock skew cannot resurrect expired leases.
+/// Mutations do not write this value directly: each write transaction ratchets
+/// it through a monotonic logical clock inside SQLite, so neither lease
+/// ordering nor a written timestamp follows the wall clock backwards.
 pub trait Clock: Send + Sync {
     /// Returns the current wall-clock time in Unix milliseconds.
     fn wall_now_ms(&self) -> i64;

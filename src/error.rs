@@ -36,6 +36,10 @@ pub enum CoveyError {
     StoreReadOnly,
     #[error("covey store schema version {found} is behind; version {expected} is pending")]
     StoreMigrationRequired { found: usize, expected: usize },
+    /// Another writer held the store for the whole wait. Nothing was written,
+    /// so the same call is safe to retry.
+    #[error("covey store is busy: another writer holds it")]
+    StoreBusy,
 
     #[error("illegal transition on {object}: {from} -> {to}")]
     IllegalTransition {
@@ -228,13 +232,26 @@ pub enum CoveyError {
     },
 
     #[error(transparent)]
-    DatabaseError(#[from] rusqlite::Error),
+    DatabaseError(rusqlite::Error),
     #[error(transparent)]
     MigrationError(#[from] rusqlite_migration::Error),
     #[error(transparent)]
     SerializationError(#[from] serde_json::Error),
     #[error(transparent)]
     TypeValidationError(#[from] CoveyTypeValidationError),
+}
+
+impl From<rusqlite::Error> for CoveyError {
+    /// SQLite reports lock contention as `SQLITE_BUSY` or `SQLITE_LOCKED`.
+    /// Both mean "retry later", so they become [`CoveyError::StoreBusy`].
+    fn from(error: rusqlite::Error) -> Self {
+        match error.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                Self::StoreBusy
+            }
+            _ => Self::DatabaseError(error),
+        }
+    }
 }
 
 impl PartialEq for CoveyError {
@@ -255,7 +272,7 @@ impl PartialEq for CoveyError {
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
-            SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact,
+            SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact, StoreBusy,
             StoreMigrationRequired, StoreNotFound, StoreReadOnly, SubtaskAlreadyClaimed,
             SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
             WrongRole,
@@ -273,7 +290,8 @@ impl PartialEq for CoveyError {
             | (ConflictNotFound, ConflictNotFound)
             | (FenceTokenMismatch, FenceTokenMismatch)
             | (ReviewKindMismatch, ReviewKindMismatch)
-            | (StoreReadOnly, StoreReadOnly) => true,
+            | (StoreReadOnly, StoreReadOnly)
+            | (StoreBusy, StoreBusy) => true,
             (
                 IllegalTransition {
                     from: left_from,

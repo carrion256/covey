@@ -837,6 +837,39 @@ fn session_lifecycle_and_stale_reap_follow_spec() {
 }
 
 #[test]
+fn store_time_does_not_follow_a_backward_wall_clock_step() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let session = register(
+        &covey,
+        "sess_clock",
+        "principal_clock",
+        SessionRole::Executor,
+    );
+    let created_at = covey
+        .session_status(&session)
+        .expect("status after registration")
+        .session()
+        .created_at()
+        .get();
+
+    // The wall clock steps back to a time before the session existed.
+    rig.clock.set(created_at - 60_000);
+    send_heartbeat(&covey, &session).expect("heartbeat after the clock stepped back");
+
+    let status = covey
+        .session_status(&session)
+        .expect("the session row must still decode");
+    assert!(status.session().last_heartbeat_at().get() >= created_at);
+    assert!(status.session().updated_at().get() >= created_at);
+    let active = covey
+        .active_session_for_principal("principal_clock", SessionRole::Executor)
+        .expect("active session lookup")
+        .expect("the session is still active");
+    assert_eq!(active.session_token(), session);
+}
+
+#[test]
 fn idempotent_mutations_replay_and_reject_payload_drift() {
     let rig = Rig::new();
     let covey = rig.covey();

@@ -23,17 +23,27 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   direct completion on `default` with optional evidence.
 - `src/clock.rs`
   The injectable wall clock: a production clock and a manually advanced one for
-  tests. Lease ordering does not depend on it — ordering is a monotonic logical
-  clock inside SQLite — so wall-clock skew cannot resurrect an expired lease.
+  tests. Store time does not follow it backwards: every write transaction
+  ratchets the wall clock through a monotonic logical clock inside SQLite and
+  uses the result for lease ordering and for the timestamps it writes, so
+  wall-clock skew cannot resurrect an expired lease or put `updated_at` before
+  `created_at`. Read paths use the wall clock for ages.
 - `src/model/`
   Typed domain records, request DTOs, status payloads, event payloads, and
   persisted-state enums, split by concern behind the re-export root
   `src/model.rs`: `records.rs`, `requests.rs`, `views.rs`, `state.rs`,
   `types.rs`, `events.rs`, `imports.rs`, and `helpers.rs`.
 - `src/error.rs`
-  Typed domain errors for invalid transitions, ownership violations, lease failures, and storage issues.
+  Typed domain errors for invalid transitions, ownership violations, lease
+  failures, and storage issues. SQLite lock contention surfaces as the
+  retryable `StoreBusy`; each variant's snake_case name is the stable refusal
+  reason the CLI reports.
 - `src/schema.rs`
-  Forward-only migrations, SQLite pragmas, and event-log append helpers.
+  Forward-only migrations, SQLite pragmas, and event-log append helpers. A
+  store already at the expected version opens without running the migration
+  runner. Otherwise the runner works under an exclusive lock on
+  `<db path>.migrate.lock`, and the final migration checks foreign keys inside
+  the migration transaction.
 - `src/queries.rs`
   Read-side row loading and deserialization helpers.
 - `src/validators.rs`
@@ -46,7 +56,9 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   the typed error reported instead of a partial verdict.
 - `src/store.rs`
   Connection ownership, transaction helpers, idempotency persistence, and shared
-  mutation utilities. It also owns the read-only open, which creates nothing,
+  mutation utilities. The write-transaction helper retries the write lock a
+  bounded number of times and hands every mutation the store time described
+  under `src/clock.rs`. It also owns the read-only open, which creates nothing,
   migrates nothing, and refuses every write, and the pragmas applied to read
   connections. This file should not grow back into the full API surface.
 

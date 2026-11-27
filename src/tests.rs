@@ -23,7 +23,7 @@ impl Covey {
     pub fn open_in_memory_with_clock(clock: Arc<dyn Clock>) -> Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         apply_pragmas(&conn)?;
-        apply_migrations(&mut conn)?;
+        apply_migrations(&mut conn, std::path::Path::new(":memory:"))?;
         Ok(Self {
             db_path: None,
             conn: Mutex::new(conn),

@@ -27,7 +27,8 @@ use crate::{
         load_queue_item_tx, load_subtask_tx,
     },
     schema::{
-        EventActor, SYSTEM_EVENT_SESSION_TOKEN, append_event, apply_migrations, apply_pragmas,
+        EventActor, SYSTEM_EVENT_SESSION_TOKEN, advance_lease_clock, append_event,
+        apply_migrations, apply_pragmas, schema_version,
     },
     validators::{
         close_claim_and_detach, ensure_meta_task_is_schedulable, ensure_ready_queue_transition,
@@ -45,6 +46,11 @@ pub struct Covey {
 }
 
 static_assertions::assert_impl_all!(Covey: Send, Sync);
+
+/// Attempts at taking the write lock before a mutation reports
+/// [`CoveyError::StoreBusy`]. Each attempt already waits the connection's
+/// `busy_timeout`.
+const WRITE_LOCK_ATTEMPTS: usize = 3;
 
 pub(crate) const LIST_CONFLICTS_LIMIT: usize = 1_000;
 
@@ -82,7 +88,7 @@ impl Covey {
         let db_path = path.as_ref().to_path_buf();
         let mut conn = Connection::open(&db_path)?;
         apply_pragmas(&conn)?;
-        apply_migrations(&mut conn)?;
+        apply_migrations(&mut conn, &db_path)?;
         Ok(Self {
             db_path: Some(db_path),
             conn: Mutex::new(conn),
@@ -124,7 +130,7 @@ impl Covey {
         }
         let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         apply_read_pragmas(&conn)?;
-        let found = read_schema_version(&conn)?;
+        let found = schema_version(&conn)?;
         let expected = crate::schema::expected_schema_version();
         if found != expected {
             return Err(CoveyError::StoreMigrationRequired { found, expected });
@@ -144,6 +150,15 @@ impl Covey {
         &self.workflow
     }
 
+    /// Runs one mutation in an immediate transaction and commits it.
+    ///
+    /// `now` is the store's own time: the wall clock ratcheted through the
+    /// lease clock inside the transaction. It never runs backwards from one
+    /// mutation to the next, whatever the wall clock does, so every timestamp
+    /// a mutation writes comes from one non-decreasing source.
+    ///
+    /// Taking the write lock is retried, because nothing has run before
+    /// `BEGIN`. A store that stays locked is [`CoveyError::StoreBusy`].
     pub(crate) fn with_write_tx<T, F>(&self, f: F) -> Result<T>
     where
         F: FnMut(&Transaction<'_>, i64) -> Result<T>,
@@ -157,8 +172,18 @@ impl Covey {
             .conn
             .lock()
             .expect("covey writer connection mutex poisoned");
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let now = self.clock.wall_now_ms();
+        let mut attempts = 0;
+        let tx = loop {
+            attempts += 1;
+            match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(tx) => break tx,
+                Err(error) => match CoveyError::from(error) {
+                    CoveyError::StoreBusy if attempts < WRITE_LOCK_ATTEMPTS => {}
+                    error => return Err(error),
+                },
+            }
+        };
+        let now = advance_lease_clock(&tx, self.clock.wall_now_ms())?;
         let result = f(&tx, now)?;
         tx.commit()?;
         Ok(result)
@@ -248,11 +273,6 @@ fn apply_read_pragmas(conn: &Connection) -> Result<()> {
         "#,
     )?;
     Ok(())
-}
-
-fn read_schema_version(conn: &Connection) -> Result<usize> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    Ok(usize::try_from(version).unwrap_or(0))
 }
 
 pub(crate) fn with_idempotent_mutation<T, Req, F>(
@@ -1005,7 +1025,14 @@ pub(crate) fn reset_in_progress_review_for_expired_claim(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+    };
 
     use rusqlite_migration::{M, Migrations};
     use tempfile::TempDir;
@@ -1089,6 +1116,119 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn two_openers_racing_on_an_earlier_store_both_succeed() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("earlier.db");
+        let (_applied, expected) = earlier_store(&path);
+
+        // Both openers leave the barrier together. Every wait after that is
+        // bounded by the store itself: 15 s for the migration lock and the 5 s
+        // busy timeout per statement. An opener that reaches a bound fails by
+        // name below instead of hanging.
+        let barrier = Arc::new(Barrier::new(2));
+        let openers = [1, 2].map(|opener| {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                Covey::open(&path)
+                    .map(|_store| ())
+                    .map_err(|error| format!("opener {opener} failed: {error:?}"))
+            })
+        });
+        for opener in openers {
+            opener
+                .join()
+                .expect("an opener thread panicked")
+                .expect("both racing openers must open the store");
+        }
+
+        let conn = Connection::open(&path).expect("reopen the store");
+        assert_eq!(
+            schema_version(&conn).expect("read the schema version"),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_foreign_key_violation_rolls_the_migration_back() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("earlier.db");
+        let (applied, _expected) = earlier_store(&path);
+        {
+            let conn = Connection::open(&path).expect("open the earlier store");
+            conn.pragma_update(None, "foreign_keys", "OFF")
+                .expect("stop enforcing foreign keys for the planted row");
+            conn.execute(
+                r#"
+                INSERT INTO meta_task_dedupe_keys (
+                    agent_principal_id, dedupe_key, meta_task_id, created_at
+                ) VALUES ('principal', 'key', 'no-such-meta-task', 1)
+                "#,
+                [],
+            )
+            .expect("plant a dangling reference");
+        }
+
+        let error = Covey::open(&path)
+            .err()
+            .expect("a dangling reference must stop the migration");
+        assert!(
+            matches!(error, CoveyError::MigrationError(_)),
+            "unexpected error: {error:?}"
+        );
+
+        let conn = Connection::open(&path).expect("reopen the store");
+        assert_eq!(
+            schema_version(&conn).expect("read the schema version"),
+            applied,
+            "the refused migration must leave the store at its earlier version"
+        );
+    }
+
+    static REFUSED_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Busy handler that never waits and counts how often SQLite asked.
+    fn refuse_to_wait(_retries_so_far: i32) -> bool {
+        REFUSED_WAITS.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+
+    #[test]
+    fn a_store_that_stays_locked_is_store_busy_after_every_attempt() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("covey.db");
+        let covey = Covey::open(&path).expect("create the store");
+        // SQLite asks the busy handler once per refused `BEGIN IMMEDIATE`, so
+        // the handler counts the attempts without sitting through a timeout.
+        covey
+            .conn
+            .lock()
+            .expect("writer connection")
+            .busy_handler(Some(refuse_to_wait))
+            .expect("install the busy handler");
+
+        let blocker = Connection::open(&path).expect("open the blocking connection");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold the write lock");
+
+        let refused = covey.with_write_tx(|_tx, _now| Ok(()));
+        assert!(
+            matches!(refused, Err(CoveyError::StoreBusy)),
+            "unexpected result: {refused:?}"
+        );
+        assert_eq!(REFUSED_WAITS.load(Ordering::SeqCst), WRITE_LOCK_ATTEMPTS);
+
+        blocker
+            .execute_batch("COMMIT")
+            .expect("release the write lock");
+        covey
+            .with_write_tx(|_tx, _now| Ok(()))
+            .expect("the freed store takes the write");
     }
 
     #[test]

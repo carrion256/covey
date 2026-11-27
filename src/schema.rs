@@ -1,4 +1,11 @@
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::{
+    fs::{File, OpenOptions, TryLockError},
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
+
+use rusqlite::{Connection, Transaction, params};
 use rusqlite_migration::{M, Migrations};
 use serde::Serialize;
 
@@ -81,13 +88,16 @@ impl<'a> From<&'a str> for EventActor<'a> {
     }
 }
 
+/// `busy_timeout` comes first so that every later statement, including the
+/// switch to WAL on a store another process is opening, waits for a lock
+/// instead of failing at once.
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        PRAGMA busy_timeout = 5000;
         PRAGMA foreign_keys = ON;
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = FULL;
-        PRAGMA busy_timeout = 5000;
         PRAGMA wal_autocheckpoint = 1000;
         PRAGMA mmap_size = 268435456;
         "#,
@@ -103,11 +113,88 @@ pub(crate) fn expected_schema_version() -> usize {
     generated_migrations::MIGRATIONS.len()
 }
 
-pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
+/// The schema version the store records: SQLite's `user_version`.
+pub(crate) fn schema_version(conn: &Connection) -> Result<usize> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    Ok(usize::try_from(version).unwrap_or(0))
+}
+
+/// How long an opener waits for another process to finish migrating.
+const MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(15);
+const MIGRATION_LOCK_POLL: Duration = Duration::from_millis(50);
+
+/// Brings the store to this binary's schema version.
+///
+/// A store already at that version costs one `user_version` read. Otherwise
+/// the migrations run under an exclusive lock on the sidecar file
+/// `<db path>.migrate.lock`. The runner reads the version again under the
+/// lock, so an opener that waited for another process's migration finds
+/// nothing left to apply instead of applying it a second time.
+pub(crate) fn apply_migrations(conn: &mut Connection, db_path: &Path) -> Result<()> {
+    if schema_version(conn)? == expected_schema_version() {
+        return Ok(());
+    }
+    let _lock = lock_for_migration(db_path, MIGRATION_LOCK_WAIT)?;
+    run_migrations(conn)
+}
+
+/// Takes the lock that serialises migration across processes. It is held for
+/// as long as the returned handle lives, and the operating system releases it
+/// with the handle, so a migrator that crashed cannot leave it held. An
+/// in-memory store is private to its connection and takes no lock.
+///
+/// Waiting longer than `wait` for another holder is [`CoveyError::StoreBusy`].
+fn lock_for_migration(db_path: &Path, wait: Duration) -> Result<Option<File>> {
+    if db_path == Path::new(":memory:") {
+        return Ok(None);
+    }
+    let mut lock_path = db_path.as_os_str().to_owned();
+    lock_path.push(".migrate.lock");
+    let lock_error = |error: std::io::Error| {
+        CoveyError::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(format!(
+                "cannot lock {} for migration: {error}",
+                Path::new(&lock_path).display()
+            )),
+        ))
+    };
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(lock_error)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(MIGRATION_LOCK_POLL);
+            }
+            Err(TryLockError::WouldBlock) => return Err(CoveyError::StoreBusy),
+            Err(TryLockError::Error(error)) => return Err(lock_error(error)),
+        }
+    }
+}
+
+/// Applies the pending migrations in one transaction. The final migration
+/// checks every foreign key before that transaction commits, so a violation
+/// rolls the whole migration back.
+fn run_migrations(conn: &mut Connection) -> Result<()> {
+    let last = generated_migrations::MIGRATIONS.len() - 1;
     let migrations = generated_migrations::MIGRATIONS
         .iter()
         .copied()
-        .map(M::up)
+        .enumerate()
+        .map(|(index, sql)| {
+            let migration = M::up(sql);
+            if index == last {
+                migration.foreign_key_check()
+            } else {
+                migration
+            }
+        })
         .collect();
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     let migration_result = Migrations::new(migrations)
@@ -117,35 +204,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(CoveyError::from);
     migration_result?;
-    restore_result?;
-    ensure_foreign_key_integrity(conn)
-}
-
-fn ensure_foreign_key_integrity(conn: &Connection) -> Result<()> {
-    let violation = conn
-        .query_row(
-            "SELECT \"table\", rowid, parent, fkid FROM pragma_foreign_key_check LIMIT 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .optional()?;
-    if let Some((table, rowid, parent, fkid)) = violation {
-        return Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
-            Some(format!(
-                "foreign key violation after migrations: table {table} rowid {rowid} references missing parent {parent} via foreign key {fkid}"
-            )),
-        )
-        .into());
-    }
-    Ok(())
+    restore_result
 }
 
 pub(crate) fn advance_lease_clock(tx: &Transaction<'_>, wall_now_ms: i64) -> Result<i64> {
@@ -229,7 +288,7 @@ mod tests {
     fn migrated_connection() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open in-memory database");
         apply_pragmas(&conn).expect("apply pragmas");
-        apply_migrations(&mut conn).expect("apply migrations");
+        apply_migrations(&mut conn, Path::new(":memory:")).expect("apply migrations");
         conn
     }
 
@@ -287,5 +346,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM event_log", [], |row| row.get(0))
             .expect("count event rows");
         assert_eq!(event_count, 0);
+    }
+
+    #[test]
+    fn waiting_for_the_migration_lock_is_bounded_and_reports_store_busy() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("covey.db");
+        let holder = lock_for_migration(&db_path, Duration::ZERO)
+            .expect("the first opener takes the lock")
+            .expect("a file-backed store has a lock file");
+
+        let wait = Duration::from_millis(120);
+        let started = Instant::now();
+        let refused = lock_for_migration(&db_path, wait);
+        let waited = started.elapsed();
+
+        assert!(
+            matches!(refused, Err(CoveyError::StoreBusy)),
+            "unexpected result: {refused:?}"
+        );
+        assert!(
+            waited >= wait,
+            "the wait must last its whole bound, waited {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wait must end at its bound, waited {waited:?}"
+        );
+
+        drop(holder);
+        lock_for_migration(&db_path, Duration::ZERO)
+            .expect("the lock is free once its holder is gone");
     }
 }

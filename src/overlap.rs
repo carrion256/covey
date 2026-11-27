@@ -1094,7 +1094,7 @@ mod tests {
     fn overlap_conn() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open in-memory db");
         apply_pragmas(&conn).expect("apply pragmas");
-        apply_migrations(&mut conn).expect("apply schema");
+        apply_migrations(&mut conn, std::path::Path::new(":memory:")).expect("apply schema");
         conn.execute(
             "INSERT INTO sessions (
                 session_token, agent_principal_id, agent_instance_id, role, state,

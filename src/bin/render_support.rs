@@ -150,7 +150,7 @@ impl From<CoveyError> for ReportableError {
         };
 
         use CoveyError::{
-            MetaTaskAlreadySuperseded, MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks,
+            MetaTaskAlreadySuperseded, MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks, StoreBusy,
             StoreMigrationRequired, StoreNotFound, StoreReadOnly,
         };
 
@@ -265,6 +265,13 @@ impl From<CoveyError> for ReportableError {
                 suggestions: vec![
                     "Run a write command with this binary to migrate the store.".into(),
                 ],
+            },
+            StoreBusy => Self {
+                exit_code: 6,
+                code: "busy",
+                reason,
+                message: error.to_string(),
+                suggestions: vec!["Retry the same command with the same idempotency key.".into()],
             },
             SourceLinkExists { .. } => Self {
                 exit_code: 4,

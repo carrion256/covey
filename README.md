@@ -108,6 +108,8 @@ Covey exists to make invalid states hard or impossible.
   meta task under that key when one exists; a task that ended keeps its key and
   never matches
 - A store opened with `--read-only` refuses every write
+- Timestamps written by mutations never run backwards: store time is the wall
+  clock ratcheted through the lease clock inside each write transaction
 
 These guarantees are enforced through database constraints plus transactional checks in the Covey API layer.
 
@@ -272,7 +274,14 @@ Covey relies on single-writer transactional serialization in the local deploymen
 
 - Mutations execute as one transaction or not at all
 - Read paths observe committed state
-- Write contention must be handled with bounded retry or blocking semantics
+- A writer waits for the store's write lock for up to three busy timeouts
+  (5 s each). A store that stays locked answers `StoreBusy` (CLI code `busy`,
+  exit 6) with nothing written, so the same call is safe to retry
+- Opening a store that is at this binary's schema version runs no migration
+  and takes no lock. Opening an older store migrates it under an exclusive lock
+  on the sidecar file `<db path>.migrate.lock`, so concurrent openers migrate
+  it once; an opener that waits longer than 15 s answers `StoreBusy`. A
+  foreign-key violation found by a migration rolls that migration back
 - Sessions heartbeat every 10s
 - Sessions older than the stale threshold are marked `stale`
 - Reservations and apply claims are rejected on command paths once their
@@ -418,6 +427,32 @@ Exit codes are stable:
 | `permission_denied`, `store_read_only` | 3 |
 | `conflict`, `source_link_exists`, `store_migration_required` | 4 |
 | `internal_error` | 5 |
+| `busy` | 6 |
+
+With JSON output (`--json`, or stdout is not a TTY) every command answers one
+envelope. Success goes to stdout:
+
+```json
+{"ok": true, "data": {"meta_task_id": "..."}}
+```
+
+A refusal goes to stderr, with the exit code from the table:
+
+```json
+{"ok": false, "code": "conflict", "reason": "claim_not_held",
+ "message": "...", "suggestions": ["..."]}
+```
+
+- `code` is the coarse class from the table and decides the exit code
+- `reason` is the stable snake_case name of the specific refusal, such as
+  `claim_not_held`, `stale_fence_token`, or `session_already_active`; a usage
+  error raised by the CLI itself has the reason `invalid_args`. Branch on
+  `reason`, not on `message`
+- `message` is written for people and may change
+- `suggestions` is omitted when empty
+
+`busy` means another writer held the store lock for the whole wait; nothing was
+written, so retry the same command with the same idempotency key.
 
 Short help:
 
