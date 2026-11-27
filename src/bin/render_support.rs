@@ -144,6 +144,11 @@ impl From<CoveyError> for ReportableError {
             UnknownArtifactDigest, WrongRole,
         };
 
+        use CoveyError::{
+            MetaTaskAlreadySuperseded, MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks,
+            StoreMigrationRequired, StoreNotFound, StoreReadOnly,
+        };
+
         match error {
             SessionNotFound
             | SubtaskNotFound
@@ -157,7 +162,8 @@ impl From<CoveyError> for ReportableError {
             | CurrentWorkBlockerNotFound { .. }
             | UnknownArtifactDigest { .. }
             | SubtaskDependencyNotFound { .. }
-            | ImportSourceNotFound { .. } => Self {
+            | ImportSourceNotFound { .. }
+            | MetaTaskHandleNotFound { .. } => Self {
                 exit_code: 1,
                 code: "not_found",
                 message: error.to_string(),
@@ -213,12 +219,36 @@ impl From<CoveyError> for ReportableError {
             | ImportDuplicate { .. }
             | ApplyGateEvidenceMissing { .. }
             | AmbiguousCurrentWorkBlocker { .. }
-            | RuntimeAttestationMissing { .. } => Self {
+            | RuntimeAttestationMissing { .. }
+            | MetaTaskHasOpenSubtasks { .. }
+            | MetaTaskAlreadySuperseded { .. } => Self {
                 exit_code: 4,
                 code: "conflict",
                 message: error.to_string(),
                 suggestions: vec![
                     "Refresh state and retry with current ids, leases, and fence tokens.".into(),
+                ],
+            },
+            StoreNotFound { .. } => Self {
+                exit_code: 1,
+                code: "store_not_found",
+                message: error.to_string(),
+                suggestions: vec![
+                    "Check the --db path; a write command creates a missing store.".into(),
+                ],
+            },
+            StoreReadOnly => Self {
+                exit_code: 3,
+                code: "store_read_only",
+                message: error.to_string(),
+                suggestions: vec!["Re-run the command without --read-only to allow writes.".into()],
+            },
+            StoreMigrationRequired { .. } => Self {
+                exit_code: 4,
+                code: "store_migration_required",
+                message: error.to_string(),
+                suggestions: vec![
+                    "Run a write command with this binary to migrate the store.".into(),
                 ],
             },
             SourceLinkExists { .. } => Self {

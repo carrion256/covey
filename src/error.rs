@@ -26,6 +26,13 @@ pub enum CoveyError {
     #[error("conflict not found")]
     ConflictNotFound,
 
+    #[error("covey store not found at {path}")]
+    StoreNotFound { path: String },
+    #[error("covey store is open read-only; the operation writes")]
+    StoreReadOnly,
+    #[error("covey store schema version {found} is behind; version {expected} is pending")]
+    StoreMigrationRequired { found: usize, expected: usize },
+
     #[error("illegal transition on {object}: {from} -> {to}")]
     IllegalTransition {
         from: StateValue,
@@ -162,6 +169,18 @@ pub enum CoveyError {
     },
     #[error("meta-task {meta_task_id} already has a source link")]
     SourceLinkExists { meta_task_id: String },
+    #[error("meta-task handle #{handle} not found")]
+    MetaTaskHandleNotFound { handle: u64 },
+    #[error("meta-task {meta_task_id} still has {open_subtasks} open subtasks")]
+    MetaTaskHasOpenSubtasks {
+        meta_task_id: String,
+        open_subtasks: usize,
+    },
+    #[error("meta-task {meta_task_id} is already superseded by {superseded_by}")]
+    MetaTaskAlreadySuperseded {
+        meta_task_id: String,
+        superseded_by: String,
+    },
     #[error("unknown artifact digest {digest}")]
     UnknownArtifactDigest { digest: String },
     #[error("invalid repository path {path}")]
@@ -226,14 +245,16 @@ impl PartialEq for CoveyError {
             InvalidImportDestination, InvalidImportRow, InvalidLeaseDuration,
             InvalidObservabilityRow, InvalidPath, InvalidReadyQueueMetrics,
             InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema,
-            InvalidSubtaskDependency, LeaseExpired, MetaTaskNotFound, MetaTaskUnavailable,
+            InvalidSubtaskDependency, LeaseExpired, MetaTaskAlreadySuperseded,
+            MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks, MetaTaskNotFound, MetaTaskUnavailable,
             MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
             SessionNotFound, SourceLinkExists, StaleFenceToken, StaleReviewArtifact,
-            SubtaskAlreadyClaimed, SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError,
-            UnknownArtifactDigest, WrongRole,
+            StoreMigrationRequired, StoreNotFound, StoreReadOnly, SubtaskAlreadyClaimed,
+            SubtaskDependencyNotFound, SubtaskNotFound, TypeValidationError, UnknownArtifactDigest,
+            WrongRole,
         };
 
         match (self, other) {
@@ -247,7 +268,8 @@ impl PartialEq for CoveyError {
             | (QueueItemNotFound, QueueItemNotFound)
             | (ConflictNotFound, ConflictNotFound)
             | (FenceTokenMismatch, FenceTokenMismatch)
-            | (ReviewKindMismatch, ReviewKindMismatch) => true,
+            | (ReviewKindMismatch, ReviewKindMismatch)
+            | (StoreReadOnly, StoreReadOnly) => true,
             (
                 IllegalTransition {
                     from: left_from,
@@ -537,6 +559,51 @@ impl PartialEq for CoveyError {
                     meta_task_id: right_meta_task_id,
                 },
             ) => left_meta_task_id == right_meta_task_id,
+            (
+                StoreMigrationRequired {
+                    found: left_found,
+                    expected: left_expected,
+                },
+                StoreMigrationRequired {
+                    found: right_found,
+                    expected: right_expected,
+                },
+            ) => left_found == right_found && left_expected == right_expected,
+            (StoreNotFound { path: left_path }, StoreNotFound { path: right_path }) => {
+                left_path == right_path
+            }
+            (
+                MetaTaskHandleNotFound {
+                    handle: left_handle,
+                },
+                MetaTaskHandleNotFound {
+                    handle: right_handle,
+                },
+            ) => left_handle == right_handle,
+            (
+                MetaTaskHasOpenSubtasks {
+                    meta_task_id: left_meta_task_id,
+                    open_subtasks: left_open_subtasks,
+                },
+                MetaTaskHasOpenSubtasks {
+                    meta_task_id: right_meta_task_id,
+                    open_subtasks: right_open_subtasks,
+                },
+            ) => {
+                left_meta_task_id == right_meta_task_id && left_open_subtasks == right_open_subtasks
+            }
+            (
+                MetaTaskAlreadySuperseded {
+                    meta_task_id: left_meta_task_id,
+                    superseded_by: left_superseded_by,
+                },
+                MetaTaskAlreadySuperseded {
+                    meta_task_id: right_meta_task_id,
+                    superseded_by: right_superseded_by,
+                },
+            ) => {
+                left_meta_task_id == right_meta_task_id && left_superseded_by == right_superseded_by
+            }
             (
                 LeaseExpired {
                     object_id: left_object_id,

@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
 use rusqlite::{OptionalExtension, ToSql, Transaction, params, params_from_iter};
 use serde::Deserialize;
@@ -7,12 +7,15 @@ use serde_rusqlite::from_row;
 use crate::{
     error::{CoveyError, Result},
     model::{
-        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, Event, MetaTask,
-        MetaTaskSourceLink, MetaTaskSummary, MutationIdempotencyRecord, ObjectType,
-        OpenSpecImportProvenance, OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest,
-        ReadyQueueItem, Reservation, ReservationState, Review, RuntimeAttestation, Session,
-        SessionState, SessionToken, SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState,
-        TimestampMs, claim_state_name, object_type_name, parse_generated_members,
+        ActorKind, Artifact, AttemptOutcome, Claim, ClaimState, CoveyTypeValidationError, DueDate,
+        Event, MetaTask, MetaTaskAnnotationKey, MetaTaskAnnotations, MetaTaskDedupeKey,
+        MetaTaskHandle, MetaTaskId, MetaTaskListQuery, MetaTaskListState, MetaTaskSort,
+        MetaTaskSourceLink, MetaTaskState, MetaTaskSummary, MetaTaskSummaryParts,
+        MutationIdempotencyRecord, ObjectType, OpenSpecImportProvenance,
+        OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, ReadyQueueItem, Reservation,
+        ReservationState, Review, RuntimeAttestation, Session, SessionState, SessionToken,
+        SubtaskDependencyStatus, SubtaskId, SubtaskRow, SubtaskState, TimestampMs,
+        claim_state_name, meta_task_state_name, object_type_name, parse_generated_members,
         reservation_state_name, session_state_name,
     },
     schema::SYSTEM_EVENT_SESSION_TOKEN,
@@ -137,7 +140,11 @@ pub(crate) fn load_runtime_attestation_tx(
 pub(crate) fn load_meta_task_tx(tx: &Transaction<'_>, meta_task_id: &str) -> Result<MetaTask> {
     map_missing_row(
         tx.query_row(
-            "SELECT meta_task_id, prompt_text, state, created_by, created_at, updated_at FROM meta_tasks WHERE meta_task_id = ?1",
+            r#"
+            SELECT meta_task_id, prompt_text, state, created_by, created_at, updated_at,
+                   title, urgency, due_on, closure, handle
+            FROM meta_tasks WHERE meta_task_id = ?1
+            "#,
             params![meta_task_id],
             deserialize_row::<MetaTask>,
         ),
@@ -161,27 +168,328 @@ pub(crate) fn load_meta_task_source_link_tx(
     .map_err(Into::into)
 }
 
-pub(crate) fn map_meta_task_summary_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<MetaTaskSummary> {
-    let state = parse_enum(row.get::<_, String>(2)?)?;
-    MetaTaskSummary::try_new(row.get(0)?, row.get(1)?, state, row.get(3)?, row.get(4)?)
-        .map_err(to_sql_err)
+/// Subtask states that count as settled, the same set
+/// `refresh_meta_task_state` treats as finished.
+const SETTLED_SUBTASK_STATES: &str = "'applied', 'completed', 'failed', 'abandoned', 'decided'";
+
+/// Two-valued state filter of a meta-task discovery page.
+///
+/// `Open` is not a stored state: it selects the planning and active rows. Every
+/// other filter names exactly one stored state.
+fn meta_task_list_state_filter(state: MetaTaskListState) -> (Option<&'static str>, i64) {
+    match state {
+        MetaTaskListState::Open => (None, 1),
+        MetaTaskListState::Planning => (Some(meta_task_state_name(MetaTaskState::Planning)), 0),
+        MetaTaskListState::Active => (Some(meta_task_state_name(MetaTaskState::Active)), 0),
+        MetaTaskListState::Completed => (Some(meta_task_state_name(MetaTaskState::Completed)), 0),
+        MetaTaskListState::Cancelled => (Some(meta_task_state_name(MetaTaskState::Cancelled)), 0),
+    }
 }
 
-pub(crate) fn load_meta_task_summaries_tx(
+/// One page of the meta-task discovery query, ordered by the requested sort.
+///
+/// The page is one join over `meta_tasks` and its source link; subtask totals
+/// are counted from `subtasks` and the dedupe key is read from
+/// `meta_task_dedupe_keys`, so a page costs one query whatever it holds.
+fn meta_task_page_sql(sort: MetaTaskSort) -> String {
+    let order_by = match sort {
+        MetaTaskSort::CreatedAt => "m.created_at DESC, m.meta_task_id DESC",
+        MetaTaskSort::Due => {
+            "m.due_on IS NULL, m.due_on ASC, m.created_at DESC, m.meta_task_id DESC"
+        }
+        MetaTaskSort::Urgency => concat!(
+            "CASE m.urgency WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ",
+            "ELSE 3 END ASC, m.created_at DESC, m.meta_task_id DESC"
+        ),
+    };
+    format!(
+        r#"
+        SELECT m.meta_task_id AS meta_task_id,
+               m.prompt_text AS prompt_text,
+               m.state AS state,
+               m.created_at AS created_at,
+               m.updated_at AS updated_at,
+               m.title AS title,
+               m.urgency AS urgency,
+               m.due_on AS due_on,
+               m.closure AS closure,
+               m.handle AS handle,
+               (SELECT d.dedupe_key
+                  FROM meta_task_dedupe_keys d
+                 WHERE d.meta_task_id = m.meta_task_id
+                 ORDER BY d.created_at ASC, d.dedupe_key ASC
+                 LIMIT 1) AS dedupe_key,
+               l.thread_id AS thread_id,
+               l.url AS url,
+               l.received_at AS received_at,
+               l.path AS path,
+               l.origin AS origin,
+               l.method AS method,
+               l.linked_at AS linked_at,
+               (SELECT COUNT(*)
+                  FROM subtasks s
+                 WHERE s.meta_task_id = m.meta_task_id) AS subtask_total,
+               (SELECT COUNT(*)
+                  FROM subtasks s
+                 WHERE s.meta_task_id = m.meta_task_id
+                   AND s.state NOT IN ({})) AS subtask_open
+        FROM meta_tasks m
+        LEFT JOIN meta_task_source_links l ON l.meta_task_id = m.meta_task_id
+        WHERE (?1 IS NULL OR m.state = ?1)
+          AND (?2 = 0 OR m.state IN ('planning', 'active'))
+          AND (?3 IS NULL OR (m.due_on IS NOT NULL AND m.due_on < ?3))
+          AND (?4 IS NULL OR l.thread_id = ?4)
+          AND (?5 IS NULL OR m.meta_task_id IN (
+                  SELECT k.meta_task_id
+                    FROM meta_task_dedupe_keys k
+                   WHERE k.dedupe_key = ?5))
+        ORDER BY {order_by}
+        LIMIT ?6 OFFSET ?7
+        "#,
+        SETTLED_SUBTASK_STATES,
+    )
+}
+
+fn map_meta_task_summary_parts_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MetaTaskSummaryParts> {
+    // Every joined link column is NULL together, so the link is present exactly
+    // when the thread it carries is.
+    let source_link = match row.get::<_, Option<String>>("thread_id")? {
+        Some(thread_id) => Some(
+            MetaTaskSourceLink::try_from_stored_parts(
+                thread_id,
+                row.get::<_, Option<String>>("url")?,
+                row.get::<_, String>("received_at")?,
+                row.get::<_, String>("path")?,
+                parse_enum(row.get::<_, String>("origin")?)?,
+                row.get::<_, Option<String>>("method")?,
+                row.get::<_, TimestampMs>("linked_at")?,
+            )
+            .map_err(to_sql_err)?,
+        ),
+        None => None,
+    };
+    Ok(MetaTaskSummaryParts {
+        meta_task_id: row.get("meta_task_id")?,
+        prompt_text: row.get("prompt_text")?,
+        state: parse_enum(row.get::<_, String>("state")?)?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        title: row.get("title")?,
+        urgency: match row.get::<_, Option<String>>("urgency")? {
+            Some(raw) => Some(parse_enum(raw)?),
+            None => None,
+        },
+        due_on: row.get("due_on")?,
+        closure: match row.get::<_, Option<String>>("closure")? {
+            Some(raw) => Some(parse_enum(raw)?),
+            None => None,
+        },
+        handle: row.get("handle")?,
+        dedupe_key: row.get("dedupe_key")?,
+        source_link,
+        annotations: MetaTaskAnnotations::default(),
+        subtask_total: usize::try_from(row.get::<_, i64>("subtask_total")?).map_err(to_sql_err)?,
+        subtask_open: usize::try_from(row.get::<_, i64>("subtask_open")?).map_err(to_sql_err)?,
+    })
+}
+
+pub(crate) fn load_meta_task_summary_page_tx(
     tx: &Transaction<'_>,
-    limit: usize,
-    offset: i64,
+    query: &MetaTaskListQuery,
 ) -> Result<Vec<MetaTaskSummary>> {
-    let mut stmt = tx.prepare(
-        "SELECT meta_task_id, prompt_text, state, created_at, updated_at
-         FROM meta_tasks
-         ORDER BY created_at DESC, meta_task_id DESC
-         LIMIT ?1 OFFSET ?2",
+    let (state_name, open_only) = match query.state() {
+        Some(state) => meta_task_list_state_filter(state),
+        None => (None, 0),
+    };
+    let due_before = query.due_before().map(DueDate::as_str);
+    let limit = i64::try_from(query.limit()).map_err(|_| {
+        CoveyError::TypeValidationError(CoveyTypeValidationError::new(
+            "limit",
+            "exceeds the supported page size",
+        ))
+    })?;
+    let offset = i64::try_from(query.offset()).map_err(|_| {
+        CoveyError::TypeValidationError(CoveyTypeValidationError::new(
+            "offset",
+            "exceeds the maximum page offset",
+        ))
+    })?;
+    let mut stmt = tx.prepare(&meta_task_page_sql(query.sort()))?;
+    let rows = stmt.query_map(
+        params![
+            state_name,
+            open_only,
+            due_before,
+            query.source_thread_id(),
+            query.dedupe_key().map(MetaTaskDedupeKey::as_str),
+            limit,
+            offset,
+        ],
+        map_meta_task_summary_parts_row,
     )?;
-    let rows = stmt.query_map(params![limit as i64, offset], map_meta_task_summary_row)?;
+    let mut parts = collect_rows(rows)?;
+    if parts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let meta_task_ids: Vec<MetaTaskId> =
+        parts.iter().map(|part| part.meta_task_id.clone()).collect();
+    let mut annotations = load_meta_task_annotations_tx(tx, &meta_task_ids)?;
+    let mut summaries = Vec::with_capacity(parts.len());
+    for mut part in parts.drain(..) {
+        part.annotations = annotations.remove(&part.meta_task_id).unwrap_or_default();
+        summaries.push(
+            MetaTaskSummary::try_new(part)
+                .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })?,
+        );
+    }
+    Ok(summaries)
+}
+
+/// Reads every annotation of the given meta tasks in one query.
+///
+/// Ids are fetched in bounded chunks, so a page never depends on how many
+/// annotations a store holds.
+pub(crate) fn load_meta_task_annotations_tx(
+    tx: &Transaction<'_>,
+    meta_task_ids: &[MetaTaskId],
+) -> Result<HashMap<MetaTaskId, MetaTaskAnnotations>> {
+    let mut annotations: HashMap<MetaTaskId, MetaTaskAnnotations> = HashMap::new();
+    for chunk in meta_task_ids.chunks(256) {
+        let sql = format!(
+            "SELECT meta_task_id, key, value FROM meta_task_annotations WHERE meta_task_id IN ({})",
+            sql_placeholders(chunk.len())
+        );
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params_from_iter(chunk.iter().map(MetaTaskId::as_str)),
+            |row| {
+                Ok((
+                    row.get::<_, MetaTaskId>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (meta_task_id, key, value) = row?;
+            apply_stored_annotation(annotations.entry(meta_task_id).or_default(), &key, &value)?;
+        }
+    }
+    Ok(annotations)
+}
+
+fn apply_stored_annotation(
+    annotations: &mut MetaTaskAnnotations,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    match MetaTaskAnnotationKey::from_str(key).map_err(|err| {
+        CoveyError::InvalidObservabilityRow {
+            reason: format!("stored annotation key {key:?} is not a known key: {err}"),
+        }
+    })? {
+        MetaTaskAnnotationKey::Verdict => annotations.verdict = Some(value.to_owned()),
+        MetaTaskAnnotationKey::Acked => {
+            annotations.acked = Some(match value {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(CoveyError::InvalidObservabilityRow {
+                        reason: format!("stored acked annotation {value:?} is not a boolean"),
+                    });
+                }
+            });
+        }
+        MetaTaskAnnotationKey::Tier => annotations.tier = Some(value.to_owned()),
+        MetaTaskAnnotationKey::Entity => annotations.entity = Some(value.to_owned()),
+    }
+    Ok(())
+}
+
+/// Reads the tasks one meta task supersedes, in the order the replacement
+/// links were written, which is the order the submission named them.
+pub(crate) fn load_meta_task_supersedes_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+) -> Result<Vec<MetaTaskId>> {
+    let mut stmt = tx.prepare(
+        r#"
+        SELECT superseded_meta_task_id
+        FROM meta_task_supersedes
+        WHERE superseding_meta_task_id = ?1
+        ORDER BY superseded_at ASC, rowid ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![meta_task_id], |row| row.get::<_, MetaTaskId>(0))?;
     collect_rows(rows)
+}
+
+/// Reads the one task that supersedes this meta task, when a replacement exists.
+pub(crate) fn load_meta_task_superseded_by_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+) -> Result<Option<MetaTaskId>> {
+    tx.query_row(
+        "SELECT superseding_meta_task_id FROM meta_task_supersedes WHERE superseded_meta_task_id = ?1",
+        params![meta_task_id],
+        |row| row.get::<_, MetaTaskId>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Reads the meta task one agent principal already filed under a dedupe key.
+pub(crate) fn load_meta_task_dedupe_tx(
+    tx: &Transaction<'_>,
+    agent_principal_id: &str,
+    dedupe_key: &str,
+) -> Result<Option<MetaTaskId>> {
+    tx.query_row(
+        "SELECT meta_task_id FROM meta_task_dedupe_keys WHERE agent_principal_id = ?1 AND dedupe_key = ?2",
+        params![agent_principal_id, dedupe_key],
+        |row| row.get::<_, MetaTaskId>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub(crate) fn load_meta_task_id_for_handle_tx(
+    tx: &Transaction<'_>,
+    handle: MetaTaskHandle,
+) -> Result<MetaTaskId> {
+    map_missing_row(
+        tx.query_row(
+            "SELECT meta_task_id FROM meta_tasks WHERE handle = ?1",
+            params![handle],
+            |row| row.get::<_, MetaTaskId>(0),
+        ),
+        CoveyError::MetaTaskHandleNotFound {
+            handle: handle.get(),
+        },
+    )
+}
+
+/// Counts the subtasks of one meta task that are still open.
+///
+/// "Open" is the complement of the settled set `refresh_meta_task_state` uses,
+/// so `meta complete` refuses exactly the subtasks a refresh still counts.
+pub(crate) fn count_open_subtasks_for_meta_task_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+) -> Result<usize> {
+    let count = tx.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM subtasks WHERE meta_task_id = ?1 AND state NOT IN ({})",
+            SETTLED_SUBTASK_STATES
+        ),
+        params![meta_task_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    usize::try_from(count).map_err(|_| CoveyError::InvalidObservabilityRow {
+        reason: format!("meta-task {meta_task_id} has an unrepresentable open subtask count"),
+    })
 }
 
 pub(crate) fn load_subtask_tx(tx: &Transaction<'_>, subtask_id: &str) -> Result<SubtaskRow> {

@@ -1,32 +1,36 @@
+use super::state::{meta_task_annotation_key_name, meta_task_closure_name, meta_task_urgency_name};
 use super::{
-    AbandonSubtaskReq, Artifact, ArtifactDigest, ArtifactKind, AttemptEvidenceDigest,
-    AttemptFailureCode, AttemptOutcome, AttemptOutcomeKind, AttemptSummary, CancelMetaTaskReq,
-    Claim, ClaimId, ClaimNextReq, ClaimReadyQueueReq, ClaimResult, ClaimState, ClaimSubtaskReq,
-    CompletionPolicy, Conflict, ConflictKind, ConflictResolutionState, CreateSubtaskRequest,
-    DecideReviewReq, EnqueueForApplyReq, Event, EventPayload, EventType, ExitSessionReq,
-    ExpiredCountPayload, ExpiringClaim, FenceSeq, HeartbeatReq, IdempotencyKey, ImportBdV1Req,
-    ImportBdV1Result, ImportBdV1SkipReason, ImportOpenSpecAction, ImportOpenSpecConflict,
-    ImportOpenSpecConflictReason, ImportOpenSpecEvent, ImportOpenSpecItemResult, ImportOpenSpecReq,
-    ImportOpenSpecResult, LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq,
-    MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskState, MetaTaskStatus, ObjectType,
-    OpenSpecImportProvenance, OpenSpecImportProvenanceCommon, OpenSpecMissionArtifactMetadata,
-    OpenSpecSourceDigest, OpenSpecTaskId, OverlapQueryReq, PublishArtifactReq, QueueId,
-    ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics, ReadyQueueState,
-    RecordApplyVerificationReq, RecordLandingReceiptReq, RecordPermissiveLandingReceiptReq,
-    RecordRuntimeAttestationReq, RegisterSessionReq, ReleaseClaimReq, ReleaseReservationReq,
-    RenewClaimReq, RenewReservationReq, RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact,
-    RepoopsAuthorityLockFact, RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq,
-    RepoopsClaimRef, RequestReservationReq, RequestReviewReq, Reservation, ReservationId,
-    ReservationOverlapConflictPayload, ReservationScope, ReservationState, ResolveConflictReq,
-    Review, ReviewSubtask, ReviewTarget, ReviewVerdict, RoutingKey, ScopeClass, Session,
-    SessionHandle, SessionRole, SessionState, SessionStatus, SessionToken, SettlementTarget,
-    StaleSessionsPayload, StartSubtaskReq, StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId,
-    SubtaskKind, SubtaskLifecycle, SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus,
-    SubtaskTitle, SubtaskView, SupersedeQueueItemReq, TimestampMs, TypedEvent,
-    VerifyLandingAuthorizationReq, WorkSubtask, bd_import_v1_subtask_id, make_id,
-    parse_generated_members,
+    AbandonSubtaskReq, AnnotateMetaTaskReq, Artifact, ArtifactDigest, ArtifactKind,
+    AttemptEvidenceDigest, AttemptFailureCode, AttemptOutcome, AttemptOutcomeKind, AttemptSummary,
+    CancelMetaTaskReq, Claim, ClaimId, ClaimNextReq, ClaimReadyQueueReq, ClaimResult, ClaimState,
+    ClaimSubtaskReq, CompleteMetaTaskReq, CompletionPolicy, Conflict, ConflictKind,
+    ConflictResolutionState, CreateSubtaskRequest, DecideReviewReq, DueDate, EnqueueForApplyReq,
+    Event, EventPayload, EventType, ExitSessionReq, ExpiredCountPayload, ExpiringClaim, FenceSeq,
+    HeartbeatReq, IdempotencyKey, ImportBdV1Req, ImportBdV1Result, ImportBdV1SkipReason,
+    ImportOpenSpecAction, ImportOpenSpecConflict, ImportOpenSpecConflictReason,
+    ImportOpenSpecEvent, ImportOpenSpecItemResult, ImportOpenSpecReq, ImportOpenSpecResult,
+    LandingAuthorizationStatus, LeaseDeadlineMs, MarkAppliedReq, MarkInFlightReq, MetaTask,
+    MetaTaskAnnotationChange, MetaTaskAnnotationKey, MetaTaskAnnotationValue, MetaTaskClosure,
+    MetaTaskDedupeKey, MetaTaskHandle, MetaTaskId, MetaTaskState, MetaTaskStatus, MetaTaskTitle,
+    MetaTaskUrgency, ObjectType, OpenSpecImportProvenance, OpenSpecImportProvenanceCommon,
+    OpenSpecMissionArtifactMetadata, OpenSpecSourceDigest, OpenSpecTaskId, OverlapQueryReq,
+    PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueItem, ReadyQueueMetrics,
+    ReadyQueueState, RecordApplyVerificationReq, RecordLandingReceiptReq,
+    RecordPermissiveLandingReceiptReq, RecordRuntimeAttestationReq, RegisterSessionReq,
+    ReleaseClaimReq, ReleaseReservationReq, RenewClaimReq, RenewReservationReq,
+    RepoopsAuthorityClaimFact, RepoopsAuthorityGitContextFact, RepoopsAuthorityLockFact,
+    RepoopsAuthorityScopeFact, RepoopsAuthoritySnapshotReq, RepoopsClaimRef, RequestReservationReq,
+    RequestReviewReq, Reservation, ReservationId, ReservationOverlapConflictPayload,
+    ReservationScope, ReservationState, ResolveConflictReq, Review, ReviewSubtask, ReviewTarget,
+    ReviewVerdict, RoutingKey, ScopeClass, Session, SessionHandle, SessionRole, SessionState,
+    SessionStatus, SessionToken, SettlementTarget, StaleSessionsPayload, StartSubtaskReq,
+    StuckSubtask, SubmitMetaTaskReq, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle,
+    SubtaskPriority, SubtaskRow, SubtaskState, SubtaskStatus, SubtaskTitle, SubtaskView,
+    SupersedeQueueItemReq, TimestampMs, TypedEvent, VerifyLandingAuthorizationReq, WorkSubtask,
+    bd_import_v1_subtask_id, make_id, parse_generated_members,
 };
 use crate::{CoveyError, CreateWorkSubtaskReq, EvidencePolicy, FinishSubtaskReq, RetrySubtaskReq};
+use rstest::rstest;
 use serde::Serialize;
 use serde_json::json;
 
@@ -1441,7 +1445,12 @@ fn meta_task_lifecycle_preserves_flat_state_shape() {
         "created_by": "session-1",
         "created_at": 100,
         "updated_at": 101,
-        "source_link": null
+        "source_link": null,
+        "title": null,
+        "urgency": null,
+        "due_on": null,
+        "closure": null,
+        "handle": null
     });
 
     let meta_task: MetaTask =
@@ -6205,4 +6214,383 @@ fn event_payload_from_json_decodes_every_event_type_variant() {
             EventPayload::from_json(event_type, &payload_json).expect("payload should decode");
         assert_eq!(decoded, expected, "{event_type:?}");
     }
+}
+
+fn sorted_request_keys<T: Serialize>(request: &T) -> Vec<String> {
+    let value = serde_json::to_value(request).expect("request serializes");
+    let object = value
+        .as_object()
+        .expect("request serializes to a JSON object");
+    let mut keys: Vec<String> = object.keys().cloned().collect();
+    keys.sort_unstable();
+    keys
+}
+
+#[rstest]
+#[case::leap_day("2024-02-29")]
+#[case::century_leap_day("2000-02-29")]
+#[case::first_day("0001-01-01")]
+fn due_dates_accept_real_calendar_days(#[case] raw: &str) {
+    let due_date = DueDate::parse(raw).expect("valid calendar day");
+
+    assert_eq!(due_date.as_str(), raw);
+    assert_eq!(due_date.to_string(), raw);
+}
+
+#[rstest]
+#[case::non_leap_february("2023-02-29")]
+#[case::century_non_leap("1900-02-29")]
+#[case::month_thirteen("2026-13-01")]
+#[case::month_zero("2026-00-10")]
+#[case::april_thirty_first("2026-04-31")]
+#[case::unpadded_month("2026-1-01")]
+#[case::compact("20260101")]
+#[case::empty("")]
+fn due_dates_reject_impossible_calendar_days(#[case] raw: &str) {
+    let err = DueDate::parse(raw).expect_err("impossible calendar day must be rejected");
+
+    assert!(
+        err.to_string().contains("invalid due_on"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn due_dates_order_as_calendar_dates() {
+    let first = DueDate::parse("0001-01-01").expect("valid calendar day");
+    let earlier = DueDate::parse("2024-01-31").expect("valid calendar day");
+    let later = DueDate::parse("2024-02-01").expect("valid calendar day");
+
+    assert!(first < earlier);
+    assert!(earlier < later);
+}
+
+#[rstest]
+#[case::bare("12", 12)]
+#[case::hash_prefixed("#12", 12)]
+fn meta_task_handles_accept_decimal_and_prefixed_forms(#[case] raw: &str, #[case] expected: u64) {
+    let handle = MetaTaskHandle::parse(raw).expect("valid meta-task handle");
+
+    assert_eq!(handle.get(), expected);
+    assert_eq!(handle.to_string(), format!("#{expected}"));
+}
+
+#[rstest]
+#[case::zero("0")]
+#[case::hash_zero("#0")]
+#[case::text("abc")]
+#[case::hash_only("#")]
+#[case::empty("")]
+#[case::beyond_u64_max("18446744073709551616")]
+fn meta_task_handles_reject_invalid_numbers(#[case] raw: &str) {
+    let err = MetaTaskHandle::parse(raw).expect_err("invalid meta-task handle must be rejected");
+
+    assert!(
+        err.to_string().contains("invalid handle"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn meta_task_handles_serialize_as_numbers() {
+    let handle = MetaTaskHandle::parse("#12").expect("valid meta-task handle");
+    let encoded = serde_json::to_value(handle).expect("handle serializes");
+
+    assert_eq!(encoded, json!(12));
+    let decoded: MetaTaskHandle = serde_json::from_value(encoded).expect("handle deserializes");
+    assert_eq!(decoded, handle);
+    assert!(serde_json::from_value::<MetaTaskHandle>(json!(0)).is_err());
+}
+
+#[rstest]
+#[case::low(MetaTaskUrgency::Low, "low")]
+#[case::medium(MetaTaskUrgency::Medium, "medium")]
+#[case::high(MetaTaskUrgency::High, "high")]
+fn meta_task_urgency_names_round_trip(#[case] urgency: MetaTaskUrgency, #[case] name: &str) {
+    assert_eq!(meta_task_urgency_name(urgency), name);
+    assert_eq!(urgency.to_string(), name);
+    assert_eq!(
+        name.parse::<MetaTaskUrgency>().expect("urgency parses"),
+        urgency
+    );
+    assert_eq!(
+        serde_json::to_value(urgency).expect("urgency serializes"),
+        json!(name)
+    );
+    assert_eq!(
+        serde_json::from_value::<MetaTaskUrgency>(json!(name)).expect("urgency deserializes"),
+        urgency
+    );
+}
+
+#[rstest]
+#[case::done(MetaTaskClosure::Done, "done")]
+#[case::upstream_closed(MetaTaskClosure::UpstreamClosed, "upstream_closed")]
+#[case::superseded(MetaTaskClosure::Superseded, "superseded")]
+#[case::dropped(MetaTaskClosure::Dropped, "dropped")]
+fn meta_task_closure_names_round_trip(#[case] closure: MetaTaskClosure, #[case] name: &str) {
+    assert_eq!(meta_task_closure_name(closure), name);
+    assert_eq!(closure.to_string(), name);
+    assert_eq!(
+        name.parse::<MetaTaskClosure>().expect("closure parses"),
+        closure
+    );
+    assert_eq!(
+        serde_json::to_value(closure).expect("closure serializes"),
+        json!(name)
+    );
+    assert_eq!(
+        serde_json::from_value::<MetaTaskClosure>(json!(name)).expect("closure deserializes"),
+        closure
+    );
+}
+
+#[rstest]
+#[case::verdict(MetaTaskAnnotationKey::Verdict, "verdict")]
+#[case::acked(MetaTaskAnnotationKey::Acked, "acked")]
+#[case::tier(MetaTaskAnnotationKey::Tier, "tier")]
+#[case::entity(MetaTaskAnnotationKey::Entity, "entity")]
+fn meta_task_annotation_keys_round_trip(#[case] key: MetaTaskAnnotationKey, #[case] name: &str) {
+    assert_eq!(meta_task_annotation_key_name(key), name);
+    assert_eq!(key.to_string(), name);
+    assert_eq!(
+        name.parse::<MetaTaskAnnotationKey>().expect("key parses"),
+        key
+    );
+    assert_eq!(
+        serde_json::to_value(key).expect("key serializes"),
+        json!(name)
+    );
+    assert_eq!(
+        serde_json::from_value::<MetaTaskAnnotationKey>(json!(name)).expect("key deserializes"),
+        key
+    );
+}
+
+#[test]
+fn submit_meta_task_request_omits_absent_tracking_fields() {
+    let request = SubmitMetaTaskReq::try_from_raw_parts("session-1", "do work", "idem-submit")
+        .expect("valid submit-meta-task request");
+
+    assert_eq!(
+        sorted_request_keys(&request),
+        ["idempotency_key", "prompt_text", "session_token"]
+    );
+}
+
+#[test]
+fn submit_meta_task_request_builders_add_only_their_field() {
+    let base = SubmitMetaTaskReq::try_from_raw_parts("session-1", "do work", "idem-submit")
+        .expect("valid submit-meta-task request");
+
+    let titled = base
+        .clone()
+        .with_title(MetaTaskTitle::parse("ship the fix").expect("valid title"));
+    assert_eq!(
+        sorted_request_keys(&titled),
+        ["idempotency_key", "prompt_text", "session_token", "title"]
+    );
+    assert_eq!(
+        serde_json::to_value(&titled).expect("titled request serializes")["title"],
+        "ship the fix"
+    );
+
+    let urgent = base.clone().with_urgency(MetaTaskUrgency::High);
+    assert_eq!(
+        sorted_request_keys(&urgent),
+        ["idempotency_key", "prompt_text", "session_token", "urgency"]
+    );
+    assert_eq!(
+        serde_json::to_value(&urgent).expect("urgent request serializes")["urgency"],
+        "high"
+    );
+
+    let dated = base
+        .clone()
+        .with_due_on(DueDate::parse("2026-04-30").expect("valid calendar day"));
+    assert_eq!(
+        sorted_request_keys(&dated),
+        ["due_on", "idempotency_key", "prompt_text", "session_token"]
+    );
+    assert_eq!(
+        serde_json::to_value(&dated).expect("dated request serializes")["due_on"],
+        "2026-04-30"
+    );
+
+    let keyed = base
+        .clone()
+        .with_dedupe_key(MetaTaskDedupeKey::parse("intake:42").expect("valid dedupe key"));
+    assert_eq!(
+        sorted_request_keys(&keyed),
+        [
+            "dedupe_key",
+            "idempotency_key",
+            "prompt_text",
+            "session_token"
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(&keyed).expect("keyed request serializes")["dedupe_key"],
+        "intake:42"
+    );
+}
+
+#[test]
+fn submit_meta_task_supersedes_keep_order_and_drop_duplicates() {
+    let request = SubmitMetaTaskReq::try_from_raw_parts("session-1", "replace work", "idem-submit")
+        .expect("valid submit-meta-task request")
+        .with_supersedes([
+            MetaTaskId::parse("meta-2").expect("valid meta-task id"),
+            MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+            MetaTaskId::parse("meta-2").expect("valid meta-task id"),
+        ]);
+
+    assert_eq!(
+        request.supersedes,
+        [
+            MetaTaskId::parse("meta-2").expect("valid meta-task id"),
+            MetaTaskId::parse("meta-1").expect("valid meta-task id"),
+        ]
+    );
+    let value = serde_json::to_value(&request).expect("submit request serializes");
+    assert_eq!(value["supersedes"], json!(["meta-2", "meta-1"]));
+    assert_eq!(
+        sorted_request_keys(&request),
+        [
+            "idempotency_key",
+            "prompt_text",
+            "session_token",
+            "supersedes"
+        ]
+    );
+}
+
+#[test]
+fn cancel_meta_task_request_omits_absent_closure() {
+    let request = CancelMetaTaskReq::try_from_raw_parts("session-1", "meta-1", "idem-cancel")
+        .expect("valid cancel-meta-task request");
+    let value = serde_json::to_value(&request).expect("cancel request serializes");
+
+    assert_eq!(
+        sorted_request_keys(&request),
+        ["idempotency_key", "meta_task_id", "session_token"]
+    );
+    assert!(value.get("closure").is_none());
+
+    let superseded = request.clone().with_closure(MetaTaskClosure::Superseded);
+    let value = serde_json::to_value(&superseded).expect("cancel request serializes");
+    assert_eq!(value["closure"], "superseded");
+    assert_eq!(
+        sorted_request_keys(&superseded),
+        [
+            "closure",
+            "idempotency_key",
+            "meta_task_id",
+            "session_token"
+        ]
+    );
+}
+
+#[test]
+fn complete_meta_task_request_omits_absent_closure() {
+    let request = CompleteMetaTaskReq::try_from_raw_parts("session-1", "meta-1", "idem-complete")
+        .expect("valid complete-meta-task request");
+
+    assert_eq!(
+        sorted_request_keys(&request),
+        ["idempotency_key", "meta_task_id", "session_token"]
+    );
+
+    let dropped = request
+        .clone()
+        .with_closure(MetaTaskClosure::UpstreamClosed);
+    let value = serde_json::to_value(&dropped).expect("complete request serializes");
+    assert_eq!(value["closure"], "upstream_closed");
+}
+
+#[test]
+fn annotation_changes_serialize_as_tagged_values() {
+    let acked = MetaTaskAnnotationChange::Set(MetaTaskAnnotationValue::acked(true));
+    let encoded = serde_json::to_value(&acked).expect("annotation change serializes");
+    assert_eq!(encoded.to_string(), r#"{"set":{"acked":true}}"#);
+    let decoded: MetaTaskAnnotationChange = serde_json::from_value(encoded).expect("deserializes");
+    assert_eq!(decoded, acked);
+
+    let clear = MetaTaskAnnotationChange::Clear(MetaTaskAnnotationKey::Tier);
+    let encoded = serde_json::to_value(&clear).expect("annotation change serializes");
+    assert_eq!(encoded.to_string(), r#"{"clear":"tier"}"#);
+    let decoded: MetaTaskAnnotationChange = serde_json::from_value(encoded).expect("deserializes");
+    assert_eq!(decoded, clear);
+
+    let tier = MetaTaskAnnotationValue::tier("gold").expect("valid tier");
+    let request = AnnotateMetaTaskReq::try_from_raw_parts(
+        "session-1",
+        "meta-1",
+        MetaTaskAnnotationChange::Set(tier),
+        "idem-annotate",
+    )
+    .expect("valid annotate-meta-task request");
+    assert_eq!(
+        sorted_request_keys(&request),
+        ["change", "idempotency_key", "meta_task_id", "session_token"]
+    );
+}
+
+#[test]
+fn annotation_value_constructors_trim_and_validate() {
+    let verdict = MetaTaskAnnotationValue::verdict("  upheld  ").expect("valid verdict");
+    assert_eq!(
+        verdict,
+        MetaTaskAnnotationValue::Verdict("upheld".to_owned())
+    );
+    assert_eq!(verdict.key(), MetaTaskAnnotationKey::Verdict);
+    assert_eq!(
+        serde_json::to_value(&verdict).expect("annotation value serializes")["verdict"],
+        "upheld"
+    );
+
+    let acked = MetaTaskAnnotationValue::acked(false);
+    assert_eq!(acked, MetaTaskAnnotationValue::Acked(false));
+    assert_eq!(acked.key(), MetaTaskAnnotationKey::Acked);
+    assert_eq!(
+        MetaTaskAnnotationValue::tier("gold")
+            .expect("valid tier")
+            .key(),
+        MetaTaskAnnotationKey::Tier
+    );
+    assert_eq!(
+        MetaTaskAnnotationValue::entity("customer-1")
+            .expect("valid entity")
+            .key(),
+        MetaTaskAnnotationKey::Entity
+    );
+
+    let cases = [
+        (MetaTaskAnnotationValue::verdict(" "), "verdict"),
+        (MetaTaskAnnotationValue::tier(String::new()), "tier"),
+        (MetaTaskAnnotationValue::entity("x".repeat(257)), "entity"),
+        (MetaTaskAnnotationValue::verdict("split\nline"), "verdict"),
+    ];
+    for (result, label) in cases {
+        let err = result.expect_err("invalid annotation value must be rejected");
+        let expected = format!("invalid {label}");
+        assert!(
+            err.to_string().contains(&expected),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
+fn meta_task_text_fields_reject_blank_and_oversized_values() {
+    assert!(MetaTaskTitle::parse("ship the fix").is_ok());
+    assert!(MetaTaskTitle::parse(" ").is_err());
+    assert!(MetaTaskTitle::parse(" padded").is_err());
+    assert!(MetaTaskTitle::parse("x".repeat(513)).is_err());
+
+    assert!(MetaTaskDedupeKey::parse("intake:42").is_ok());
+    assert!(MetaTaskDedupeKey::parse(" ").is_err());
+    assert!(MetaTaskDedupeKey::parse(" padded").is_err());
+    assert!(MetaTaskDedupeKey::parse("x".repeat(257)).is_err());
+    assert!(MetaTaskDedupeKey::parse("split\nline").is_err());
 }

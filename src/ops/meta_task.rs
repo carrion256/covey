@@ -4,20 +4,26 @@ use std::time::Instant;
 
 use rusqlite::Transaction;
 use rusqlite::params;
+use serde::Serialize;
 
 use crate::{
     Covey,
     error::{CoveyError, Result},
     model::{
-        ClaimState, CoveyTypeValidationError, EventType, LinkMetaTaskSourceReq,
-        MetaTaskSourceLinkDraft, MetaTaskSourceLinkProvenance, MetaTaskState, MetaTaskStatus,
-        MetaTaskSummary, ObjectType, ReadyQueueState, SessionRole, SubtaskState, claim_state_name,
-        meta_task_source_link_origin_name, meta_task_state_name, ready_queue_state_name,
-        subtask_state_name,
+        AnnotateMetaTaskReq, CancelMetaTaskReq, ClaimState, CompleteMetaTaskReq,
+        CoveyTypeValidationError, DueDate, EventType, LinkMetaTaskSourceReq, MetaTask,
+        MetaTaskAnnotationChange, MetaTaskAnnotationValue, MetaTaskClosure, MetaTaskHandle,
+        MetaTaskId, MetaTaskListQuery, MetaTaskSourceLinkDraft, MetaTaskSourceLinkProvenance,
+        MetaTaskState, MetaTaskStatus, MetaTaskSubmission, MetaTaskSummary, MetaTaskTitle,
+        MetaTaskUrgency, ObjectType, ReadyQueueState, SessionRole, SubmitMetaTaskReq, SubtaskState,
+        TimestampMs, claim_state_name, meta_task_annotation_key_name, meta_task_closure_name,
+        meta_task_state_name, meta_task_urgency_name, ready_queue_state_name, subtask_state_name,
     },
     queries::{
-        load_meta_task_source_link_tx, load_meta_task_summaries_tx, load_meta_task_tx,
-        load_subtasks_for_meta_task_tx,
+        count_open_subtasks_for_meta_task_tx, load_meta_task_annotations_tx,
+        load_meta_task_dedupe_tx, load_meta_task_id_for_handle_tx, load_meta_task_source_link_tx,
+        load_meta_task_summary_page_tx, load_meta_task_superseded_by_tx,
+        load_meta_task_supersedes_tx, load_meta_task_tx, load_subtasks_for_meta_task_tx,
     },
     store::{append_session_event, load_claims_for_meta_task},
     validators::{
@@ -25,155 +31,130 @@ use crate::{
     },
 };
 
+/// Largest page a discovery listing returns in one call.
+const MAX_LIST_LIMIT: usize = 500;
+
 impl Covey {
-    /// Creates a new planning meta-task.
-    pub fn submit_meta_task(&self, req: crate::model::SubmitMetaTaskReq) -> Result<String> {
+    /// Creates a new planning meta-task and returns its id.
+    pub fn submit_meta_task(&self, req: SubmitMetaTaskReq) -> Result<String> {
+        self.submit_meta_task_reporting(req)
+            .map(|submission| submission.meta_task_id)
+    }
+
+    /// Creates a new planning meta-task, reporting whether a dedupe key
+    /// resolved the submission to a task the principal already filed.
+    pub fn submit_meta_task_reporting(&self, req: SubmitMetaTaskReq) -> Result<MetaTaskSubmission> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            crate::store::with_idempotent_mutation(
+            let session =
+                require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
+            // A dedupe key resolves first and writes nothing at all: no task, no
+            // event, and no idempotency row.
+            if let Some(dedupe_key) = req.dedupe_key.as_ref()
+                && let Some(existing) = load_meta_task_dedupe_tx(
+                    tx,
+                    session.agent_principal_id.as_str(),
+                    dedupe_key.as_str(),
+                )?
+            {
+                return Ok(MetaTaskSubmission {
+                    meta_task_id: existing.to_string(),
+                    deduplicated: true,
+                });
+            }
+            let meta_task_id = crate::store::with_idempotent_mutation(
                 tx,
                 req.session_token.as_str(),
                 "submit_meta_task",
                 &req.idempotency_key,
                 &req,
-                crate::model::TimestampMs::parse(now)?,
-                || {
-                    submit_meta_task_tx(
-                        tx,
-                        req.session_token.as_str(),
-                        &req.prompt_text,
-                        req.source_link.as_ref(),
-                        &req,
-                        now,
-                    )
-                },
-            )
+                TimestampMs::parse(now)?,
+                || submit_meta_task_with_tracking_tx(tx, &req, now),
+            )?;
+            Ok(MetaTaskSubmission {
+                meta_task_id,
+                deduplicated: false,
+            })
         });
         self.log_operation(
             "submit_meta_task",
             req.session_token.as_str(),
             started_at,
             &result,
-            |meta_task_id| vec![format!("meta_task:{meta_task_id}")],
+            |submission| vec![format!("meta_task:{}", submission.meta_task_id)],
         );
         result
     }
 
     /// Cancels a meta-task that has not already reached a terminal state.
-    pub fn cancel_meta_task(&self, req: crate::model::CancelMetaTaskReq) -> Result<()> {
+    pub fn cancel_meta_task(&self, req: CancelMetaTaskReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
-                &req.session_token,
+                req.session_token.as_str(),
                 "cancel_meta_task",
                 &req.idempotency_key,
                 &req,
-                crate::model::TimestampMs::parse(now)?,
-                || {
-                    require_role(tx, &req.session_token, &[SessionRole::Orchestrator])?;
-                    ensure_length("meta_task_id", &req.meta_task_id, MAX_OBJECT_ID_LEN)?;
-                    let meta = load_meta_task_tx(tx, req.meta_task_id.as_str())?;
-                    ensure_transition(
-                        meta.state(),
-                        MetaTaskState::Cancelled,
-                        ObjectType::MetaTask,
-                        !matches!(
-                            meta.state(),
-                            MetaTaskState::Completed | MetaTaskState::Cancelled
-                        ),
-                    )?;
-                    let updated = tx.execute(
-                        "UPDATE meta_tasks SET state = ?2, updated_at = ?3 WHERE meta_task_id = ?1 AND state NOT IN (?4, ?5)",
-                        params![
-                            req.meta_task_id.as_str(),
-                            meta_task_state_name(MetaTaskState::Cancelled),
-                            now,
-                            meta_task_state_name(MetaTaskState::Completed),
-                            meta_task_state_name(MetaTaskState::Cancelled)
-                        ],
-                    )?;
-                    if updated != 1 {
-                        return Err(CoveyError::IllegalTransition {
-                            from: meta.state().into(),
-                            to: MetaTaskState::Cancelled.into(),
-                            object: ObjectType::MetaTask,
-                        });
-                    }
-                    let held_claims = load_claims_for_meta_task(tx, req.meta_task_id.as_str())?;
-                    for claim in &held_claims {
-                        tx.execute(
-                            "UPDATE claims SET state = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4",
-                            params![
-                                claim.claim_id,
-                                claim_state_name(ClaimState::Revoked),
-                                now,
-                                claim_state_name(ClaimState::Held)
-                            ],
-                        )?;
-                        tx.execute(
-                            "UPDATE sessions SET active_subtask_id = NULL, updated_at = ?3 WHERE session_token = ?1 AND active_subtask_id = ?2",
-                            params![claim.owner_session_token, claim.subtask_id, now],
-                        )?;
-                    }
-                    tx.execute(
-                        r#"
-                        UPDATE ready_queue
-                        SET state = ?2,
-                            claimed_by_session_token = NULL,
-                            claim_lease_deadline = NULL,
-                            updated_at = ?3
-                        WHERE subtask_id IN (
-                            SELECT subtask_id FROM subtasks WHERE meta_task_id = ?1
-                        )
-                          AND state IN (?4, ?5)
-                        "#,
-                        params![
-                            req.meta_task_id.as_str(),
-                            ready_queue_state_name(ReadyQueueState::Cancelled),
-                            now,
-                            ready_queue_state_name(ReadyQueueState::Queued),
-                            ready_queue_state_name(ReadyQueueState::InFlight)
-                        ],
-                    )?;
-                    tx.execute(
-                        r#"
-                        UPDATE subtasks
-                        SET state = CASE
-                                WHEN state IN (?2, ?3, ?4, ?5, ?6) THEN state
-                                ELSE ?7
-                            END,
-                            current_claim_id = NULL,
-                            updated_at = ?8
-                        WHERE meta_task_id = ?1
-                        "#,
-                        params![
-                            req.meta_task_id.as_str(),
-                            subtask_state_name(SubtaskState::Applied),
-                            subtask_state_name(SubtaskState::Completed),
-                            subtask_state_name(SubtaskState::Failed),
-                            subtask_state_name(SubtaskState::Abandoned),
-                            subtask_state_name(SubtaskState::Decided),
-                            subtask_state_name(SubtaskState::Abandoned),
-                            now
-                        ],
-                    )?;
-                    append_session_event(
-                        tx,
-                        EventType::MetaTaskCancelled,
-                        ObjectType::MetaTask,
-                        &req.meta_task_id,
-                        &req.session_token,
-                        &req,
-                        now,
-                    )?;
-                    Ok(())
-                },
+                TimestampMs::parse(now)?,
+                || cancel_meta_task_tx(tx, &req, now),
             )
         });
         self.log_operation(
             "cancel_meta_task",
-            &req.session_token,
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |_| vec![format!("meta_task:{}", req.meta_task_id)],
+        );
+        result
+    }
+
+    /// Completes a meta-task that has no open subtasks.
+    ///
+    /// The task moves to `completed`, stores the typed closure (`done` when the
+    /// request names none), and records one `meta_task_completed` event. It
+    /// tears nothing down: no claim is revoked and no subtask is abandoned.
+    pub fn complete_meta_task(&self, req: CompleteMetaTaskReq) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                req.session_token.as_str(),
+                "complete_meta_task",
+                &req.idempotency_key,
+                &req,
+                TimestampMs::parse(now)?,
+                || complete_meta_task_tx(tx, &req, now),
+            )
+        });
+        self.log_operation(
+            "complete_meta_task",
+            req.session_token.as_str(),
+            started_at,
+            &result,
+            |_| vec![format!("meta_task:{}", req.meta_task_id)],
+        );
+        result
+    }
+
+    /// Sets or clears one annotation of a meta task.
+    pub fn annotate_meta_task(&self, req: AnnotateMetaTaskReq) -> Result<()> {
+        let started_at = Instant::now();
+        let result = self.with_write_tx(|tx, now| {
+            crate::store::with_idempotent_mutation(
+                tx,
+                req.session_token.as_str(),
+                "annotate_meta_task",
+                &req.idempotency_key,
+                &req,
+                TimestampMs::parse(now)?,
+                || annotate_meta_task_tx(tx, &req, now),
+            )
+        });
+        self.log_operation(
+            "annotate_meta_task",
+            req.session_token.as_str(),
             started_at,
             &result,
             |_| vec![format!("meta_task:{}", req.meta_task_id)],
@@ -186,22 +167,22 @@ impl Covey {
     /// Provenance is set once: a meta task that already carries a link is
     /// refused with [`CoveyError::SourceLinkExists`]. Replaying the same
     /// idempotency key returns the original success without a second row.
-    pub fn link_meta_task_source(&self, req: crate::model::LinkMetaTaskSourceReq) -> Result<()> {
+    pub fn link_meta_task_source(&self, req: LinkMetaTaskSourceReq) -> Result<()> {
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
             crate::store::with_idempotent_mutation(
                 tx,
-                &req.session_token,
+                req.session_token.as_str(),
                 "link_meta_task_source",
                 &req.idempotency_key,
                 &req,
-                crate::model::TimestampMs::parse(now)?,
+                TimestampMs::parse(now)?,
                 || link_meta_task_source_tx(tx, &req, now),
             )
         });
         self.log_operation(
             "link_meta_task_source",
-            &req.session_token,
+            req.session_token.as_str(),
             started_at,
             &result,
             |_| vec![format!("meta_task:{}", req.meta_task_id)],
@@ -209,18 +190,31 @@ impl Covey {
         result
     }
 
-    /// Returns the current persisted status for a meta-task and its subtasks.
+    /// Returns the current persisted status for a meta-task and its subtasks,
+    /// with its annotations and its replacement links.
     pub fn meta_task_status(&self, meta_task_id: &str) -> Result<MetaTaskStatus> {
         let started_at = Instant::now();
         let result = self.with_read_tx(|tx| {
             let meta_task = load_meta_task_tx(tx, meta_task_id)?;
             let source_link = load_meta_task_source_link_tx(tx, meta_task_id)?;
             let meta_task = meta_task.with_source_link(source_link);
+            let annotations =
+                load_meta_task_annotations_tx(tx, std::slice::from_ref(&meta_task.meta_task_id))?
+                    .remove(&meta_task.meta_task_id)
+                    .unwrap_or_default();
+            let supersedes = load_meta_task_supersedes_tx(tx, meta_task_id)?;
+            let superseded_by = load_meta_task_superseded_by_tx(tx, meta_task_id)?;
             let subtasks = load_subtasks_for_meta_task_tx(tx, meta_task_id)?
                 .into_iter()
                 .map(crate::model::SubtaskView::try_from)
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             MetaTaskStatus::new(meta_task, subtasks)
+                .map(|status| {
+                    status
+                        .with_annotations(annotations)
+                        .with_supersedes(supersedes)
+                        .with_superseded_by(superseded_by)
+                })
                 .map_err(|reason| CoveyError::InvalidObservabilityRow { reason })
         });
         self.log_operation(
@@ -229,6 +223,20 @@ impl Covey {
             started_at,
             &result,
             |status| vec![format!("meta_task:{}", status.meta_task().meta_task_id)],
+        );
+        result
+    }
+
+    /// Resolves the meta task a store-issued handle numbers.
+    pub fn meta_task_id_for_handle(&self, handle: MetaTaskHandle) -> Result<MetaTaskId> {
+        let started_at = Instant::now();
+        let result = self.with_read_tx(|tx| load_meta_task_id_for_handle_tx(tx, handle));
+        self.log_operation(
+            "meta_task_id_for_handle",
+            "system",
+            started_at,
+            &result,
+            |meta_task_id| vec![format!("meta_task:{meta_task_id}")],
         );
         result
     }
@@ -242,15 +250,19 @@ impl Covey {
     /// Returns an error when `limit` is outside `1..=500` or `offset`
     /// exceeds the SQLite signed 64-bit range.
     pub fn list_meta_tasks(&self, limit: usize, offset: u64) -> Result<Vec<MetaTaskSummary>> {
-        const MAX_LIST_LIMIT: usize = 500;
-        if !(1..=MAX_LIST_LIMIT).contains(&limit) {
-            return Err(CoveyTypeValidationError::new("limit", "must be between 1 and 500").into());
-        }
-        let offset = i64::try_from(offset).map_err(|_| {
-            CoveyTypeValidationError::new("offset", "exceeds the maximum page offset")
-        })?;
+        self.list_meta_tasks_with(&MetaTaskListQuery::new(limit, offset))
+    }
+
+    /// Returns one filtered, ordered page of meta-task summaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query's limit is outside `1..=500` or its
+    /// offset exceeds the SQLite signed 64-bit range.
+    pub fn list_meta_tasks_with(&self, query: &MetaTaskListQuery) -> Result<Vec<MetaTaskSummary>> {
+        validate_meta_task_page(query.limit(), query.offset())?;
         let started_at = Instant::now();
-        let result = self.with_read_tx(|tx| load_meta_task_summaries_tx(tx, limit, offset));
+        let result = self.with_read_tx(|tx| load_meta_task_summary_page_tx(tx, query));
         self.log_operation(
             "list_meta_tasks",
             "system",
@@ -267,6 +279,280 @@ impl Covey {
     }
 }
 
+fn validate_meta_task_page(limit: usize, offset: u64) -> Result<()> {
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(CoveyTypeValidationError::new("limit", "must be between 1 and 500").into());
+    }
+    i64::try_from(offset)
+        .map_err(|_| CoveyTypeValidationError::new("offset", "exceeds the maximum page offset"))?;
+    Ok(())
+}
+
+/// Cancels one meta task, storing the resolved closure.
+///
+/// `closure` is the value written on the row; the event payload carries the
+/// same value, so a reader never has to re-derive a verb's default.
+fn cancel_meta_task_tx(tx: &Transaction<'_>, req: &CancelMetaTaskReq, now: i64) -> Result<()> {
+    require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
+    ensure_length("meta_task_id", req.meta_task_id.as_str(), MAX_OBJECT_ID_LEN)?;
+    let meta_task = load_meta_task_tx(tx, req.meta_task_id.as_str())?;
+    let closure = req.closure.unwrap_or(MetaTaskClosure::Dropped);
+    let event_payload = CancelMetaTaskReq {
+        session_token: req.session_token.clone(),
+        meta_task_id: req.meta_task_id.clone(),
+        closure: Some(closure),
+        idempotency_key: req.idempotency_key.clone(),
+    };
+    retire_meta_task_tx(
+        tx,
+        &meta_task,
+        req.session_token.as_str(),
+        closure,
+        &event_payload,
+        now,
+    )
+}
+
+/// Completes one meta task without tearing anything down.
+fn complete_meta_task_tx(tx: &Transaction<'_>, req: &CompleteMetaTaskReq, now: i64) -> Result<()> {
+    require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
+    ensure_length("meta_task_id", req.meta_task_id.as_str(), MAX_OBJECT_ID_LEN)?;
+    let meta_task = load_meta_task_tx(tx, req.meta_task_id.as_str())?;
+    ensure_transition(
+        meta_task.state(),
+        MetaTaskState::Completed,
+        ObjectType::MetaTask,
+        !matches!(meta_task.state(), MetaTaskState::Cancelled),
+    )?;
+    let open_subtasks = count_open_subtasks_for_meta_task_tx(tx, req.meta_task_id.as_str())?;
+    if open_subtasks > 0 {
+        return Err(CoveyError::MetaTaskHasOpenSubtasks {
+            meta_task_id: req.meta_task_id.to_string(),
+            open_subtasks,
+        });
+    }
+    let closure = req.closure.unwrap_or(MetaTaskClosure::Done);
+    let updated = tx.execute(
+        r#"
+        UPDATE meta_tasks
+        SET state = ?2, closure = ?3, updated_at = ?4
+        WHERE meta_task_id = ?1 AND state != ?5
+        "#,
+        params![
+            req.meta_task_id.as_str(),
+            meta_task_state_name(MetaTaskState::Completed),
+            meta_task_closure_name(closure),
+            now,
+            meta_task_state_name(MetaTaskState::Cancelled),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(CoveyError::IllegalTransition {
+            from: meta_task.state().into(),
+            to: MetaTaskState::Completed.into(),
+            object: ObjectType::MetaTask,
+        });
+    }
+    let event_payload = CompleteMetaTaskReq {
+        session_token: req.session_token.clone(),
+        meta_task_id: req.meta_task_id.clone(),
+        closure: Some(closure),
+        idempotency_key: req.idempotency_key.clone(),
+    };
+    append_session_event(
+        tx,
+        EventType::MetaTaskCompleted,
+        ObjectType::MetaTask,
+        req.meta_task_id.as_str(),
+        req.session_token.as_str(),
+        &event_payload,
+        now,
+    )?;
+    Ok(())
+}
+
+/// Writes one annotation and records the request as one event.
+fn annotate_meta_task_tx(tx: &Transaction<'_>, req: &AnnotateMetaTaskReq, now: i64) -> Result<()> {
+    require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
+    ensure_length("meta_task_id", req.meta_task_id.as_str(), MAX_OBJECT_ID_LEN)?;
+    load_meta_task_tx(tx, req.meta_task_id.as_str())?;
+    match &req.change {
+        MetaTaskAnnotationChange::Set(value) => {
+            let key = value.key();
+            tx.execute(
+                r#"
+                INSERT INTO meta_task_annotations (meta_task_id, key, value, updated_by, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(meta_task_id, key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_by = excluded.updated_by,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    req.meta_task_id.as_str(),
+                    meta_task_annotation_key_name(key),
+                    stored_annotation_value(value),
+                    req.session_token.as_str(),
+                    now,
+                ],
+            )?;
+        }
+        MetaTaskAnnotationChange::Clear(key) => {
+            // Clearing a key that was never set is the same successful no-op as
+            // clearing one whose value is already gone.
+            tx.execute(
+                "DELETE FROM meta_task_annotations WHERE meta_task_id = ?1 AND key = ?2",
+                params![
+                    req.meta_task_id.as_str(),
+                    meta_task_annotation_key_name(*key)
+                ],
+            )?;
+        }
+    }
+    append_session_event(
+        tx,
+        EventType::MetaTaskAnnotated,
+        ObjectType::MetaTask,
+        req.meta_task_id.as_str(),
+        req.session_token.as_str(),
+        req,
+        now,
+    )?;
+    Ok(())
+}
+
+/// The text one annotation value is stored as.
+///
+/// `acked` holds the `true`/`false` literals the table constrains; every other
+/// key holds its already-trimmed text.
+fn stored_annotation_value(value: &MetaTaskAnnotationValue) -> String {
+    match value {
+        MetaTaskAnnotationValue::Verdict(text)
+        | MetaTaskAnnotationValue::Tier(text)
+        | MetaTaskAnnotationValue::Entity(text) => text.clone(),
+        MetaTaskAnnotationValue::Acked(flag) => flag.to_string(),
+    }
+}
+
+/// Retires one meta task and everything it holds.
+///
+/// Refuses a task that already reached a terminal state, stores `closure` on
+/// the row, revokes held claims, cancels queued work, abandons open subtasks,
+/// and records the cancellation event with `event_payload`.
+fn retire_meta_task_tx<T: Serialize>(
+    tx: &Transaction<'_>,
+    meta_task: &MetaTask,
+    session_token: &str,
+    closure: MetaTaskClosure,
+    event_payload: &T,
+    now: i64,
+) -> Result<()> {
+    let meta_task_id = meta_task.meta_task_id.as_str();
+    ensure_transition(
+        meta_task.state(),
+        MetaTaskState::Cancelled,
+        ObjectType::MetaTask,
+        !matches!(
+            meta_task.state(),
+            MetaTaskState::Completed | MetaTaskState::Cancelled
+        ),
+    )?;
+    let updated = tx.execute(
+        r#"
+        UPDATE meta_tasks
+        SET state = ?2, closure = ?3, updated_at = ?4
+        WHERE meta_task_id = ?1 AND state NOT IN (?5, ?6)
+        "#,
+        params![
+            meta_task_id,
+            meta_task_state_name(MetaTaskState::Cancelled),
+            meta_task_closure_name(closure),
+            now,
+            meta_task_state_name(MetaTaskState::Completed),
+            meta_task_state_name(MetaTaskState::Cancelled),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(CoveyError::IllegalTransition {
+            from: meta_task.state().into(),
+            to: MetaTaskState::Cancelled.into(),
+            object: ObjectType::MetaTask,
+        });
+    }
+    let held_claims = load_claims_for_meta_task(tx, meta_task_id)?;
+    for claim in &held_claims {
+        tx.execute(
+            "UPDATE claims SET state = ?2, updated_at = ?3 WHERE claim_id = ?1 AND state = ?4",
+            params![
+                claim.claim_id,
+                claim_state_name(ClaimState::Revoked),
+                now,
+                claim_state_name(ClaimState::Held),
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET active_subtask_id = NULL, updated_at = ?3 WHERE session_token = ?1 AND active_subtask_id = ?2",
+            params![claim.owner_session_token, claim.subtask_id, now],
+        )?;
+    }
+    tx.execute(
+        r#"
+        UPDATE ready_queue
+        SET state = ?2,
+            claimed_by_session_token = NULL,
+            claim_lease_deadline = NULL,
+            updated_at = ?3
+        WHERE subtask_id IN (
+            SELECT subtask_id FROM subtasks WHERE meta_task_id = ?1
+        )
+          AND state IN (?4, ?5)
+        "#,
+        params![
+            meta_task_id,
+            ready_queue_state_name(ReadyQueueState::Cancelled),
+            now,
+            ready_queue_state_name(ReadyQueueState::Queued),
+            ready_queue_state_name(ReadyQueueState::InFlight),
+        ],
+    )?;
+    tx.execute(
+        r#"
+        UPDATE subtasks
+        SET state = CASE
+                WHEN state IN (?2, ?3, ?4, ?5, ?6) THEN state
+                ELSE ?7
+            END,
+            current_claim_id = NULL,
+            updated_at = ?8
+        WHERE meta_task_id = ?1
+        "#,
+        params![
+            meta_task_id,
+            subtask_state_name(SubtaskState::Applied),
+            subtask_state_name(SubtaskState::Completed),
+            subtask_state_name(SubtaskState::Failed),
+            subtask_state_name(SubtaskState::Abandoned),
+            subtask_state_name(SubtaskState::Decided),
+            subtask_state_name(SubtaskState::Abandoned),
+            now,
+        ],
+    )?;
+    append_session_event(
+        tx,
+        EventType::MetaTaskCancelled,
+        ObjectType::MetaTask,
+        meta_task_id,
+        session_token,
+        event_payload,
+        now,
+    )?;
+    Ok(())
+}
+
+/// Creates a meta task with no typed tracking fields.
+///
+/// This is the plain submission path used by importers: it writes a planning
+/// row, an optional source link, and one submission event.
 pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
     tx: &Transaction<'_>,
     session_token: &str,
@@ -278,22 +564,17 @@ pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
     require_role(tx, session_token, &[SessionRole::Orchestrator])?;
     ensure_length("prompt_text", prompt_text, MAX_PROMPT_LEN)?;
     let meta_task_id = crate::model::make_id("meta");
-    tx.execute(
-        r#"
-        INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-        "#,
-        params![
-            meta_task_id,
-            prompt_text,
-            meta_task_state_name(MetaTaskState::Planning),
-            session_token,
-            now
-        ],
+    insert_meta_task_row_tx(
+        tx,
+        &meta_task_id,
+        session_token,
+        prompt_text,
+        source_link,
+        None,
+        None,
+        None,
+        now,
     )?;
-    if let Some(source_link) = source_link {
-        insert_meta_task_source_link_tx(tx, &meta_task_id, source_link, session_token, now)?;
-    }
     append_session_event(
         tx,
         EventType::MetaTaskSubmitted,
@@ -304,6 +585,158 @@ pub(crate) fn submit_meta_task_tx<T: serde::Serialize>(
         now,
     )?;
     Ok(meta_task_id)
+}
+
+/// Creates one meta task from a submission request that carries every tracking
+/// field: typed columns, a dedupe row, and the tasks it replaces.
+fn submit_meta_task_with_tracking_tx(
+    tx: &Transaction<'_>,
+    req: &SubmitMetaTaskReq,
+    now: i64,
+) -> Result<String> {
+    let session = require_role(tx, req.session_token.as_str(), &[SessionRole::Orchestrator])?;
+    ensure_length("prompt_text", req.prompt_text.as_str(), MAX_PROMPT_LEN)?;
+    // Duplicates are folded while first-seen order is kept: a repeated id would
+    // otherwise retry a replacement that the first occurrence already wrote.
+    let mut supersedes: Vec<MetaTaskId> = Vec::with_capacity(req.supersedes.len());
+    for meta_task_id in &req.supersedes {
+        if !supersedes.contains(meta_task_id) {
+            supersedes.push(meta_task_id.clone());
+        }
+    }
+    let meta_task_id = crate::model::make_id("meta");
+    // Every replacement is checked before the new row exists, so a refused
+    // submission leaves the store exactly as it was.
+    for replaced_id in &supersedes {
+        if replaced_id.as_str() == meta_task_id.as_str() {
+            return Err(CoveyTypeValidationError::new(
+                "supersedes",
+                "must not name the meta task being submitted",
+            )
+            .into());
+        }
+        let replaced = load_meta_task_tx(tx, replaced_id.as_str())?;
+        if let Some(superseding) = load_meta_task_superseded_by_tx(tx, replaced_id.as_str())? {
+            return Err(CoveyError::MetaTaskAlreadySuperseded {
+                meta_task_id: replaced.meta_task_id.to_string(),
+                superseded_by: superseding.to_string(),
+            });
+        }
+    }
+    insert_meta_task_row_tx(
+        tx,
+        &meta_task_id,
+        req.session_token.as_str(),
+        req.prompt_text.as_str(),
+        req.source_link.as_ref(),
+        req.title.as_ref(),
+        req.urgency,
+        req.due_on.as_ref(),
+        now,
+    )?;
+    if let Some(dedupe_key) = req.dedupe_key.as_ref() {
+        tx.execute(
+            r#"
+            INSERT INTO meta_task_dedupe_keys (
+                agent_principal_id, dedupe_key, meta_task_id, created_at
+            ) VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                session.agent_principal_id.as_str(),
+                dedupe_key.as_str(),
+                meta_task_id,
+                now,
+            ],
+        )?;
+    }
+    for replaced_id in &supersedes {
+        let replaced = load_meta_task_tx(tx, replaced_id.as_str())?;
+        if matches!(
+            replaced.state(),
+            MetaTaskState::Planning | MetaTaskState::Active
+        ) {
+            // A replaced task that is still open is retired exactly as a cancel
+            // retires it, with `superseded` as the stored closure. Its payload
+            // reuses the cancel request shape so subscribers read one payload
+            // type for every retirement.
+            let event_payload = CancelMetaTaskReq {
+                session_token: req.session_token.clone(),
+                meta_task_id: replaced.meta_task_id.clone(),
+                closure: Some(MetaTaskClosure::Superseded),
+                idempotency_key: req.idempotency_key.clone(),
+            };
+            retire_meta_task_tx(
+                tx,
+                &replaced,
+                req.session_token.as_str(),
+                MetaTaskClosure::Superseded,
+                &event_payload,
+                now,
+            )?;
+        }
+        // A replaced task that already finished keeps its state; the link row
+        // is written either way.
+        tx.execute(
+            r#"
+            INSERT INTO meta_task_supersedes (
+                superseding_meta_task_id, superseded_meta_task_id, superseded_at
+            ) VALUES (?1, ?2, ?3)
+            "#,
+            params![meta_task_id, replaced_id.as_str(), now],
+        )?;
+    }
+    append_session_event(
+        tx,
+        EventType::MetaTaskSubmitted,
+        ObjectType::MetaTask,
+        &meta_task_id,
+        req.session_token.as_str(),
+        req,
+        now,
+    )?;
+    Ok(meta_task_id)
+}
+
+/// Writes one meta task row.
+///
+/// `handle` is never written here: the store's trigger numbers the row, so a
+/// row inserted through SQL is numbered exactly like one inserted through the
+/// API.
+#[allow(clippy::too_many_arguments)]
+fn insert_meta_task_row_tx(
+    tx: &Transaction<'_>,
+    meta_task_id: &str,
+    session_token: &str,
+    prompt_text: &str,
+    source_link: Option<&MetaTaskSourceLinkDraft>,
+    title: Option<&MetaTaskTitle>,
+    urgency: Option<MetaTaskUrgency>,
+    due_on: Option<&DueDate>,
+    now: i64,
+) -> Result<()> {
+    let due_on_text = due_on.map(ToString::to_string);
+    tx.execute(
+        r#"
+        INSERT INTO meta_tasks (
+            meta_task_id, prompt_text, state, created_by, created_at, updated_at,
+            title, urgency, due_on
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)
+        "#,
+        params![
+            meta_task_id,
+            prompt_text,
+            meta_task_state_name(MetaTaskState::Planning),
+            session_token,
+            now,
+            title.map(MetaTaskTitle::as_str),
+            urgency.map(meta_task_urgency_name),
+            due_on_text.as_deref(),
+        ],
+    )?;
+    if let Some(source_link) = source_link {
+        insert_meta_task_source_link_tx(tx, meta_task_id, source_link, session_token, now)?;
+    }
+    Ok(())
 }
 
 /// Writes the one source-backlink row of a meta task.
@@ -329,10 +762,10 @@ fn insert_meta_task_source_link_tx(
             draft.url(),
             draft.received_at(),
             draft.path(),
-            meta_task_source_link_origin_name(draft.origin()),
+            crate::model::meta_task_source_link_origin_name(draft.origin()),
             draft.method(),
             linked_by,
-            now
+            now,
         ],
     )?;
     Ok(())

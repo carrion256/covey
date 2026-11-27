@@ -234,6 +234,8 @@ pub enum EventType {
     VcsPrPublicationRecorded,
     ProseApplyBlockerRecorded,
     MetaTaskSourceLinked,
+    MetaTaskCompleted,
+    MetaTaskAnnotated,
 }
 
 /// Covey-owned lifecycle state for apply worktrees retained as evidence.
@@ -505,6 +507,72 @@ pub(crate) const fn meta_task_source_link_origin_name(
     match origin {
         MetaTaskSourceLinkOrigin::Submitted => "submitted",
         MetaTaskSourceLinkOrigin::Backfilled => "backfilled",
+    }
+}
+
+/// Declared urgency of a meta task, as stored on the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetaTaskUrgency {
+    Low,
+    Medium,
+    High,
+}
+
+pub(crate) const fn meta_task_urgency_name(urgency: MetaTaskUrgency) -> &'static str {
+    match urgency {
+        MetaTaskUrgency::Low => "low",
+        MetaTaskUrgency::Medium => "medium",
+        MetaTaskUrgency::High => "high",
+    }
+}
+
+/// Typed reason a meta task finished, stored on the row when it terminates.
+///
+/// `Done` means the task's own work finished; `UpstreamClosed` means the work it
+/// tracked went away; `Superseded` means a replacement task took it over; and
+/// `Dropped` means it was abandoned without being finished. Cancellation
+/// defaults to `Dropped` and completion to `Done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetaTaskClosure {
+    Done,
+    UpstreamClosed,
+    Superseded,
+    Dropped,
+}
+
+pub(crate) const fn meta_task_closure_name(closure: MetaTaskClosure) -> &'static str {
+    match closure {
+        MetaTaskClosure::Done => "done",
+        MetaTaskClosure::UpstreamClosed => "upstream_closed",
+        MetaTaskClosure::Superseded => "superseded",
+        MetaTaskClosure::Dropped => "dropped",
+    }
+}
+
+/// Closed set of annotation keys a meta task may carry.
+///
+/// The store constrains the same set, so an annotation written through the API
+/// and one written by raw SQL share one vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetaTaskAnnotationKey {
+    Verdict,
+    Acked,
+    Tier,
+    Entity,
+}
+
+pub(crate) const fn meta_task_annotation_key_name(key: MetaTaskAnnotationKey) -> &'static str {
+    match key {
+        MetaTaskAnnotationKey::Verdict => "verdict",
+        MetaTaskAnnotationKey::Acked => "acked",
+        MetaTaskAnnotationKey::Tier => "tier",
+        MetaTaskAnnotationKey::Entity => "entity",
     }
 }
 

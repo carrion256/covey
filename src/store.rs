@@ -625,7 +625,13 @@ pub(crate) fn refresh_meta_task_state(
         |row| row.get::<_, i64>(0),
     )?;
     let desired_state = if has_subtasks == 0 {
-        MetaTaskState::Planning
+        // `meta complete` closes a task that has no subtasks. A refresh must
+        // not send that explicit completion back to planning.
+        if meta_task.state() == MetaTaskState::Completed {
+            MetaTaskState::Completed
+        } else {
+            MetaTaskState::Planning
+        }
     } else {
         let has_open_subtasks = tx.query_row(
             r#"
@@ -649,11 +655,19 @@ pub(crate) fn refresh_meta_task_state(
 
     if meta_task.state() != desired_state {
         tx.execute(
-            "UPDATE meta_tasks SET state = ?2, updated_at = ?3 WHERE meta_task_id = ?1 AND state != ?4",
+            r#"
+            UPDATE meta_tasks
+            SET state = ?2,
+                closure = CASE WHEN ?2 IN (?5, ?6) THEN closure ELSE NULL END,
+                updated_at = ?3
+            WHERE meta_task_id = ?1 AND state != ?4
+            "#,
             params![
                 meta_task_id,
                 meta_task_state_name(desired_state),
                 now,
+                meta_task_state_name(MetaTaskState::Cancelled),
+                meta_task_state_name(MetaTaskState::Completed),
                 meta_task_state_name(MetaTaskState::Cancelled)
             ],
         )?;

@@ -13,19 +13,20 @@ use super::{
     ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState, ArtifactDigest, ArtifactKind,
     ArtifactManifestPath, AttemptEvidenceDigest, AttemptFailureCode, AttemptSummary, BaseRev,
     ChangedPathsDigest, ClaimId, CommandTranscriptDigest, CompletionPolicy, ConflictId,
-    ConflictResolutionState, CoveyTypeValidationError, EvidencePolicy, FenceSeq, FindingsDigest,
-    IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs, MetaTaskId,
-    MetaTaskSourceLinkOrigin, ModelId, OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState,
-    OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason,
-    OperatorBlockerTargetKind, PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId,
-    ProseTasksetId, ProviderId, ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath,
-    ReservationId, ReservationScope, ReviewId, ReviewVerdict, RoutingKey, RuntimeContainerId,
-    RuntimeProcessId, ScopeClass, SessionRole, SessionToken, SettlementReconcileEvidenceId,
-    SettlementReconcileReason, SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle,
-    TimestampMs, VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId,
-    VcsPrPublicationKind, VcsPrPublicationStatus, VcsWorkspaceCleanliness, VcsWorkspaceId,
-    VcsWorkspaceKind, VcsWorkspaceObservationReason, VcsWorkspacePath, VcsWorkspaceRef,
-    VcsWorkspaceState, VerifierId,
+    ConflictResolutionState, CoveyTypeValidationError, DueDate, EvidencePolicy, FenceSeq,
+    FindingsDigest, IdempotencyKey, LandedCommitOid, LeaseDeadlineMs, LeaseDurationMs,
+    MetaTaskAnnotationKey, MetaTaskClosure, MetaTaskDedupeKey, MetaTaskId,
+    MetaTaskSourceLinkOrigin, MetaTaskTitle, MetaTaskUrgency, ModelId,
+    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
+    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerTargetKind,
+    PermissiveLandingReceiptDigest, PromptText, ProseApplyBlockerId, ProseTasksetId, ProviderId,
+    ProviderRunId, ProviderRunIdIssuer, QueueId, RepoopsPath, ReservationId, ReservationScope,
+    ReviewId, ReviewVerdict, RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass,
+    SessionRole, SessionToken, SettlementReconcileEvidenceId, SettlementReconcileReason,
+    SettlementTarget, SubtaskId, SubtaskPriority, SubtaskTitle, TimestampMs, VcsPacketStackEntryId,
+    VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind, VcsPrPublicationStatus,
+    VcsWorkspaceCleanliness, VcsWorkspaceId, VcsWorkspaceKind, VcsWorkspaceObservationReason,
+    VcsWorkspacePath, VcsWorkspaceRef, VcsWorkspaceState, VerifierId,
 };
 
 fn parse_idempotency_key(
@@ -214,6 +215,24 @@ pub struct SubmitMetaTaskReq {
     /// idempotency request hash of an unlinked submission stays unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_link: Option<MetaTaskSourceLinkDraft>,
+    /// Optional one-line title recorded next to the prompt text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<MetaTaskTitle>,
+    /// Optional declared urgency recorded next to the prompt text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgency: Option<MetaTaskUrgency>,
+    /// Optional calendar due date recorded next to the prompt text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<DueDate>,
+    /// Optional dedupe key scoping this task to one submitting principal.
+    ///
+    /// A principal that already holds the key receives the existing task
+    /// instead of a second row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<MetaTaskDedupeKey>,
+    /// Tasks this submission replaces, in replacement order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<MetaTaskId>,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -232,6 +251,11 @@ impl SubmitMetaTaskReq {
             session_token: SessionToken::parse(session_token.into())?,
             prompt_text: PromptText::parse(prompt_text.into())?,
             source_link: None,
+            title: None,
+            urgency: None,
+            due_on: None,
+            dedupe_key: None,
+            supersedes: Vec::new(),
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
@@ -243,6 +267,51 @@ impl SubmitMetaTaskReq {
     #[must_use]
     pub fn with_source_link(mut self, source_link: MetaTaskSourceLinkDraft) -> Self {
         self.source_link = Some(source_link);
+        self
+    }
+
+    /// Attaches a one-line title to this submission request.
+    #[must_use]
+    pub fn with_title(mut self, title: MetaTaskTitle) -> Self {
+        self.title = Some(title);
+        self
+    }
+
+    /// Attaches the declared urgency of this submission request.
+    #[must_use]
+    pub fn with_urgency(mut self, urgency: MetaTaskUrgency) -> Self {
+        self.urgency = Some(urgency);
+        self
+    }
+
+    /// Attaches the calendar due date of this submission request.
+    #[must_use]
+    pub fn with_due_on(mut self, due_on: DueDate) -> Self {
+        self.due_on = Some(due_on);
+        self
+    }
+
+    /// Attaches the dedupe key that scopes this submission to one principal.
+    #[must_use]
+    pub fn with_dedupe_key(mut self, dedupe_key: MetaTaskDedupeKey) -> Self {
+        self.dedupe_key = Some(dedupe_key);
+        self
+    }
+
+    /// Replaces the tasks this submission supersedes.
+    ///
+    /// First-seen order is kept and repeats are dropped, so one set of
+    /// replacements always yields the same request bytes and therefore the
+    /// same idempotency request hash.
+    #[must_use]
+    pub fn with_supersedes(mut self, supersedes: impl IntoIterator<Item = MetaTaskId>) -> Self {
+        let mut ordered: Vec<MetaTaskId> = Vec::new();
+        for meta_task_id in supersedes {
+            if !ordered.contains(&meta_task_id) {
+                ordered.push(meta_task_id);
+            }
+        }
+        self.supersedes = ordered;
         self
     }
 }
@@ -496,6 +565,9 @@ impl MetaTaskSourceLinkDraft {
 pub struct CancelMetaTaskReq {
     pub session_token: SessionToken,
     pub meta_task_id: MetaTaskId,
+    /// Typed reason this task is being cancelled; absent means `dropped`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<MetaTaskClosure>,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -513,6 +585,177 @@ impl CancelMetaTaskReq {
         Ok(Self {
             session_token: SessionToken::parse(session_token.into())?,
             meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
+            closure: None,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Records the typed reason this task is being cancelled.
+    #[must_use]
+    pub fn with_closure(mut self, closure: MetaTaskClosure) -> Self {
+        self.closure = Some(closure);
+        self
+    }
+}
+
+/// Request to complete a meta-task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteMetaTaskReq {
+    pub session_token: SessionToken,
+    pub meta_task_id: MetaTaskId,
+    /// Typed reason the task finished; absent means `done`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<MetaTaskClosure>,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl CompleteMetaTaskReq {
+    /// Builds a complete-meta-task request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or meta-task id is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
+            closure: None,
+            idempotency_key: parse_idempotency_key(idempotency_key)?,
+        })
+    }
+
+    /// Records the typed reason this task finished.
+    #[must_use]
+    pub fn with_closure(mut self, closure: MetaTaskClosure) -> Self {
+        self.closure = Some(closure);
+        self
+    }
+}
+
+/// Trims one annotation value and rejects text the store cannot hold.
+fn parse_annotation_text(
+    field: &'static str,
+    value: impl Into<String>,
+) -> Result<String, CoveyTypeValidationError> {
+    const MAX_ANNOTATION_TEXT_LEN: usize = 256;
+
+    let raw = value.into();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if trimmed.len() > MAX_ANNOTATION_TEXT_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 256 bytes"));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// One typed annotation value written to a meta task.
+///
+/// The variants mirror the closed annotation key set. The string variants are
+/// trimmed and validated by their constructors, so a blank or oversized value
+/// cannot be constructed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaTaskAnnotationValue {
+    Verdict(String),
+    Acked(bool),
+    Tier(String),
+    Entity(String),
+}
+
+impl MetaTaskAnnotationValue {
+    /// Builds a `verdict` annotation value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verdict is blank, oversized, or carries
+    /// control characters.
+    pub fn verdict(value: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self::Verdict(parse_annotation_text("verdict", value)?))
+    }
+
+    /// Builds an `acked` annotation value.
+    #[must_use]
+    pub const fn acked(value: bool) -> Self {
+        Self::Acked(value)
+    }
+
+    /// Builds a `tier` annotation value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tier is blank, oversized, or carries control
+    /// characters.
+    pub fn tier(value: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self::Tier(parse_annotation_text("tier", value)?))
+    }
+
+    /// Builds an `entity` annotation value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entity is blank, oversized, or carries
+    /// control characters.
+    pub fn entity(value: impl Into<String>) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self::Entity(parse_annotation_text("entity", value)?))
+    }
+
+    /// Returns the annotation key this value writes.
+    #[must_use]
+    pub const fn key(&self) -> MetaTaskAnnotationKey {
+        match self {
+            Self::Verdict(_) => MetaTaskAnnotationKey::Verdict,
+            Self::Acked(_) => MetaTaskAnnotationKey::Acked,
+            Self::Tier(_) => MetaTaskAnnotationKey::Tier,
+            Self::Entity(_) => MetaTaskAnnotationKey::Entity,
+        }
+    }
+}
+
+/// One annotation mutation: set a typed value or clear a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaTaskAnnotationChange {
+    Set(MetaTaskAnnotationValue),
+    Clear(MetaTaskAnnotationKey),
+}
+
+/// Request to annotate one meta task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnotateMetaTaskReq {
+    pub session_token: SessionToken,
+    pub meta_task_id: MetaTaskId,
+    pub change: MetaTaskAnnotationChange,
+    pub idempotency_key: IdempotencyKey,
+}
+
+impl AnnotateMetaTaskReq {
+    /// Builds an annotate-meta-task request from unvalidated scalar values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session token or meta-task id is invalid.
+    pub fn try_from_raw_parts(
+        session_token: impl Into<String>,
+        meta_task_id: impl Into<String>,
+        change: MetaTaskAnnotationChange,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, CoveyTypeValidationError> {
+        Ok(Self {
+            session_token: SessionToken::parse(session_token.into())?,
+            meta_task_id: MetaTaskId::parse(meta_task_id.into())?,
+            change,
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }

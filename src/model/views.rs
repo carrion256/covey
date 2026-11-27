@@ -4,17 +4,18 @@ use derive_new::new;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError, ser::SerializeStruct,
 };
-use strum::Display;
+use strum::{Display, EnumString};
 
 use super::{
     AgentPrincipalId, ApplyGateBlocker, ApplyGateBlockerKind, Artifact, ArtifactDigest,
     ArtifactKind, ArtifactManifestPath, AttemptOutcome, BaseRev, ChangedPathsDigest, Claim,
-    ClaimId, CompletionPolicy, EvidencePolicy, FailedReviewVerdict, FenceSeq, FindingsDigest,
-    MetaTask, MetaTaskId, MetaTaskSourceLinkDraft, MetaTaskSourceLinkOrigin,
-    MetaTaskSourceLinkProvenance, MetaTaskState, OpenSpecArchiveStatus, OpenSpecChangeId,
-    OperatorBlocker, PromptText, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState,
-    RepoopsClaimRef, RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict,
-    RoutingKey, Session, SessionToken, SettlementReconcileBlocker, SettlementReconcileReason,
+    ClaimId, CompletionPolicy, DueDate, EvidencePolicy, FailedReviewVerdict, FenceSeq,
+    FindingsDigest, MetaTask, MetaTaskClosure, MetaTaskDedupeKey, MetaTaskHandle, MetaTaskId,
+    MetaTaskSourceLinkDraft, MetaTaskSourceLinkOrigin, MetaTaskSourceLinkProvenance, MetaTaskState,
+    MetaTaskTitle, MetaTaskUrgency, OpenSpecArchiveStatus, OpenSpecChangeId, OperatorBlocker,
+    PromptText, ProseTasksetId, QueueId, ReadyQueueItem, ReadyQueueState, RepoopsClaimRef,
+    RepoopsPath, Review, ReviewId, ReviewState, ReviewTarget, ReviewVerdict, RoutingKey, Session,
+    SessionHandle, SessionToken, SettlementReconcileBlocker, SettlementReconcileReason,
     SettlementTarget, Subtask, SubtaskId, SubtaskKind, SubtaskLifecycle, SubtaskPriority,
     SubtaskRow, SubtaskState, SubtaskTitle, TimestampMs, VcsWorkspace, VcsWorkspaceCleanliness,
     VcsWorkspaceState, VerifierId,
@@ -956,6 +957,33 @@ impl MetaTaskSourceLink {
     pub const fn linked_at(&self) -> TimestampMs {
         self.linked_at
     }
+
+    /// Builds the link from its stored column values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the origin and method columns disagree or when a
+    /// stored text column does not validate.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_from_stored_parts(
+        thread_id: String,
+        url: Option<String>,
+        received_at: String,
+        path: String,
+        origin: MetaTaskSourceLinkOrigin,
+        method: Option<String>,
+        linked_at: TimestampMs,
+    ) -> Result<Self, String> {
+        Self::try_from(RawMetaTaskSourceLink {
+            thread_id,
+            url,
+            received_at,
+            path,
+            origin,
+            method,
+            linked_at,
+        })
+    }
 }
 
 impl From<&MetaTaskSourceLink> for RawMetaTaskSourceLink {
@@ -1027,18 +1055,44 @@ impl<'de> Deserialize<'de> for MetaTaskSourceLink {
     }
 }
 
+/// Annotations recorded against a meta task.
+///
+/// Each field mirrors one closed annotation key: a key that was never set is
+/// `None`, and clearing a key returns it to `None`.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MetaTaskAnnotations {
+    #[serde(default)]
+    pub verdict: Option<String>,
+    #[serde(default)]
+    pub acked: Option<bool>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub entity: Option<String>,
+}
+
 /// Snapshot view of a meta-task and all of its subtasks.
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaTaskStatus {
     meta_task: MetaTask,
     subtasks: Vec<SubtaskView>,
+    annotations: MetaTaskAnnotations,
+    supersedes: Vec<MetaTaskId>,
+    superseded_by: Option<MetaTaskId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RawMetaTaskStatus {
     meta_task: MetaTask,
     subtasks: Vec<SubtaskView>,
+    #[serde(default)]
+    annotations: MetaTaskAnnotations,
+    #[serde(default)]
+    supersedes: Vec<MetaTaskId>,
+    #[serde(default)]
+    superseded_by: Option<MetaTaskId>,
 }
 
 impl MetaTaskStatus {
@@ -1056,6 +1110,9 @@ impl MetaTaskStatus {
         Ok(Self {
             meta_task,
             subtasks,
+            annotations: MetaTaskAnnotations::default(),
+            supersedes: Vec::new(),
+            superseded_by: None,
         })
     }
 
@@ -1068,6 +1125,42 @@ impl MetaTaskStatus {
     /// Returns subtasks attached to this meta-task.
     pub fn subtasks(&self) -> &[SubtaskView] {
         &self.subtasks
+    }
+
+    /// Attaches the annotation projection of this meta task.
+    pub fn with_annotations(mut self, annotations: MetaTaskAnnotations) -> Self {
+        self.annotations = annotations;
+        self
+    }
+
+    /// Attaches the meta tasks this one replaces, in creation order.
+    pub fn with_supersedes(mut self, supersedes: Vec<MetaTaskId>) -> Self {
+        self.supersedes = supersedes;
+        self
+    }
+
+    /// Attaches the meta task that replaced this one, if any.
+    pub fn with_superseded_by(mut self, superseded_by: Option<MetaTaskId>) -> Self {
+        self.superseded_by = superseded_by;
+        self
+    }
+
+    /// Returns the annotations recorded against this meta task.
+    #[must_use]
+    pub const fn annotations(&self) -> &MetaTaskAnnotations {
+        &self.annotations
+    }
+
+    /// Returns the meta tasks this one replaces, in creation order.
+    #[must_use]
+    pub fn supersedes(&self) -> &[MetaTaskId] {
+        &self.supersedes
+    }
+
+    /// Returns the meta task that replaced this one, if any.
+    #[must_use]
+    pub const fn superseded_by(&self) -> Option<&MetaTaskId> {
+        self.superseded_by.as_ref()
     }
 }
 
@@ -1096,6 +1189,9 @@ impl From<&MetaTaskStatus> for RawMetaTaskStatus {
         Self {
             meta_task: status.meta_task.clone(),
             subtasks: status.subtasks.clone(),
+            annotations: status.annotations.clone(),
+            supersedes: status.supersedes.clone(),
+            superseded_by: status.superseded_by.clone(),
         }
     }
 }
@@ -1104,7 +1200,12 @@ impl TryFrom<RawMetaTaskStatus> for MetaTaskStatus {
     type Error = String;
 
     fn try_from(raw: RawMetaTaskStatus) -> Result<Self, Self::Error> {
-        Self::new(raw.meta_task, raw.subtasks)
+        Self::new(raw.meta_task, raw.subtasks).map(|status| {
+            status
+                .with_annotations(raw.annotations)
+                .with_supersedes(raw.supersedes)
+                .with_superseded_by(raw.superseded_by)
+        })
     }
 }
 
@@ -1119,6 +1220,37 @@ pub struct MetaTaskSummary {
     state: MetaTaskState,
     created_at: TimestampMs,
     updated_at: TimestampMs,
+    title: Option<MetaTaskTitle>,
+    urgency: Option<MetaTaskUrgency>,
+    due_on: Option<DueDate>,
+    closure: Option<MetaTaskClosure>,
+    handle: MetaTaskHandle,
+    dedupe_key: Option<MetaTaskDedupeKey>,
+    source_link: Option<MetaTaskSourceLink>,
+    annotations: MetaTaskAnnotations,
+    subtask_total: usize,
+    subtask_open: usize,
+}
+
+/// Unvalidated field set a [`MetaTaskSummary`] is built from.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaTaskSummaryParts {
+    pub meta_task_id: MetaTaskId,
+    pub prompt_text: PromptText,
+    pub state: MetaTaskState,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+    pub title: Option<MetaTaskTitle>,
+    pub urgency: Option<MetaTaskUrgency>,
+    pub due_on: Option<DueDate>,
+    pub closure: Option<MetaTaskClosure>,
+    pub handle: MetaTaskHandle,
+    pub dedupe_key: Option<MetaTaskDedupeKey>,
+    pub source_link: Option<MetaTaskSourceLink>,
+    pub annotations: MetaTaskAnnotations,
+    pub subtask_total: usize,
+    pub subtask_open: usize,
 }
 
 impl MetaTaskSummary {
@@ -1126,23 +1258,31 @@ impl MetaTaskSummary {
     ///
     /// # Errors
     ///
-    /// Returns an error when `updated_at` predates `created_at`.
-    pub fn try_new(
-        meta_task_id: MetaTaskId,
-        prompt_text: PromptText,
-        state: MetaTaskState,
-        created_at: TimestampMs,
-        updated_at: TimestampMs,
-    ) -> Result<Self, String> {
-        if updated_at < created_at {
+    /// Returns an error when `updated_at` predates `created_at` or when
+    /// `subtask_open` exceeds `subtask_total`.
+    pub fn try_new(parts: MetaTaskSummaryParts) -> Result<Self, String> {
+        if parts.updated_at < parts.created_at {
             return Err("meta-task updated_at must be greater than or equal to created_at".into());
         }
+        if parts.subtask_open > parts.subtask_total {
+            return Err("meta-task subtask_open must not exceed subtask_total".into());
+        }
         Ok(Self {
-            meta_task_id,
-            prompt_text,
-            state,
-            created_at,
-            updated_at,
+            meta_task_id: parts.meta_task_id,
+            prompt_text: parts.prompt_text,
+            state: parts.state,
+            created_at: parts.created_at,
+            updated_at: parts.updated_at,
+            title: parts.title,
+            urgency: parts.urgency,
+            due_on: parts.due_on,
+            closure: parts.closure,
+            handle: parts.handle,
+            dedupe_key: parts.dedupe_key,
+            source_link: parts.source_link,
+            annotations: parts.annotations,
+            subtask_total: parts.subtask_total,
+            subtask_open: parts.subtask_open,
         })
     }
 
@@ -1175,6 +1315,202 @@ impl MetaTaskSummary {
     pub const fn updated_at(&self) -> TimestampMs {
         self.updated_at
     }
+
+    /// Returns the one-line title, if any.
+    #[must_use]
+    pub const fn title(&self) -> Option<&MetaTaskTitle> {
+        self.title.as_ref()
+    }
+
+    /// Returns the declared urgency, if any.
+    #[must_use]
+    pub const fn urgency(&self) -> Option<MetaTaskUrgency> {
+        self.urgency
+    }
+
+    /// Returns the calendar due date, if any.
+    #[must_use]
+    pub const fn due_on(&self) -> Option<&DueDate> {
+        self.due_on.as_ref()
+    }
+
+    /// Returns the closure recorded for this meta task, if any.
+    #[must_use]
+    pub const fn closure(&self) -> Option<MetaTaskClosure> {
+        self.closure
+    }
+
+    /// Returns the store-issued handle.
+    #[must_use]
+    pub const fn handle(&self) -> &MetaTaskHandle {
+        &self.handle
+    }
+
+    /// Returns the dedupe key this meta task was filed under, if any.
+    #[must_use]
+    pub const fn dedupe_key(&self) -> Option<&MetaTaskDedupeKey> {
+        self.dedupe_key.as_ref()
+    }
+
+    /// Returns the intake source backlink, if any.
+    #[must_use]
+    pub const fn source_link(&self) -> Option<&MetaTaskSourceLink> {
+        self.source_link.as_ref()
+    }
+
+    /// Returns the annotations recorded against this meta task.
+    #[must_use]
+    pub const fn annotations(&self) -> &MetaTaskAnnotations {
+        &self.annotations
+    }
+
+    /// Returns how many subtasks this meta task has.
+    #[must_use]
+    pub const fn subtask_total(&self) -> usize {
+        self.subtask_total
+    }
+
+    /// Returns how many of those subtasks are still open.
+    #[must_use]
+    pub const fn subtask_open(&self) -> usize {
+        self.subtask_open
+    }
+}
+
+/// State filter for a meta-task discovery listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetaTaskListState {
+    Open,
+    Planning,
+    Active,
+    Completed,
+    Cancelled,
+}
+
+/// Ordering of a meta-task discovery listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetaTaskSort {
+    CreatedAt,
+    Due,
+    Urgency,
+}
+
+/// Filters, paging, and ordering of one meta-task discovery page.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaTaskListQuery {
+    limit: usize,
+    offset: u64,
+    state: Option<MetaTaskListState>,
+    due_before: Option<DueDate>,
+    source_thread_id: Option<String>,
+    dedupe_key: Option<MetaTaskDedupeKey>,
+    sort: MetaTaskSort,
+}
+
+impl MetaTaskListQuery {
+    /// Builds an unfiltered page query ordered by creation time.
+    pub const fn new(limit: usize, offset: u64) -> Self {
+        Self {
+            limit,
+            offset,
+            state: None,
+            due_before: None,
+            source_thread_id: None,
+            dedupe_key: None,
+            sort: MetaTaskSort::CreatedAt,
+        }
+    }
+
+    /// Restricts the page to meta tasks in one state filter.
+    pub fn with_state(mut self, state: MetaTaskListState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// Restricts the page to meta tasks due before the given date.
+    pub fn with_due_before(mut self, due_before: DueDate) -> Self {
+        self.due_before = Some(due_before);
+        self
+    }
+
+    /// Restricts the page to meta tasks linked to one source thread.
+    pub fn with_source_thread_id(mut self, source_thread_id: impl Into<String>) -> Self {
+        self.source_thread_id = Some(source_thread_id.into());
+        self
+    }
+
+    /// Restricts the page to the meta task filed under one dedupe key.
+    pub fn with_dedupe_key(mut self, dedupe_key: MetaTaskDedupeKey) -> Self {
+        self.dedupe_key = Some(dedupe_key);
+        self
+    }
+
+    /// Orders the page by the given sort.
+    pub const fn with_sort(mut self, sort: MetaTaskSort) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    /// Returns the maximum number of rows in this page.
+    #[must_use]
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Returns how many leading rows to skip.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the state filter, if any.
+    #[must_use]
+    pub const fn state(&self) -> Option<MetaTaskListState> {
+        self.state
+    }
+
+    /// Returns the due-date bound, if any.
+    #[must_use]
+    pub const fn due_before(&self) -> Option<&DueDate> {
+        self.due_before.as_ref()
+    }
+
+    /// Returns the source thread filter, if any.
+    #[must_use]
+    pub fn source_thread_id(&self) -> Option<&str> {
+        self.source_thread_id.as_deref()
+    }
+
+    /// Returns the dedupe key filter, if any.
+    #[must_use]
+    pub const fn dedupe_key(&self) -> Option<&MetaTaskDedupeKey> {
+        self.dedupe_key.as_ref()
+    }
+
+    /// Returns the ordering of this page.
+    #[must_use]
+    pub const fn sort(&self) -> MetaTaskSort {
+        self.sort
+    }
+}
+
+/// Outcome of filing a meta task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetaTaskSubmission {
+    pub meta_task_id: String,
+    pub deduplicated: bool,
+}
+
+/// Outcome of ensuring the active session of an agent principal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEnsured {
+    pub session: SessionHandle,
+    pub registered: bool,
 }
 
 /// Read-only summary of currently claimable subtask lanes.

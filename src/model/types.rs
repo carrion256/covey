@@ -257,6 +257,82 @@ fn validate_subtask_title(
     Ok(())
 }
 
+/// Days in `month` of `year` under the Gregorian leap rule.
+const fn gregorian_days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Rejects a date that is not exactly `YYYY-MM-DD` in the Gregorian calendar.
+fn validate_due_date(field: &'static str, value: &str) -> Result<(), CoveyTypeValidationError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return Err(CoveyTypeValidationError::new(field, "must be YYYY-MM-DD"));
+    }
+    let mut digits = [0_u32; 8];
+    let mut next = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if index == 4 || index == 7 {
+            continue;
+        }
+        let Some(digit) = byte.checked_sub(b'0').filter(|digit| *digit <= 9) else {
+            return Err(CoveyTypeValidationError::new(field, "must be ASCII digits"));
+        };
+        digits[next] = u32::from(digit);
+        next += 1;
+    }
+    let year = digits[0] * 1000 + digits[1] * 100 + digits[2] * 10 + digits[3];
+    let month = digits[4] * 10 + digits[5];
+    if !(1..=12).contains(&month) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "month must be 01 through 12",
+        ));
+    }
+    let day = digits[6] * 10 + digits[7];
+    if day == 0 || day > gregorian_days_in_month(year, month) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "day must exist in that month",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_meta_task_dedupe_key(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CoveyTypeValidationError> {
+    const MAX_META_TASK_DEDUPE_KEY_LEN: usize = 256;
+
+    if value.trim().is_empty() {
+        return Err(CoveyTypeValidationError::new(field, "must not be empty"));
+    }
+    if value.len() > MAX_META_TASK_DEDUPE_KEY_LEN {
+        return Err(CoveyTypeValidationError::new(field, "exceeds 256 bytes"));
+    }
+    if value.trim() != value {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not include leading or trailing whitespace",
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CoveyTypeValidationError::new(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_attempt_summary(
     field: &'static str,
     value: &str,
@@ -546,6 +622,16 @@ fn validate_non_negative_i64(
     Ok(())
 }
 
+fn validate_meta_task_handle(
+    field: &'static str,
+    value: u64,
+) -> Result<(), CoveyTypeValidationError> {
+    if value == 0 {
+        return Err(CoveyTypeValidationError::new(field, "must be positive"));
+    }
+    Ok(())
+}
+
 fn validate_subtask_priority(
     field: &'static str,
     value: i64,
@@ -792,6 +878,13 @@ string_newtype!(
     "command_transcript_digest",
     validate_digest
 );
+string_newtype!(MetaTaskTitle, "title", validate_subtask_title);
+string_newtype!(DueDate, "due_on", validate_due_date);
+string_newtype!(
+    MetaTaskDedupeKey,
+    "dedupe_key",
+    validate_meta_task_dedupe_key
+);
 
 i64_newtype!(FenceSeq, "fence_seq", validate_positive_i64);
 i64_newtype!(EventSeq, "event_seq", validate_positive_i64);
@@ -804,6 +897,93 @@ i64_newtype!(LeaseDurationMs, "lease_duration_ms", validate_positive_i64);
 i64_newtype!(LeaseDeadlineMs, "lease_deadline", validate_non_negative_i64);
 i64_newtype!(SubtaskPriority, "priority", validate_subtask_priority);
 i64_newtype!(TimestampMs, "timestamp_ms", validate_non_negative_i64);
+
+/// Store-issued positive number naming one meta task in one store.
+///
+/// The store numbers handles itself, so the same row reached through any write
+/// path carries the same number. A handle parses from either `12` or `#12`,
+/// displays with the `#` prefix, serializes as a JSON number, and persists as a
+/// SQLite integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
+pub struct MetaTaskHandle(u64);
+
+impl MetaTaskHandle {
+    /// Parses a decimal handle, with or without its leading `#`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the text does not name a positive `u64`.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, CoveyTypeValidationError> {
+        let text = value.as_ref();
+        let digits = text.strip_prefix('#').unwrap_or(text);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(CoveyTypeValidationError::new(
+                "handle",
+                "must be a decimal handle number",
+            ));
+        }
+        let Ok(parsed) = digits.parse::<u64>() else {
+            return Err(CoveyTypeValidationError::new("handle", "exceeds u64::MAX"));
+        };
+        Self::try_from(parsed)
+    }
+
+    /// Returns the validated handle number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for MetaTaskHandle {
+    type Error = CoveyTypeValidationError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        validate_meta_task_handle("handle", value)?;
+        Ok(Self(value))
+    }
+}
+
+impl From<MetaTaskHandle> for u64 {
+    fn from(value: MetaTaskHandle) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for MetaTaskHandle {
+    type Err = CoveyTypeValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl fmt::Display for MetaTaskHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+impl ToSql for MetaTaskHandle {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        // SQLite integers are signed 64-bit. A handle is positive, so this
+        // conversion only fails for a number SQLite could not store anyway.
+        let raw = i64::try_from(self.0)
+            .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+        Ok(ToSqlOutput::from(raw))
+    }
+}
+
+impl FromSql for MetaTaskHandle {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let raw = i64::column_result(value)?;
+        u64::try_from(raw)
+            .ok()
+            .and_then(|raw| Self::try_from(raw).ok())
+            .ok_or(FromSqlError::InvalidType)
+    }
+}
 
 #[cfg(test)]
 mod tests {

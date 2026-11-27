@@ -3,28 +3,29 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 
 use super::{
-    AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, ApplyGateBlockerEvidenceId,
-    ApplyGateBlockerKind, ApplyGateBlockerReason, ApplyWorktreePath, ApplyWorktreeState,
-    ArtifactDigest, ArtifactKind, ArtifactManifestPath, AttemptEvidenceDigest, AttemptFailureCode,
-    AttemptOutcomeKind, AttemptSummary, BaseRev, CancelMetaTaskReq, ChangedPathsDigest, ClaimId,
-    ClaimResult, ClaimState, CommandTranscriptDigest, CompletionPolicy, ConflictId, ConflictKind,
-    ConflictResolutionState, CoveyTypeValidationError, CreateSubtaskRequest, CreateWorkSubtaskReq,
-    DecideReviewReq, EnqueueForApplyReq, EventObjectId, EventSeq, EventType, EvidencePolicy,
-    ExitSessionReq, FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs,
-    LinkMetaTaskSourceReq, MarkAppliedReq, MarkApplyWorktreeStateReq, MetaTaskId,
-    MetaTaskSourceLink, MetaTaskState, ModelId, ObjectType, ObserveVcsWorkspaceReq,
-    OpenSpecArchiveBlockedReason, OpenSpecArchiveStatusState, OpenSpecChangeId,
-    OperatorBlockerEvidenceId, OperatorBlockerId, OperatorBlockerReason, OperatorBlockerState,
-    OperatorBlockerTargetKind, PromptText, ProviderId, ProviderRunId, ProviderRunIdIssuer,
-    PublishArtifactReq, QueueId, ReadyQueueClaim, ReadyQueueState, RecordApplyGateBlockerReq,
-    RecordApplyVerificationReq, RecordApplyWorktreeReq, RecordOpenSpecArchiveStatusReq,
-    RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq, RecordProseApplyBlockerReq,
-    RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq, RecordVcsPacketStackEntryReq,
-    RecordVcsPrPublicationReq, RecordVcsWorkspaceReq, ReleaseClaimReq, RequestReservationReq,
-    RequestReviewReq, ReservationId, ReservationState, ResolveConflictReq,
-    ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict, RoutingKey,
-    RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle, SessionHeartbeatTick,
-    SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
+    AbandonSubtaskReq, ActorKind, AgentInstanceId, AgentPrincipalId, AnnotateMetaTaskReq,
+    ApplyGateBlockerEvidenceId, ApplyGateBlockerKind, ApplyGateBlockerReason, ApplyWorktreePath,
+    ApplyWorktreeState, ArtifactDigest, ArtifactKind, ArtifactManifestPath, AttemptEvidenceDigest,
+    AttemptFailureCode, AttemptOutcomeKind, AttemptSummary, BaseRev, CancelMetaTaskReq,
+    ChangedPathsDigest, ClaimId, ClaimResult, ClaimState, CommandTranscriptDigest,
+    CompleteMetaTaskReq, CompletionPolicy, ConflictId, ConflictKind, ConflictResolutionState,
+    CoveyTypeValidationError, CreateSubtaskRequest, CreateWorkSubtaskReq, DecideReviewReq, DueDate,
+    EnqueueForApplyReq, EventObjectId, EventSeq, EventType, EvidencePolicy, ExitSessionReq,
+    FenceSeq, FindingsDigest, HeartbeatReq, ImportOpenSpecEvent, LeaseDeadlineMs,
+    LinkMetaTaskSourceReq, MarkAppliedReq, MarkApplyWorktreeStateReq, MetaTaskClosure,
+    MetaTaskHandle, MetaTaskId, MetaTaskSourceLink, MetaTaskState, MetaTaskTitle, MetaTaskUrgency,
+    ModelId, ObjectType, ObserveVcsWorkspaceReq, OpenSpecArchiveBlockedReason,
+    OpenSpecArchiveStatusState, OpenSpecChangeId, OperatorBlockerEvidenceId, OperatorBlockerId,
+    OperatorBlockerReason, OperatorBlockerState, OperatorBlockerTargetKind, PromptText, ProviderId,
+    ProviderRunId, ProviderRunIdIssuer, PublishArtifactReq, QueueId, ReadyQueueClaim,
+    ReadyQueueState, RecordApplyGateBlockerReq, RecordApplyVerificationReq, RecordApplyWorktreeReq,
+    RecordOpenSpecArchiveStatusReq, RecordOperatorBlockerReq, RecordPermissiveLandingReceiptReq,
+    RecordProseApplyBlockerReq, RecordRuntimeAttestationReq, RecordSettlementReconcileBlockerReq,
+    RecordVcsPacketStackEntryReq, RecordVcsPrPublicationReq, RecordVcsWorkspaceReq,
+    ReleaseClaimReq, RequestReservationReq, RequestReviewReq, ReservationId, ReservationState,
+    ResolveConflictReq, ResolveOperatorBlockerReq, ReviewId, ReviewState, ReviewVerdict,
+    RoutingKey, RuntimeContainerId, RuntimeProcessId, ScopeClass, SessionHandle,
+    SessionHeartbeatTick, SessionRole, SessionState, SessionToken, SettlementReconcileEvidenceId,
     SettlementReconcileReason, SettlementTarget, StartSubtaskReq, SubmitMetaTaskReq, SubtaskId,
     SubtaskKind, SubtaskPriority, SubtaskState, SubtaskTitle, SupersedeQueueItemReq, TimestampMs,
     VcsPacketStackEntryId, VcsPacketStackEntryState, VcsPrPublicationId, VcsPrPublicationKind,
@@ -924,6 +925,19 @@ pub struct MetaTask {
     pub created_by: SessionToken,
     timestamps: MetaTaskTimestamps,
     source_link: Option<MetaTaskSourceLink>,
+    /// One-line title of this meta task, when the submitter supplied one.
+    pub title: Option<MetaTaskTitle>,
+    /// Declared urgency of this meta task, when the submitter supplied one.
+    pub urgency: Option<MetaTaskUrgency>,
+    /// Calendar due date of this meta task, when the submitter supplied one.
+    pub due_on: Option<DueDate>,
+    /// Typed reason this meta task finished, when it finished.
+    pub closure: Option<MetaTaskClosure>,
+    /// Store-issued positive handle of this meta task.
+    ///
+    /// This is optional only because the replayed model shape carries no
+    /// handle: a row read from a migrated store always carries one.
+    pub handle: Option<MetaTaskHandle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,6 +964,16 @@ struct RawMetaTask {
     updated_at: TimestampMs,
     #[serde(default)]
     source_link: Option<MetaTaskSourceLink>,
+    #[serde(default)]
+    title: Option<MetaTaskTitle>,
+    #[serde(default)]
+    urgency: Option<MetaTaskUrgency>,
+    #[serde(default)]
+    due_on: Option<DueDate>,
+    #[serde(default)]
+    closure: Option<MetaTaskClosure>,
+    #[serde(default)]
+    handle: Option<MetaTaskHandle>,
 }
 
 impl MetaTask {
@@ -973,6 +997,11 @@ impl MetaTask {
             created_by,
             timestamps: MetaTaskTimestamps::new(created_at, updated_at)?,
             source_link: None,
+            title: None,
+            urgency: None,
+            due_on: None,
+            closure: None,
+            handle: None,
         })
     }
 
@@ -1007,6 +1036,41 @@ impl MetaTask {
     #[must_use]
     pub fn with_source_link(mut self, source_link: Option<MetaTaskSourceLink>) -> Self {
         self.source_link = source_link;
+        self
+    }
+
+    /// Attaches the one-line title read for this row, if any.
+    #[must_use]
+    pub fn with_title(mut self, title: Option<MetaTaskTitle>) -> Self {
+        self.title = title;
+        self
+    }
+
+    /// Attaches the declared urgency read for this row, if any.
+    #[must_use]
+    pub fn with_urgency(mut self, urgency: Option<MetaTaskUrgency>) -> Self {
+        self.urgency = urgency;
+        self
+    }
+
+    /// Attaches the calendar due date read for this row, if any.
+    #[must_use]
+    pub fn with_due_on(mut self, due_on: Option<DueDate>) -> Self {
+        self.due_on = due_on;
+        self
+    }
+
+    /// Attaches the closure read for this row, if any.
+    #[must_use]
+    pub fn with_closure(mut self, closure: Option<MetaTaskClosure>) -> Self {
+        self.closure = closure;
+        self
+    }
+
+    /// Attaches the store-issued handle read for this row, if any.
+    #[must_use]
+    pub fn with_handle(mut self, handle: Option<MetaTaskHandle>) -> Self {
+        self.handle = handle;
         self
     }
 
@@ -1075,15 +1139,20 @@ impl TryFrom<RawMetaTask> for MetaTask {
     type Error = String;
 
     fn try_from(raw: RawMetaTask) -> Result<Self, Self::Error> {
-        Self::try_from_parts(
+        Ok(Self::try_from_parts(
             raw.meta_task_id,
             raw.prompt_text,
             raw.state,
             raw.created_by,
             raw.created_at,
             raw.updated_at,
-        )
-        .map(|meta_task| meta_task.with_source_link(raw.source_link))
+        )?
+        .with_source_link(raw.source_link)
+        .with_title(raw.title)
+        .with_urgency(raw.urgency)
+        .with_due_on(raw.due_on)
+        .with_closure(raw.closure)
+        .with_handle(raw.handle))
     }
 }
 
@@ -1097,6 +1166,11 @@ impl From<&MetaTask> for RawMetaTask {
             created_at: meta_task.created_at(),
             updated_at: meta_task.updated_at(),
             source_link: meta_task.source_link().cloned(),
+            title: meta_task.title.clone(),
+            urgency: meta_task.urgency,
+            due_on: meta_task.due_on.clone(),
+            closure: meta_task.closure,
+            handle: meta_task.handle,
         }
     }
 }
@@ -4929,6 +5003,8 @@ pub enum EventPayload {
     MetaTaskSubmitted(SubmitMetaTaskReq),
     MetaTaskCancelled(CancelMetaTaskReq),
     MetaTaskSourceLinked(LinkMetaTaskSourceReq),
+    MetaTaskCompleted(CompleteMetaTaskReq),
+    MetaTaskAnnotated(AnnotateMetaTaskReq),
     SubtaskCreated(CreateSubtaskRequest),
     WorkSubtaskCreated(CreateWorkSubtaskReq),
     SubtaskClaimed(ClaimResult),
@@ -4982,6 +5058,8 @@ impl EventPayload {
             Self::MetaTaskSubmitted(_) => EventType::MetaTaskSubmitted,
             Self::MetaTaskCancelled(_) => EventType::MetaTaskCancelled,
             Self::MetaTaskSourceLinked(_) => EventType::MetaTaskSourceLinked,
+            Self::MetaTaskCompleted(_) => EventType::MetaTaskCompleted,
+            Self::MetaTaskAnnotated(_) => EventType::MetaTaskAnnotated,
             Self::SubtaskCreated(_) => EventType::SubtaskCreated,
             Self::WorkSubtaskCreated(_) => EventType::WorkSubtaskCreated,
             Self::SubtaskClaimed(_) => EventType::SubtaskClaimed,
@@ -5037,6 +5115,8 @@ impl EventPayload {
             Self::RuntimeAttestationRecorded(_) => ObjectType::RuntimeAttestation,
             Self::MetaTaskSubmitted(_)
             | Self::MetaTaskCancelled(_)
+            | Self::MetaTaskCompleted(_)
+            | Self::MetaTaskAnnotated(_)
             | Self::MetaTaskSourceLinked(_) => ObjectType::MetaTask,
             Self::SubtaskCreated(_)
             | Self::WorkSubtaskCreated(_)

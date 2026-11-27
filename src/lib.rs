@@ -50,11 +50,11 @@ pub use model::{
     LeaseDurationMs, LinkMetaTaskSourceReq, MarkAppliedReq, MarkApplyWorktreeStateReq,
     MarkInFlightReq, MetaTask, MetaTaskId, MetaTaskSourceLink, MetaTaskSourceLinkDraft,
     MetaTaskSourceLinkOrigin, MetaTaskSourceLinkProvenance, MetaTaskState, MetaTaskStatus,
-    MetaTaskSummary, ModelId, ObjectType,
-    OpenSpecArchiveBlockedReason, OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish,
-    OpenSpecArchiveEligibility, OpenSpecArchiveStatus, OpenSpecArchiveStatusState,
-    OpenSpecChangeId, OpenSpecCurrentWork, OpenSpecCurrentWorkBlocker,
-    OpenSpecCurrentWorkBlockerKind, OpenSpecCurrentWorkBlockerResolution, OpenSpecCurrentWorkOwner,
+    MetaTaskSummary, ModelId, ObjectType, OpenSpecArchiveBlockedReason,
+    OpenSpecArchiveCleanupClaim, OpenSpecArchiveCleanupFinish, OpenSpecArchiveEligibility,
+    OpenSpecArchiveStatus, OpenSpecArchiveStatusState, OpenSpecChangeId, OpenSpecCurrentWork,
+    OpenSpecCurrentWorkBlocker, OpenSpecCurrentWorkBlockerKind,
+    OpenSpecCurrentWorkBlockerResolution, OpenSpecCurrentWorkOwner,
     OpenSpecCurrentWorkRepairAction, OpenSpecCurrentWorkRepairPlaybook,
     OpenSpecCurrentWorkRepairSafety, OpenSpecCurrentWorkState, OpenSpecDigest,
     OpenSpecImportProvenance, OpenSpecPath, OpenSpecSourceDigest, OpenSpecTaskId, OperatorBlocker,
@@ -88,5 +88,11 @@ pub use model::{
     VcsPrPublicationKind, VcsPrPublicationStatus, VcsWorkspace, VcsWorkspaceCleanliness,
     VcsWorkspaceId, VcsWorkspaceKind, VcsWorkspaceObservationReason, VcsWorkspacePath,
     VcsWorkspaceRef, VcsWorkspaceState, VerifierId, VerifyLandingAuthorizationReq, WorkSubtask,
+};
+pub use model::{
+    AnnotateMetaTaskReq, CompleteMetaTaskReq, DueDate, MetaTaskAnnotationChange,
+    MetaTaskAnnotationKey, MetaTaskAnnotationValue, MetaTaskAnnotations, MetaTaskClosure,
+    MetaTaskDedupeKey, MetaTaskHandle, MetaTaskListQuery, MetaTaskListState, MetaTaskSort,
+    MetaTaskSubmission, MetaTaskSummaryParts, MetaTaskTitle, MetaTaskUrgency, SessionEnsured,
 };
 pub use store::Covey;

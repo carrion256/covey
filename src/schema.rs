@@ -69,6 +69,8 @@ const fn event_type_name(event_type: EventType) -> &'static str {
         EventType::VcsPrPublicationRecorded => "vcs_pr_publication_recorded",
         EventType::ProseApplyBlockerRecorded => "prose_apply_blocker_recorded",
         EventType::MetaTaskSourceLinked => "meta_task_source_linked",
+        EventType::MetaTaskCompleted => "meta_task_completed",
+        EventType::MetaTaskAnnotated => "meta_task_annotated",
     }
 }
 
@@ -94,6 +96,10 @@ pub(crate) fn apply_pragmas(conn: &Connection) -> Result<()> {
 
 mod generated_migrations {
     include!(concat!(env!("OUT_DIR"), "/covey_migrations.rs"));
+}
+
+pub(crate) fn expected_schema_version() -> usize {
+    generated_migrations::MIGRATIONS.len()
 }
 
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()> {
