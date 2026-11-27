@@ -393,6 +393,93 @@ fn help_defaults_to_json_for_piped_output() {
 }
 
 #[test]
+fn json_help_describes_the_named_command_and_the_global_flags() {
+    let output = run(&["subtask", "claim-next", "--help", "--json"]);
+    assert!(output.status.success());
+    let payload = parse_stdout_json(&output);
+    let data = &payload["data"];
+    assert_eq!(data["target"]["name"], "claim-next");
+    let flags = data["target"]["flags"].as_array().expect("flags");
+    let flag = |long: &str| {
+        flags
+            .iter()
+            .find(|flag| flag["long"] == long)
+            .unwrap_or_else(|| panic!("{long} is listed"))
+    };
+    assert_eq!(flag("--session-token")["required"], true);
+    assert_eq!(flag("--session-token")["value_name"], "SESSION_TOKEN");
+    assert_eq!(flag("--start")["required"], false);
+    assert!(
+        flag("--start").get("value_name").is_none(),
+        "a switch names no value"
+    );
+    assert!(
+        flags.iter().all(|flag| flag["long"] != "--db"),
+        "a global flag is listed once, not under every command"
+    );
+    let db = data["global_flags"]
+        .as_array()
+        .expect("global flags")
+        .iter()
+        .find(|flag| flag["long"] == "--db")
+        .expect("--db is a global flag");
+    assert_eq!(db["env"], "COVEY_DB_PATH");
+    assert!(
+        data["help_text"]
+            .as_str()
+            .expect("help text")
+            .contains("--session-token")
+    );
+}
+
+#[test]
+fn json_help_at_the_root_lists_every_group_with_its_commands() {
+    let output = run(&["--help", "--json"]);
+    assert!(output.status.success());
+    let payload = parse_stdout_json(&output);
+    let target = &payload["data"]["target"];
+    assert_eq!(target["name"], "covey");
+    let named = |commands: &Value, name: &str| {
+        commands
+            .as_array()
+            .expect("commands")
+            .iter()
+            .find(|command| command["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .clone()
+    };
+    let register = named(
+        &named(&target["commands"], "session")["commands"],
+        "register",
+    );
+    let role = register["flags"]
+        .as_array()
+        .expect("flags")
+        .iter()
+        .find(|flag| flag["long"] == "--role")
+        .expect("--role is listed");
+    let roles = role["possible_values"].as_array().expect("role values");
+    for expected in ["orchestrator", "executor"] {
+        assert!(roles.iter().any(|value| value == expected));
+    }
+    assert!(
+        target["commands"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .all(|group| group["name"] != "help"),
+        "the tree lists only commands the binary accepts"
+    );
+
+    // The value of a flag is never read as a command name.
+    let output = run(&["--db", "session", "--help", "--json"]);
+    assert_eq!(
+        parse_stdout_json(&output)["data"]["target"]["name"],
+        "covey"
+    );
+}
+
+#[test]
 fn no_args_emit_short_json_help_for_piped_output() {
     let output = run(&[]);
     assert!(output.status.success());

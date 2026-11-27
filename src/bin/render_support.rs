@@ -71,8 +71,8 @@ pub(crate) fn short_help_payload() -> Value {
     serde_json::to_value(ShortHelpPayload::new()).expect("short help payload")
 }
 
-pub(crate) fn help_payload(help_text: &str) -> Value {
-    serde_json::to_value(HelpPayload::new(help_text.to_owned())).expect("help payload")
+pub(crate) fn help_payload(help_text: &str, raw_args: &[OsString]) -> Value {
+    serde_json::to_value(HelpPayload::new(help_text.to_owned(), raw_args)).expect("help payload")
 }
 
 pub(crate) fn version_payload() -> Value {
@@ -363,16 +363,130 @@ pub(crate) struct HelpPayload {
     pub(crate) version: &'static str,
     pub(crate) help_text: String,
     pub(crate) summary: ShortHelpPayload,
+    /// The command the help was asked for: its own flags and every command
+    /// below it.
+    pub(crate) target: CommandHelp,
+    /// The flags every command accepts.
+    pub(crate) global_flags: Vec<FlagHelp>,
 }
 
 impl HelpPayload {
-    fn new(help_text: String) -> Self {
+    fn new(help_text: String, raw_args: &[OsString]) -> Self {
+        let mut root = <Cli as clap::CommandFactory>::command();
+        root.build();
         Self {
             command: "covey",
             version: env!("CARGO_PKG_VERSION"),
             help_text,
             summary: ShortHelpPayload::new(),
+            target: CommandHelp::of(help_target(&root, raw_args)),
+            global_flags: root
+                .get_arguments()
+                .filter(|arg| arg.is_global_set())
+                .filter_map(FlagHelp::of)
+                .collect(),
         }
+    }
+}
+
+/// The command a help request names: the deepest subcommand on the command
+/// line. The value of a flag is skipped, so it is never read as a subcommand.
+fn help_target<'a>(root: &'a clap::Command, raw_args: &[OsString]) -> &'a clap::Command {
+    let mut command = root;
+    let mut tokens = raw_args.iter().skip(1);
+    while let Some(token) = tokens.next() {
+        let Some(token) = token.to_str() else {
+            continue;
+        };
+        if let Some(long) = token.strip_prefix("--") {
+            let takes_value = !long.contains('=')
+                && command
+                    .get_arguments()
+                    .find(|arg| arg.get_long() == Some(long))
+                    .is_some_and(|arg| arg.get_action().takes_values());
+            if takes_value {
+                tokens.next();
+            }
+        } else if let Some(subcommand) = command.find_subcommand(token) {
+            command = subcommand;
+        }
+    }
+    command
+}
+
+/// One command as the parser declares it: its own flags and its subcommands.
+#[derive(Serialize)]
+pub(crate) struct CommandHelp {
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) about: Option<String>,
+    pub(crate) flags: Vec<FlagHelp>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) commands: Vec<CommandHelp>,
+}
+
+impl CommandHelp {
+    fn of(command: &clap::Command) -> Self {
+        Self {
+            name: command.get_name().to_owned(),
+            about: command.get_about().map(ToString::to_string),
+            flags: command
+                .get_arguments()
+                .filter(|arg| !arg.is_global_set())
+                .filter_map(FlagHelp::of)
+                .collect(),
+            commands: command
+                .get_subcommands()
+                .filter(|subcommand| subcommand.get_name() != "help")
+                .map(Self::of)
+                .collect(),
+        }
+    }
+}
+
+/// One flag as the parser declares it. A flag without `value_name` is a
+/// switch.
+#[derive(Serialize)]
+pub(crate) struct FlagHelp {
+    pub(crate) long: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) value_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) help: Option<String>,
+    pub(crate) required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) env: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) possible_values: Vec<String>,
+}
+
+impl FlagHelp {
+    /// Describes a named, visible flag. The built-in help and version flags
+    /// and positional arguments have no entry.
+    fn of(arg: &clap::Arg) -> Option<Self> {
+        let long = arg.get_long()?;
+        if arg.is_hide_set() || matches!(long, "help" | "version") {
+            return None;
+        }
+        Some(Self {
+            long: format!("--{long}"),
+            value_name: arg.get_action().takes_values().then(|| {
+                arg.get_value_names()
+                    .and_then(|names| names.first())
+                    .map_or_else(|| arg.get_id().as_str().to_uppercase(), ToString::to_string)
+            }),
+            help: arg.get_help().map(ToString::to_string),
+            required: arg.is_required_set(),
+            env: arg
+                .get_env()
+                .map(|name| name.to_string_lossy().into_owned()),
+            possible_values: arg
+                .get_possible_values()
+                .iter()
+                .filter(|value| !value.is_hide_set())
+                .map(|value| value.get_name().to_owned())
+                .collect(),
+        })
     }
 }
 

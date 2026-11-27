@@ -98,7 +98,7 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let cli = match Cli::try_parse_from(raw_args) {
+    let cli = match Cli::try_parse_from(&raw_args) {
         Ok(cli) => cli,
         Err(err) => {
             if matches!(
@@ -118,7 +118,10 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
                     clap::error::ErrorKind::DisplayVersion => {
                         Rendered::summary(version_payload(), version_line())
                     }
-                    _ => Rendered::summary(help_payload(err.to_string().trim()), SHORT_HELP.into()),
+                    _ => Rendered::summary(
+                        help_payload(err.to_string().trim(), &raw_args),
+                        SHORT_HELP.into(),
+                    ),
                 };
                 render_success(mode, &rendered);
                 return Ok(ExitCode::SUCCESS);

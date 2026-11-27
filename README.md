@@ -474,6 +474,24 @@ Short help:
 covey --help
 ```
 
+In JSON mode `--help` answers a payload a program can read, at the root and
+under any group or command:
+
+```bash
+covey --help --json                      # every group and command
+covey subtask claim-next --help --json   # one command
+```
+
+- `help_text` is the rendered help
+- `target` is the command the help was asked for: `name`, `about`, its own
+  `flags`, and its nested `commands`, each with the same four fields
+- `global_flags` lists the flags every command accepts
+- a flag carries `long` and `required`, and where they apply `value_name`
+  (absent for a switch), `help`, `env`, and `possible_values`
+
+The tree is read from the parser's own definitions, so it names exactly the
+commands and flags the binary accepts.
+
 Default workflow (no configuration or governance flags):
 
 ```bash
