@@ -33,11 +33,19 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   persisted-state enums, split by concern behind the re-export root
   `src/model.rs`: `records.rs`, `requests.rs`, `views.rs`, `state.rs`,
   `types.rs`, `events.rs`, `imports.rs`, and `helpers.rs`.
+  A type with invariants is decoded through an unvalidated intermediate and a
+  checked `TryFrom`: a primitive for newtypes, a private `Raw*` mirror struct
+  for records. Where that conversion is the whole decode, the type derives
+  `Deserialize` with `#[serde(try_from = "...")]`; a type whose decode needs
+  more keeps a hand-written impl. Records serialize by projecting onto the
+  mirror by reference, because serde's `into` would clone the record on every
+  write.
 - `src/error.rs`
   Typed domain errors for invalid transitions, ownership violations, lease
   failures, and storage issues. SQLite lock contention surfaces as the
   retryable `StoreBusy`; each variant's snake_case name is the stable refusal
   reason the CLI reports.
+  `CoveyError` has no equality: callers and tests match on the variant.
 - `src/schema.rs`
   Forward-only migrations, SQLite pragmas, and event-log append helpers. A
   store already at the expected version opens without running the migration
