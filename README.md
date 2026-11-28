@@ -280,13 +280,13 @@ Covey relies on single-writer transactional serialization in the local deploymen
 
 - Mutations execute as one transaction or not at all
 - Read paths observe committed state
-- A writer waits for the store's write lock for up to three busy timeouts
-  (5 s each). A store that stays locked answers `StoreBusy` (CLI code `busy`,
-  exit 6) with nothing written, so the same call is safe to retry
+- A writer waits up to 5 s for the store's write lock. A store that stays
+  locked answers `StoreBusy` (CLI code `busy`, exit 6) with nothing written,
+  so the same call is safe to retry
 - Opening a store that is at this binary's schema version runs no migration
   and takes no lock. Opening an older store migrates it under an exclusive lock
   on the sidecar file `<db path>.migrate.lock`, so concurrent openers migrate
-  it once; an opener that waits longer than 15 s answers `StoreBusy`. A
+  it once; an opener that waits longer than 5 s answers `StoreBusy`. A
   foreign-key violation found by a migration rolls that migration back
 - Every successful mutation made with a session token is a liveness signal: it
   refreshes that session's heartbeat and extends the lease of each subtask

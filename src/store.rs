@@ -28,7 +28,7 @@ use crate::{
         load_queue_item_tx, load_subtask_tx,
     },
     schema::{
-        EventActor, SYSTEM_EVENT_SESSION_TOKEN, advance_lease_clock, append_event,
+        EventActor, LOCK_WAIT, SYSTEM_EVENT_SESSION_TOKEN, advance_lease_clock, append_event,
         apply_migrations, apply_pragmas, schema_version,
     },
     validators::{
@@ -47,11 +47,6 @@ pub struct Covey {
 }
 
 static_assertions::assert_impl_all!(Covey: Send, Sync);
-
-/// Attempts at taking the write lock before a mutation reports
-/// [`CoveyError::StoreBusy`]. Each attempt already waits the connection's
-/// `busy_timeout`.
-const WRITE_LOCK_ATTEMPTS: usize = 3;
 
 /// The lease of a claim whose row names no duration: one written before
 /// claims recorded the lease their owner asked for.
@@ -162,8 +157,9 @@ impl Covey {
     /// mutation to the next, whatever the wall clock does, so every timestamp
     /// a mutation writes comes from one non-decreasing source.
     ///
-    /// Taking the write lock is retried, because nothing has run before
-    /// `BEGIN`. A store that stays locked is [`CoveyError::StoreBusy`].
+    /// Taking the write lock waits out the connection's busy timeout, during
+    /// which SQLite retries it. A store still locked after that one wait is
+    /// [`CoveyError::StoreBusy`], and nothing has run.
     pub(crate) fn with_write_tx<T, F>(&self, f: F) -> Result<T>
     where
         F: FnMut(&Transaction<'_>, i64) -> Result<T>,
@@ -177,17 +173,7 @@ impl Covey {
             .conn
             .lock()
             .expect("covey writer connection mutex poisoned");
-        let mut attempts = 0;
-        let tx = loop {
-            attempts += 1;
-            match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                Ok(tx) => break tx,
-                Err(error) => match CoveyError::from(error) {
-                    CoveyError::StoreBusy if attempts < WRITE_LOCK_ATTEMPTS => {}
-                    error => return Err(error),
-                },
-            }
-        };
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = advance_lease_clock(&tx, self.clock.wall_now_ms())?;
         let result = f(&tx, now)?;
         tx.commit()?;
@@ -271,12 +257,8 @@ impl Covey {
 }
 
 fn apply_read_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        PRAGMA busy_timeout = 5000;
-        PRAGMA mmap_size = 268435456;
-        "#,
-    )?;
+    conn.busy_timeout(LOCK_WAIT)?;
+    conn.execute_batch("PRAGMA mmap_size = 268435456;")?;
     Ok(())
 }
 
@@ -1293,12 +1275,12 @@ mod tests {
     }
 
     #[test]
-    fn a_store_that_stays_locked_is_store_busy_after_every_attempt() {
+    fn a_store_that_stays_locked_is_store_busy_after_one_wait() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("covey.db");
         let covey = Covey::open(&path).expect("create the store");
         // SQLite asks the busy handler once per refused `BEGIN IMMEDIATE`, so
-        // the handler counts the attempts without sitting through a timeout.
+        // the handler counts the waits without sitting through a timeout.
         covey
             .conn
             .lock()
@@ -1316,7 +1298,11 @@ mod tests {
             matches!(refused, Err(CoveyError::StoreBusy)),
             "unexpected result: {refused:?}"
         );
-        assert_eq!(REFUSED_WAITS.load(Ordering::SeqCst), WRITE_LOCK_ATTEMPTS);
+        assert_eq!(
+            REFUSED_WAITS.load(Ordering::SeqCst),
+            1,
+            "a second wait would hold the caller past its own deadline"
+        );
 
         blocker
             .execute_batch("COMMIT")

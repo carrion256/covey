@@ -91,13 +91,20 @@ impl<'a> From<&'a str> for EventActor<'a> {
     }
 }
 
-/// `busy_timeout` comes first so that every later statement, including the
+/// How long a call waits for a lock another process holds, whether the
+/// store's write lock or the migration lock, before it answers
+/// [`CoveyError::StoreBusy`]. Callers put a deadline of their own on each
+/// call, so a longer wait would replace this definite, retryable answer with
+/// their timeout.
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// The busy timeout comes first so that every later statement, including the
 /// switch to WAL on a store another process is opening, waits for a lock
 /// instead of failing at once.
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(LOCK_WAIT)?;
     conn.execute_batch(
         r#"
-        PRAGMA busy_timeout = 5000;
         PRAGMA foreign_keys = ON;
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = FULL;
@@ -122,8 +129,6 @@ pub(crate) fn schema_version(conn: &Connection) -> Result<usize> {
     Ok(usize::try_from(version).unwrap_or(0))
 }
 
-/// How long an opener waits for another process to finish migrating.
-const MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(15);
 const MIGRATION_LOCK_POLL: Duration = Duration::from_millis(50);
 
 /// Brings the store to this binary's schema version.
@@ -137,7 +142,7 @@ pub(crate) fn apply_migrations(conn: &mut Connection, db_path: &Path) -> Result<
     if schema_version(conn)? == expected_schema_version() {
         return Ok(());
     }
-    let _lock = lock_for_migration(db_path, MIGRATION_LOCK_WAIT)?;
+    let _lock = lock_for_migration(db_path, LOCK_WAIT)?;
     run_migrations(conn)
 }
 
