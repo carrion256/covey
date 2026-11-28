@@ -935,6 +935,40 @@ fn prune_deletes_old_idempotency_rows_and_only_on_request_old_events() {
 }
 
 #[test]
+fn prune_measures_age_from_the_wall_clock_when_store_time_runs_ahead() {
+    const DAY_MS: i64 = 86_400_000;
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let orch = register(
+        &covey,
+        "orch_prune_ahead",
+        "orch_prune_ahead",
+        SessionRole::Orchestrator,
+    );
+    covey
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(orch.clone(), "recent work", id_key("submit"))
+                .expect("valid submit-meta-task request"),
+        )
+        .expect("submit meta task");
+
+    // The wall clock reads ten days ahead for one write and is then set right,
+    // an hour after the work was filed. Store time stays at the reading it was
+    // ratcheted to.
+    rig.tick(10 * DAY_MS);
+    send_heartbeat(&covey, &orch).expect("a write while the clock reads ahead");
+    rig.tick(3_600_000 - 10 * DAY_MS);
+
+    let pruned = covey.prune_store(DAY_MS, true).expect("prune");
+
+    assert_eq!(
+        (pruned.idempotency_rows, pruned.event_rows),
+        (0, 0),
+        "rows written an hour ago are not a day old"
+    );
+}
+
+#[test]
 fn idempotent_mutations_replay_and_reject_payload_drift() {
     let rig = Rig::new();
     let covey = rig.covey();
@@ -1390,6 +1424,42 @@ fn a_mutation_by_another_session_leaves_a_claim_and_its_owner_alone() {
         stored_heartbeat(&rig, &orch),
         claimed_at + 8_000,
         "the orchestrator's own heartbeat moves"
+    );
+}
+
+#[test]
+fn a_renewal_to_the_largest_deadline_leaves_a_lease_every_reader_decodes() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (worker, claim) = claim_seeded_work(&rig, &covey);
+    let (deadline, _duration) = stored_lease(&rig, &claim);
+    let renewed = covey
+        .renew_claim(
+            RenewClaimReq::try_from_raw_parts(
+                worker.clone(),
+                claim.claim_id.clone(),
+                claim.fence_seq,
+                LeaseDurationMs::parse(i64::MAX - deadline).expect("valid lease duration"),
+                id_key("renew-claim"),
+            )
+            .expect("valid renew-claim request"),
+        )
+        .expect("renew to the largest deadline");
+    assert_eq!(renewed.lease_deadline.get(), i64::MAX);
+
+    // Past the first deadline the clock plus the stored duration no longer
+    // fits. The extension stops at the largest deadline instead of writing a
+    // value no reader can decode.
+    rig.tick(20_000);
+    send_heartbeat(&covey, &worker).expect("heartbeat after the renewal");
+
+    assert_eq!(stored_lease(&rig, &claim).0, i64::MAX);
+    assert_eq!(
+        covey
+            .expire_old_claims()
+            .expect("the claim still decodes")
+            .expired_count,
+        0
     );
 }
 

@@ -27,7 +27,10 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   ratchets the wall clock through a monotonic logical clock inside SQLite and
   uses the result for lease ordering and for the timestamps it writes, so
   wall-clock skew cannot resurrect an expired lease or put `updated_at` before
-  `created_at`. Read paths use the wall clock for ages.
+  `created_at`. The ratchet also keeps a reading that was ahead of real time:
+  store time stays at the highest reading until real time passes it, which is
+  why `maint prune` measures age from the earlier of store time and the wall
+  clock. Read paths use the wall clock for ages.
 - `src/model/`
   Typed domain records, request DTOs, status payloads, event payloads, and
   persisted-state enums, split by concern behind the re-export root
@@ -50,8 +53,9 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   Forward-only migrations, SQLite pragmas, and event-log append helpers. A
   store already at the expected version opens without running the migration
   runner. Otherwise the runner works under an exclusive lock on
-  `<db path>.migrate.lock`, and the final migration checks foreign keys inside
-  the migration transaction.
+  `<db path>.migrate.lock`, placed beside the file the path resolves to, and
+  the final migration checks foreign keys inside the migration transaction.
+  Lock contention the runner meets is `StoreBusy` like any other.
 - `src/queries.rs`
   Read-side row loading and deserialization helpers.
 - `src/validators.rs`
@@ -64,14 +68,16 @@ Covey is a small, correctness-critical coordination substrate. The architecture 
   the typed error reported instead of a partial verdict.
 - `src/store.rs`
   Connection ownership, transaction helpers, idempotency persistence, and shared
-  mutation utilities. The write-transaction helper retries the write lock a
-  bounded number of times and hands every mutation the store time described
-  under `src/clock.rs`. It also owns the read-only open, which creates nothing,
-  migrates nothing, and refuses every write, and the pragmas applied to read
-  connections. The idempotent-mutation wrapper is also where liveness is
-  recorded: a first, successful run refreshes the acting session's heartbeat
-  and extends the leases of the subtask claims that session holds, each by the
-  duration stored on the claim, so no operation module does this for itself.
+  mutation utilities. The write-transaction helper takes the write lock in one
+  attempt, which waits out SQLite's busy timeout, and hands every mutation the
+  store time described under `src/clock.rs`. It also owns the read-only open,
+  which creates nothing, migrates nothing, and refuses every write, and the
+  pragmas applied to read connections. The idempotent-mutation wrapper is also
+  where liveness is recorded: a first, successful run refreshes the acting
+  session's heartbeat and extends the leases of the work and review claims
+  that session holds, each by the duration stored on the claim, so no
+  operation module does this for itself. A cleanup claim is not extended: its
+  lease ends with the path reservations it was issued with.
   This file should not grow back into the full API surface.
 
 ### Operation modules

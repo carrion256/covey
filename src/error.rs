@@ -253,22 +253,44 @@ pub enum CoveyError {
     #[error(transparent)]
     DatabaseError(rusqlite::Error),
     #[error(transparent)]
-    MigrationError(#[from] rusqlite_migration::Error),
+    MigrationError(rusqlite_migration::Error),
     #[error(transparent)]
     SerializationError(#[from] serde_json::Error),
     #[error(transparent)]
     TypeValidationError(#[from] CoveyTypeValidationError),
 }
 
+/// SQLite reports lock contention as `SQLITE_BUSY` or `SQLITE_LOCKED`. Both
+/// mean "retry later".
+fn is_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
 impl From<rusqlite::Error> for CoveyError {
-    /// SQLite reports lock contention as `SQLITE_BUSY` or `SQLITE_LOCKED`.
-    /// Both mean "retry later", so they become [`CoveyError::StoreBusy`].
+    /// Lock contention becomes [`CoveyError::StoreBusy`]; every other SQLite
+    /// error stays a database error.
     fn from(error: rusqlite::Error) -> Self {
-        match error.sqlite_error_code() {
-            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+        if is_lock_contention(&error) {
+            Self::StoreBusy
+        } else {
+            Self::DatabaseError(error)
+        }
+    }
+}
+
+impl From<rusqlite_migration::Error> for CoveyError {
+    /// The migration runner wraps the SQLite error of the statement that
+    /// failed. Lock contention there is the same "retry later" as anywhere
+    /// else, so it becomes [`CoveyError::StoreBusy`] too.
+    fn from(error: rusqlite_migration::Error) -> Self {
+        match error {
+            rusqlite_migration::Error::RusqliteError { err, .. } if is_lock_contention(&err) => {
                 Self::StoreBusy
             }
-            _ => Self::DatabaseError(error),
+            other => Self::MigrationError(other),
         }
     }
 }

@@ -198,15 +198,19 @@ impl Covey {
     ///
     /// An idempotency row matters only while its caller may still retry, and
     /// the event log is a feed rather than the source of truth, so both can be
-    /// cut back by age. The pass records itself as one `store_pruned` event,
-    /// which is newer than the cutoff and so survives it.
+    /// cut back by age. The age is measured back from the earlier of store
+    /// time and the wall clock: store time runs ahead of the wall clock after
+    /// the clock was set forward and corrected, and a row written just before
+    /// that jump must not count as old. The pass records itself as one
+    /// `store_pruned` event, which is newer than the cutoff and so survives it.
     pub fn prune_store(&self, older_than_ms: i64, prune_events: bool) -> Result<PruneResult> {
         if older_than_ms <= 0 {
             return Err(CoveyTypeValidationError::new("older_than_ms", "must be positive").into());
         }
         let started_at = Instant::now();
+        let wall_now = self.clock.wall_now_ms();
         let result = self.with_write_tx(|tx, now| {
-            let cutoff = now.saturating_sub(older_than_ms);
+            let cutoff = now.min(wall_now).saturating_sub(older_than_ms);
             let idempotency_rows = tx.execute(
                 "DELETE FROM mutation_idempotency WHERE created_at < ?1",
                 params![cutoff],

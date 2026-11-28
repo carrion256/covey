@@ -1,5 +1,6 @@
 use std::{
     fs::{File, OpenOptions, TryLockError},
+    io,
     path::Path,
     thread,
     time::{Duration, Instant},
@@ -151,14 +152,20 @@ pub(crate) fn apply_migrations(conn: &mut Connection, db_path: &Path) -> Result<
 /// with the handle, so a migrator that crashed cannot leave it held. An
 /// in-memory store is private to its connection and takes no lock.
 ///
+/// The lock file sits beside the file the store path resolves to, so openers
+/// that reach one store through different paths take the same lock.
+///
 /// Waiting longer than `wait` for another holder is [`CoveyError::StoreBusy`].
 fn lock_for_migration(db_path: &Path, wait: Duration) -> Result<Option<File>> {
     if db_path == Path::new(":memory:") {
         return Ok(None);
     }
-    let mut lock_path = db_path.as_os_str().to_owned();
+    let mut lock_path = db_path
+        .canonicalize()
+        .unwrap_or_else(|_| db_path.to_owned())
+        .into_os_string();
     lock_path.push(".migrate.lock");
-    let lock_error = |error: std::io::Error| {
+    let lock_error = |error: io::Error| {
         CoveyError::from(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
             Some(format!(
@@ -167,12 +174,7 @@ fn lock_for_migration(db_path: &Path, wait: Duration) -> Result<Option<File>> {
             )),
         ))
     };
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(lock_error)?;
+    let file = open_lock_file(Path::new(&lock_path)).map_err(lock_error)?;
     let deadline = Instant::now() + wait;
     loop {
         match file.try_lock() {
@@ -183,6 +185,21 @@ fn lock_for_migration(db_path: &Path, wait: Duration) -> Result<Option<File>> {
             Err(TryLockError::WouldBlock) => return Err(CoveyError::StoreBusy),
             Err(TryLockError::Error(error)) => return Err(lock_error(error)),
         }
+    }
+}
+
+/// Opens the migration lock file, creating it when it is missing. An existing
+/// file is opened for reading only: taking the lock needs no write access, so
+/// a store several users share is not tied to the user whose open created
+/// the file.
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    match File::open(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path),
+        opened => opened,
     }
 }
 
@@ -385,5 +402,62 @@ mod tests {
         drop(holder);
         lock_for_migration(&db_path, Duration::ZERO)
             .expect("the lock is free once its holder is gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn openers_that_reach_one_store_through_a_symlink_share_the_migration_lock() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("covey.db");
+        File::create(&db_path).expect("create the store file");
+        let link_path = dir.path().join("link.db");
+        std::os::unix::fs::symlink(&db_path, &link_path).expect("link to the store");
+
+        let _holder = lock_for_migration(&db_path, Duration::ZERO)
+            .expect("the first opener takes the lock")
+            .expect("a file-backed store has a lock file");
+        let through_link = lock_for_migration(&link_path, Duration::ZERO);
+
+        assert!(
+            matches!(through_link, Err(CoveyError::StoreBusy)),
+            "unexpected result: {through_link:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_the_opener_cannot_write_still_locks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("covey.db");
+        let lock_path = dir.path().join("covey.db.migrate.lock");
+        File::create(&lock_path).expect("create the lock file");
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o444))
+            .expect("make the lock file read-only");
+
+        lock_for_migration(&db_path, Duration::ZERO)
+            .expect("locking needs no write access to the lock file")
+            .expect("a file-backed store has a lock file");
+    }
+
+    #[test]
+    fn a_locked_store_refuses_a_migration_as_store_busy() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("covey.db");
+        let mut conn = Connection::open(&db_path).expect("open the store");
+        conn.busy_timeout(Duration::ZERO)
+            .expect("answer a held lock at once");
+        let blocker = Connection::open(&db_path).expect("open the blocking connection");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold the write lock");
+
+        let refused = run_migrations(&mut conn);
+
+        assert!(
+            matches!(refused, Err(CoveyError::StoreBusy)),
+            "unexpected result: {refused:?}"
+        );
     }
 }

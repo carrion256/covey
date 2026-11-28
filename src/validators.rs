@@ -310,8 +310,10 @@ pub(crate) fn issue_fence_seq(tx: &Transaction<'_>, subtask_id: &str) -> Result<
 /// A lapsed lease does not invalidate a held claim. The lease only decides
 /// when the claim may be taken away (`expire_old_claims`, stale-session
 /// reaping, the lazy expiry inside a claim). Until one of those has expired
-/// it, the owner keeps every claim-fenced call; afterwards the owner gets
-/// [`CoveyError::ClaimNotHeld`].
+/// it, the owner keeps every claim-fenced call. Afterwards the owner gets
+/// [`CoveyError::ClaimNotHeld`], or [`CoveyError::SessionNotActive`] when the
+/// reaping that expired the claim also retired the session: the session is
+/// checked first.
 pub(crate) fn require_current_claim(
     tx: &Transaction<'_>,
     session_token: &str,
@@ -340,6 +342,19 @@ pub(crate) fn require_current_claim(
         });
     }
     Ok(claim)
+}
+
+/// Refuses a held claim whose lease has run out. Only a call whose claim
+/// stands for something that ends with the lease asks this; every other
+/// fenced call accepts a held claim whatever its lease says (see
+/// [`require_current_claim`]).
+pub(crate) fn require_live_lease(claim: &Claim, now: i64) -> Result<()> {
+    if claim.lease_deadline.get() <= now {
+        return Err(CoveyError::LeaseExpired {
+            object_id: claim.claim_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn close_claim_and_detach(

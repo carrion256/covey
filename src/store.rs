@@ -265,10 +265,12 @@ fn apply_read_pragmas(conn: &Connection) -> Result<()> {
 /// Counts a successful mutation by `actor_key` as a liveness signal.
 ///
 /// When `actor_key` is the token of an active session, that session's
-/// heartbeat moves to the store's current time and every subtask claim the
-/// session holds has its lease extended to at least the lease clock plus the
-/// claim's own lease duration. An actor key that names no active session
-/// changes nothing. No event is appended.
+/// heartbeat moves to the store's current time and every claim the session
+/// holds on work or review has its lease extended to at least the lease clock
+/// plus the claim's own lease duration, capped at the largest deadline the
+/// store can hold. A cleanup claim is left alone: its lease ends with the
+/// path reservations it was issued with. An actor key that names no active
+/// session changes nothing. No event is appended.
 fn record_session_liveness(tx: &Transaction<'_>, actor_key: &str, now: i64) -> Result<()> {
     let lease_now = advance_lease_clock(tx, now)?;
     let heartbeats = tx.execute(
@@ -286,15 +288,22 @@ fn record_session_liveness(tx: &Transaction<'_>, actor_key: &str, now: i64) -> R
     }
     tx.execute(
         "UPDATE claims
-         SET lease_deadline = ?2 + COALESCE(lease_duration_ms, ?3), updated_at = ?4
+         SET lease_deadline = ?2 + MIN(COALESCE(lease_duration_ms, ?3), ?6 - ?2),
+             updated_at = ?4
          WHERE owner_session_token = ?1 AND state = ?5
-           AND lease_deadline < ?2 + COALESCE(lease_duration_ms, ?3)",
+           AND lease_deadline < ?2 + MIN(COALESCE(lease_duration_ms, ?3), ?6 - ?2)
+           AND NOT EXISTS (
+               SELECT 1 FROM subtasks
+               WHERE subtasks.subtask_id = claims.subtask_id AND subtasks.kind = ?7
+           )",
         params![
             actor_key,
             lease_now,
             DEFAULT_CLAIM_LEASE_MS,
             now,
-            claim_state_name(ClaimState::Held)
+            claim_state_name(ClaimState::Held),
+            i64::MAX,
+            subtask_kind_name(SubtaskKind::Cleanup)
         ],
     )?;
     Ok(())
@@ -1202,7 +1211,7 @@ mod tests {
         let (_applied, expected) = earlier_store(&path);
 
         // Both openers leave the barrier together. Every wait after that is
-        // bounded by the store itself: 15 s for the migration lock and the 5 s
+        // bounded by the store itself: 5 s for the migration lock and the 5 s
         // busy timeout per statement. An opener that reaches a bound fails by
         // name below instead of hanging.
         let barrier = Arc::new(Barrier::new(2));

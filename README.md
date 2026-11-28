@@ -89,9 +89,10 @@ Covey exists to make invalid states hard or impossible.
 - Direct attempt outcomes require the current held claim and exact fence, and
   close that claim in the same transaction
 - A held claim stays valid for its owner after its lease lapses. The lease
-  decides only when the claim may be taken away: once `maint expire-claims`,
-  stale-session reaping, or the next claim on that subtask has expired it, the
-  old owner's calls answer `claim_not_held`
+  decides only when the claim may be taken away. Once `maint expire-claims` or
+  the next claim on that subtask has expired it, the old owner's calls answer
+  `claim_not_held`; stale-session reaping expires it together with its
+  session, and the old owner's calls then answer `session_not_active`
 - `direct` work cannot publish artifacts, request review, or enter the apply
   queue; `reviewed` work cannot enter the apply queue; only
   `canonical_apply` work can reach `applied`
@@ -115,7 +116,9 @@ Covey exists to make invalid states hard or impossible.
   never matches
 - A store opened with `--read-only` refuses every write
 - Timestamps written by mutations never run backwards: store time is the wall
-  clock ratcheted through the lease clock inside each write transaction
+  clock ratcheted through the lease clock inside each write transaction. A
+  wall clock that read ahead and was set right leaves store time at the
+  highest reading until real time passes it
 
 These guarantees are enforced through database constraints plus transactional checks in the Covey API layer.
 
@@ -510,8 +513,10 @@ covey --as me subtask finish --claim-id <claim> --fence-seq <fence> \
 ```
 
 `--as PRINCIPAL` names who is acting instead of a session token; every command
-that takes `--session-token` takes exactly one of the two. The command runs as
-the principal's active session in the role it needs:
+that takes `--session-token` takes exactly one of the two, except `import
+openspec`: its dry run needs no session and ignores `--as`, and its write
+without either is refused by the importer (`invalid_import_destination`). The
+command runs as the principal's active session in the role it needs:
 
 - a command that starts work registers that session when the principal has
   none in the role: the `meta` writes, `subtask create`, `retire`,
@@ -528,6 +533,10 @@ the principal's active session in the role it needs:
 - the `session` commands act on the principal's one active session and ask for
   `--as-role` when it holds several
 - under `--read-only` no session is registered
+
+Registering the session is a write of its own that is made before the
+command's request is checked, so a command that is then refused leaves the
+session registered.
 
 The role is the command's own: orchestrator to plan and file, executor to take
 and hold work, reviewer to decide a review, apply gate for the apply queue, and
@@ -565,7 +574,11 @@ covey maint prune --older-than-ms 2592000000 --events
 
 `maint prune` deletes idempotency rows older than the given age, and with
 `--events` event-log rows of that age as well. It answers both counts and
-records itself as one `store_pruned` event.
+records itself as one `store_pruned` event. A call whose idempotency row is
+gone runs again when its caller retries it, so the age has to be longer than
+any caller keeps retrying. The age is measured back from the earlier of store
+time and the wall clock, so a clock that read ahead cannot make a recent row
+look old.
 
 Scheduler read paths are explicit and read-only:
 

@@ -548,6 +548,96 @@ fn direct_applied_openspec_artifact_blocks_until_archive_cleanup_finishes() {
 }
 
 #[test]
+fn an_archive_cleanup_claim_ends_with_its_lease() {
+    let rig = Rig::new();
+    let change_id = "cleanup-lease-change";
+    let (_subtask_id, covey) = approve_work_artifact(
+        &rig,
+        ArtifactKind::VerificationBundle,
+        "cleanup_lease_archive",
+        Some(change_id),
+    );
+    let orchestrator = register(
+        &covey,
+        "orchestrator-cleanup-lease",
+        SessionRole::Orchestrator,
+    );
+    let begin = |label: &str| {
+        covey
+            .begin_openspec_archive_cleanup(
+                BeginOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                    orchestrator.clone(),
+                    change_id,
+                    vec!["openspec/changes/cleanup-lease-change".to_owned()],
+                    id_key(label),
+                )
+                .expect("valid begin archive cleanup"),
+            )
+            .expect("begin archive cleanup")
+    };
+    let finish = |claim_id: String, fence_seq: i64, label: &str| {
+        covey.finish_openspec_archive_cleanup(
+            FinishOpenSpecArchiveCleanupReq::try_from_raw_parts(
+                orchestrator.clone(),
+                change_id,
+                claim_id,
+                fence_seq,
+                "blake3:cleanup_lease_archive_proof",
+                id_key(label),
+            )
+            .expect("valid finish archive cleanup"),
+        )
+    };
+    let first = begin("begin-archive");
+
+    // The claim shares one 600 s lease with the path reservations it was
+    // issued with. Other work the orchestrator files in between is no reason
+    // to keep the claim past them.
+    rig.tick(300_000);
+    covey
+        .submit_meta_task(
+            SubmitMetaTaskReq::try_from_raw_parts(
+                orchestrator.clone(),
+                "unrelated work",
+                id_key("submit-meta-task"),
+            )
+            .expect("valid submit-meta-task request"),
+        )
+        .expect("the orchestrator files other work");
+    rig.tick(300_001);
+
+    let late = finish(
+        first.cleanup_claim_id.to_string(),
+        first.fence_seq.get(),
+        "finish-archive-late",
+    )
+    .err();
+    assert!(
+        matches!(late, Some(covey::CoveyError::LeaseExpired { .. })),
+        "unexpected result: {late:?}"
+    );
+
+    let second = begin("begin-archive-again");
+    assert!(
+        second.fence_seq.get() > first.fence_seq.get(),
+        "a claim issued after the lease ran out carries a new fence"
+    );
+    let _finished = finish(
+        second.cleanup_claim_id.to_string(),
+        second.fence_seq.get(),
+        "finish-archive",
+    )
+    .expect("finish under the fresh claim");
+    assert_eq!(
+        covey
+            .openspec_current_work(change_id)
+            .expect("current work after archive cleanup")
+            .state,
+        OpenSpecCurrentWorkState::Archived
+    );
+}
+
+#[test]
 fn reconcile_apply_queue_materializes_historical_approved_work() {
     let rig = Rig::new();
     let covey = rig.covey();

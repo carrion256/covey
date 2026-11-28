@@ -8,7 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// Mutations do not write this value directly: each write transaction ratchets
 /// it through a monotonic logical clock inside SQLite, so neither lease
-/// ordering nor a written timestamp follows the wall clock backwards.
+/// ordering nor a written timestamp follows the wall clock backwards. The
+/// ratchet keeps a reading that was ahead of real time too: store time stays
+/// at the highest reading until real time passes it.
 pub trait Clock: Send + Sync {
     /// Returns the current wall-clock time in Unix milliseconds.
     fn wall_now_ms(&self) -> i64;

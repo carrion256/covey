@@ -40,8 +40,8 @@ use crate::{
         MAX_DIGEST_LEN, MAX_OBJECT_ID_LEN, ensure_length, ensure_meta_task_exists,
         ensure_meta_task_is_schedulable, ensure_positive_lease_duration,
         ensure_ready_queue_transition, ensure_subtask_transition, issue_fence_seq,
-        require_active_session, require_current_claim, require_role, require_runtime_attestation,
-        require_session_can_enqueue,
+        require_active_session, require_current_claim, require_live_lease, require_role,
+        require_runtime_attestation, require_session_can_enqueue,
     },
 };
 
@@ -1524,12 +1524,16 @@ impl Covey {
                         &req.openspec_change_id,
                         &req.cleanup_claim_id,
                     )?;
-                    let _claim = require_current_claim(
+                    // The cleanup claim was issued with path reservations that
+                    // expire with its lease, so a finish after the lease ran
+                    // out would archive paths nothing reserves any more.
+                    let claim = require_current_claim(
                         tx,
                         &req.session_token,
                         &req.cleanup_claim_id,
                         req.fence_seq,
                     )?;
+                    require_live_lease(&claim, now)?;
                     let open_blockers = load_open_openspec_archive_blockers_for_change_tx(
                         tx,
                         &req.openspec_change_id,

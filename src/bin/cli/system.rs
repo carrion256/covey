@@ -37,7 +37,9 @@ pub(crate) struct BackupArgs {
 }
 #[derive(Args, Debug)]
 pub(crate) struct PruneArgs {
-    /// Age in milliseconds; rows older than this are deleted.
+    /// Age in milliseconds; rows older than this are deleted. A call whose
+    /// idempotency row is gone runs again when its caller retries it, so the
+    /// age has to be longer than any caller keeps retrying.
     #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
     pub(crate) older_than_ms: i64,
     /// Also delete event-log rows older than that age.
