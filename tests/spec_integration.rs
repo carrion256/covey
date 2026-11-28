@@ -1559,6 +1559,56 @@ fn claim_by_id_with_start_claims_and_starts_in_one_mutation() {
 }
 
 #[test]
+fn a_start_that_fails_takes_its_claim_back_with_it() {
+    let rig = Rig::new();
+    let covey = rig.covey();
+    let (_meta_task_id, subtask_id) = seed_work_subtask(&rig);
+    let worker = register(&covey, "worker", "worker", SessionRole::Executor);
+    let events = covey.fetch_events(0, 1_000).expect("events").len();
+    // The claim half writes `claimed`. This trigger refuses the start half's
+    // write of `in_progress`, so the call fails after its claim was made.
+    let db = Connection::open(&rig.db_path).expect("open database");
+    db.execute_batch(
+        "CREATE TRIGGER refuse_start BEFORE UPDATE OF state ON subtasks
+         WHEN NEW.state = 'in_progress'
+         BEGIN SELECT RAISE(ABORT, 'planted start failure'); END;",
+    )
+    .expect("plant the failing start");
+    let claim_and_start = |label: &str| {
+        covey.claim_subtask(
+            ClaimSubtaskReq::try_from_raw_parts(
+                worker.clone(),
+                subtask_id.clone(),
+                LeaseDurationMs::parse(10_000).expect("valid lease duration"),
+                id_key(label),
+            )
+            .expect("valid claim-subtask request")
+            .with_start(true),
+        )
+    };
+
+    let refused = claim_and_start("claim-refused");
+
+    assert!(refused.is_err(), "unexpected result: {refused:?}");
+    let claims: i64 = db
+        .query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))
+        .expect("count claims");
+    assert_eq!(claims, 0, "the claim made before the failed start is gone");
+    let status = covey.subtask_status(&subtask_id).expect("status");
+    assert_eq!(status.subtask().state(), SubtaskState::Available);
+    assert!(event_types_since(&covey, events).is_empty());
+
+    db.execute_batch("DROP TRIGGER refuse_start")
+        .expect("lift the planted failure");
+    let claim = claim_and_start("claim-accepted").expect("claim and start");
+    assert_eq!(claim.subtask_id.to_string(), subtask_id);
+    assert_eq!(
+        event_types_since(&covey, events),
+        [EventType::SubtaskClaimed, EventType::SubtaskStarted]
+    );
+}
+
+#[test]
 fn import_repeat_is_deterministic() {
     let rig = Rig::new();
     let covey = rig.covey();
