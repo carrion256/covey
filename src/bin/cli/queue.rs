@@ -2,6 +2,8 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use covey::{ApplyGateBlockerKind, SettlementReconcileReason};
 
+use super::SessionArg;
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub(crate) enum OpenSpecArchiveStatusStateArg {
@@ -54,8 +56,8 @@ pub(crate) struct ListQueueArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct EnqueueQueueArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) artifact_digest: String,
     #[arg(long)]
@@ -66,16 +68,16 @@ pub(crate) struct EnqueueQueueArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ReconcileApplyQueueArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct ClaimNextQueueArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) lease_duration_ms: i64,
     #[arg(long)]
@@ -84,8 +86,8 @@ pub(crate) struct ClaimNextQueueArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct MarkInFlightArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -96,8 +98,8 @@ pub(crate) struct MarkInFlightArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecordApplyVerificationArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -120,8 +122,8 @@ pub(crate) struct RecordApplyVerificationArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecordApplyGateBlockerArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -158,8 +160,8 @@ impl From<ApplyGateBlockerKindArg> for ApplyGateBlockerKind {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecordSettlementReconcileBlockerArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -202,8 +204,8 @@ impl From<SettlementReconcileReasonArg> for SettlementReconcileReason {
 
 #[derive(Args, Debug)]
 pub(crate) struct VerifyLandingAuthorizationArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -224,8 +226,8 @@ pub(crate) struct VerifyLandingAuthorizationArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecordLandingReceiptArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -240,8 +242,8 @@ pub(crate) struct RecordLandingReceiptArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct MarkAppliedArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -252,8 +254,8 @@ pub(crate) struct MarkAppliedArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecordOpenSpecArchiveStatusArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]
@@ -278,8 +280,8 @@ pub(crate) struct ListOpenSpecArchiveBlockersArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct SupersedeQueueArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) queue_id: String,
     #[arg(long)]

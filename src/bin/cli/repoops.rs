@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
 
+use super::SessionArg;
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum RepoopsCommand {
     AuthoritySnapshot(RepoopsAuthoritySnapshotArgs),
@@ -7,8 +9,8 @@ pub(crate) enum RepoopsCommand {
 
 #[derive(Args, Debug)]
 pub(crate) struct RepoopsAuthoritySnapshotArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
 
     #[arg(long)]
     pub(crate) claim_id: String,

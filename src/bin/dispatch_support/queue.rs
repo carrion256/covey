@@ -1,7 +1,11 @@
 use super::*;
 use crate::cli::OpenSpecArchiveStatusStateArg;
 
-pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Result<Rendered> {
+pub(super) fn dispatch_queue(
+    store: &Covey,
+    actor: &Actor,
+    command: QueueCommand,
+) -> covey::Result<Rendered> {
     match command {
         QueueCommand::List(args) => {
             let items = store.fetch_ready_queue(args.limit)?;
@@ -13,7 +17,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::Enqueue(args) => {
             let req = EnqueueForApplyReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.artifact_digest,
                 args.subtask_id,
                 SettlementTarget::Canonical,
@@ -31,7 +35,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         QueueCommand::ReconcileApply(args) => {
             let result =
                 store.reconcile_apply_queue(ReconcileApplyQueueReq::try_from_raw_parts(
-                    args.session_token,
+                    actor.session_token(store, args.session, PLANNING)?,
                     args.idempotency_key
                         .unwrap_or_else(|| new_idempotency_key("reconcile-apply-queue")),
                 )?)?;
@@ -43,7 +47,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         QueueCommand::ClaimNext(args) => {
             let claim =
                 store.claim_next_ready_queue_item(ClaimReadyQueueReq::try_from_raw_parts(
-                    args.session_token,
+                    actor.session_token(store, args.session, TAKING_APPLY)?,
                     args.lease_duration_ms,
                     args.idempotency_key
                         .unwrap_or_else(|| new_idempotency_key("claim-next-ready-queue")),
@@ -61,7 +65,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::MarkInFlight(args) => {
             let claim = store.mark_in_flight(MarkInFlightReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, TAKING_APPLY)?,
                 args.queue_id,
                 args.lease_duration_ms,
                 args.idempotency_key
@@ -77,7 +81,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::RecordApplyVerification(args) => {
             let req = RecordApplyVerificationReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_APPLY)?,
                 args.queue_id.clone(),
                 args.artifact_digest,
                 args.review_id,
@@ -101,7 +105,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::RecordApplyGateBlocker(args) => {
             let req = RecordApplyGateBlockerReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_APPLY)?,
                 args.queue_id.clone(),
                 args.artifact_digest,
                 args.claim_fence_seq,
@@ -127,7 +131,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::RecordSettlementReconcileBlocker(args) => {
             let req = RecordSettlementReconcileBlockerReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_APPLY)?,
                 args.queue_id.clone(),
                 args.artifact_digest,
                 args.claim_fence_seq,
@@ -152,7 +156,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         QueueCommand::VerifyLandingAuthorization(args) => {
             let status = store.verify_landing_authorization(
                 VerifyLandingAuthorizationReq::try_from_raw_parts(
-                    args.session_token,
+                    actor.session_token(store, args.session, HOLDING_APPLY)?,
                     args.queue_id,
                     args.artifact_digest,
                     args.review_id,
@@ -173,7 +177,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             let artifact_digest = args.artifact_digest.clone();
             let landed_commit_oid = args.landed_commit_oid.clone();
             let req = RecordLandingReceiptReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_APPLY)?,
                 args.queue_id,
                 args.artifact_digest,
                 args.claim_fence_seq,
@@ -193,7 +197,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::MarkApplied(args) => {
             let req = MarkAppliedReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_APPLY)?,
                 args.queue_id.clone(),
                 args.claim_fence_seq,
                 args.idempotency_key
@@ -216,7 +220,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
             };
             let status = store.record_openspec_archive_status(
                 RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
-                    args.session_token,
+                    actor.session_token(store, args.session, PLANNING)?,
                     args.queue_id.clone(),
                     args.artifact_digest,
                     args.openspec_change_id,
@@ -242,7 +246,7 @@ pub(super) fn dispatch_queue(store: &Covey, command: QueueCommand) -> covey::Res
         }
         QueueCommand::Supersede(args) => {
             store.supersede_queue_item(SupersedeQueueItemReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, TAKING_APPLY)?,
                 args.queue_id.clone(),
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("supersede-queue-item")),

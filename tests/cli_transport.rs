@@ -385,6 +385,211 @@ fn claim_next_with_start_leaves_only_the_finish_to_do() {
     );
 }
 
+/// A command against the store `COVEY_DB_PATH` names, acting as `principal`.
+fn acting_as(dir: &TempDir, db: &Path, principal: &str) -> Command {
+    let mut command = covey(dir);
+    command.env("COVEY_DB_PATH", db).args(["--as", principal]);
+    command
+}
+
+/// The active session a principal holds in a role, or JSON null.
+fn active_session(dir: &TempDir, db: &Path, principal: &str, role: &str) -> serde_json::Value {
+    success_data(
+        &covey(dir)
+            .env("COVEY_DB_PATH", db)
+            .args([
+                "session",
+                "active-for-principal",
+                "--agent-principal-id",
+                principal,
+                "--role",
+                role,
+            ])
+            .output()
+            .expect("run covey"),
+    )
+}
+
+#[test]
+fn one_principal_files_takes_and_finishes_a_task_in_three_calls() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    let run = |args: &[&str]| {
+        acting_as(&dir, &db, "me")
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+
+    let filed: serde_json::Value = success_data(&run(&[
+        "meta",
+        "submit",
+        "--prompt-text",
+        "ship it",
+        "--subtask-title",
+        "do the work",
+    ]));
+    let claim: ClaimData = success_data(&run(&["subtask", "claim-next", "--start"]));
+    success_data::<serde::de::IgnoredAny>(&run(&[
+        "subtask",
+        "finish",
+        "--claim-id",
+        &claim.claim_id,
+        "--fence-seq",
+        &claim.fence_seq.to_string(),
+        "--summary",
+        "done",
+    ]));
+
+    // The task closed itself when its only subtask finished.
+    let completed: serde_json::Value = success_data(
+        &covey(&dir)
+            .env("COVEY_DB_PATH", &db)
+            .args(["meta", "list", "--state", "completed"])
+            .output()
+            .expect("run covey"),
+    );
+    assert_eq!(completed[0]["meta_task_id"], filed["meta_task_id"]);
+    // The principal planned as an orchestrator and worked as an executor.
+    for role in ["orchestrator", "executor"] {
+        assert_eq!(
+            active_session(&dir, &db, "me", role)["agent_principal_id"],
+            "me"
+        );
+    }
+}
+
+#[test]
+fn a_command_names_its_session_exactly_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    let token = register_orchestrator(&dir, &db);
+    let run = |args: &[&str]| {
+        covey(&dir)
+            .arg("--db")
+            .arg(&db)
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+
+    let neither = run(&["meta", "submit", "--prompt-text", "no session"]);
+    let both = run(&[
+        "--as",
+        "principal",
+        "meta",
+        "submit",
+        "--session-token",
+        &token,
+        "--prompt-text",
+        "two sessions",
+    ]);
+    for refused in [&neither, &both] {
+        assert_eq!(refused.status.code(), Some(2));
+        let error = stderr_error(refused);
+        assert_eq!(error.code, "invalid_args");
+        assert_eq!(error.reason, "type_validation_error");
+    }
+    assert_eq!(meta_task_count(&db), 0, "a refused selector files nothing");
+
+    let role_alone = run(&["--as-role", "executor", "subtask", "claim-next"]);
+    assert_eq!(role_alone.status.code(), Some(2));
+    assert_eq!(stderr_error(&role_alone).reason, "invalid_args");
+}
+
+#[test]
+fn acting_as_a_principal_registers_a_session_only_to_start_work() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    register_orchestrator(&dir, &db);
+    let run = |args: &[&str]| {
+        acting_as(&dir, &db, "newcomer")
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+    let refused_without_a_session = |output: &Output, role: &str| {
+        assert_eq!(output.status.code(), Some(1));
+        let error = stderr_error(output);
+        assert_eq!(error.code, "not_found");
+        assert_eq!(error.reason, "no_active_session");
+        assert!(
+            active_session(&dir, &db, "newcomer", role).is_null(),
+            "the refused command registered no {role} session"
+        );
+    };
+
+    // Finishing continues work a session holds, so it only looks the session up.
+    refused_without_a_session(
+        &run(&[
+            "subtask",
+            "finish",
+            "--claim-id",
+            "claim-of-nobody",
+            "--fence-seq",
+            "1",
+            "--summary",
+            "done",
+        ]),
+        "executor",
+    );
+    // A read-only store is never written to, not even to register a session.
+    refused_without_a_session(
+        &run(&["--read-only", "meta", "submit", "--prompt-text", "refused"]),
+        "orchestrator",
+    );
+
+    // Starting work registers the session it needs.
+    success_data::<serde::de::IgnoredAny>(&run(&["meta", "submit", "--prompt-text", "accepted"]));
+    assert_eq!(
+        active_session(&dir, &db, "newcomer", "orchestrator")["agent_principal_id"],
+        "newcomer"
+    );
+}
+
+#[test]
+fn acting_as_a_principal_picks_the_session_by_role() {
+    let dir = TempDir::new().expect("tempdir");
+    let db = dir.path().join("covey.db");
+    let run = |args: &[&str]| {
+        acting_as(&dir, &db, "me")
+            .args(args)
+            .output()
+            .expect("run covey")
+    };
+    let filed: serde_json::Value = success_data(&run(&[
+        "meta",
+        "submit",
+        "--prompt-text",
+        "one step",
+        "--subtask-title",
+        "work",
+    ]));
+    let subtask_id = filed["subtasks"][0]["subtask_id"]
+        .as_str()
+        .expect("subtask id");
+
+    // While the principal holds one session, the session commands find it.
+    let only: serde_json::Value = success_data(&run(&["session", "status"]));
+    assert_eq!(only["session"]["role"], "orchestrator");
+
+    // Claiming a named subtask acts in the role its kind calls for.
+    let claim: ClaimData = success_data(&run(&["subtask", "claim", "--subtask-id", subtask_id]));
+    assert!(!claim.claim_id.is_empty());
+    assert_eq!(
+        active_session(&dir, &db, "me", "executor")["agent_principal_id"],
+        "me"
+    );
+
+    // With two sessions, a session command has to say which one it means.
+    let ambiguous = run(&["session", "status"]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert_eq!(stderr_error(&ambiguous).code, "invalid_args");
+    let executor: serde_json::Value =
+        success_data(&run(&["--as-role", "executor", "session", "status"]));
+    assert_eq!(executor["session"]["role"], "executor");
+}
+
 #[test]
 fn maint_prune_reports_both_counts_and_refuses_a_non_positive_age() {
     let dir = TempDir::new().expect("tempdir");

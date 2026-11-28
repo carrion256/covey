@@ -1,6 +1,8 @@
 use clap::{Args, Subcommand, ValueEnum};
 use covey::{ArtifactKind, CompletionPolicy, ReviewVerdict, SubtaskKind};
 
+use super::SessionArg;
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum SubtaskCommand {
     Create(CreateSubtaskArgs),
@@ -41,8 +43,8 @@ pub(crate) enum ReviewCommand {
 }
 #[derive(Args, Debug)]
 pub(crate) struct CreateSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) meta_task_id: String,
     #[arg(long)]
@@ -73,8 +75,8 @@ pub(crate) struct CreateSubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ClaimNextArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long, default_value_t = 30_000)]
     pub(crate) lease_duration_ms: i64,
     #[arg(long)]
@@ -90,8 +92,8 @@ pub(crate) struct ClaimNextArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ClaimSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) subtask_id: String,
     #[arg(long, default_value_t = 30_000)]
@@ -105,8 +107,8 @@ pub(crate) struct ClaimSubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct StartSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -117,8 +119,8 @@ pub(crate) struct StartSubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct FinishSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -133,8 +135,8 @@ pub(crate) struct FinishSubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RetrySubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -151,8 +153,8 @@ pub(crate) struct RetrySubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct FailSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -169,8 +171,8 @@ pub(crate) struct FailSubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct AbandonSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -181,8 +183,8 @@ pub(crate) struct AbandonSubtaskArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RetireSubtaskArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) subtask_id: String,
     #[arg(long)]
@@ -225,8 +227,8 @@ pub(crate) struct StuckSubtasksArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RenewClaimArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -239,8 +241,8 @@ pub(crate) struct RenewClaimArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ReleaseClaimArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -259,8 +261,8 @@ pub(crate) struct ExpiringClaimsArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct PublishArtifactArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) claim_id: String,
     #[arg(long)]
@@ -281,8 +283,8 @@ pub(crate) struct PublishArtifactArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RequestReviewArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) subtask_id: String,
     #[arg(long)]
@@ -297,8 +299,8 @@ pub(crate) struct RequestReviewArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct DecideReviewArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) review_id: String,
     #[arg(long)]
@@ -315,8 +317,8 @@ pub(crate) struct DecideReviewArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct PermissiveLandReviewArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) review_id: String,
     #[arg(long)]

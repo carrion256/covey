@@ -1,6 +1,8 @@
 use clap::{Args, Subcommand, ValueEnum};
 use covey::ConflictResolutionState;
 
+use super::SessionArg;
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum EventsCommand {
     List(ListEventsArgs),
@@ -54,8 +56,8 @@ pub(crate) struct ListEventsArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ResolveConflictArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) conflict_id: String,
     #[arg(long)]

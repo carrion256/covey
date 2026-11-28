@@ -10,7 +10,11 @@ use covey::{
     UpdateMetaTaskReq,
 };
 
-pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Result<Rendered> {
+pub(super) fn dispatch_meta(
+    store: &Covey,
+    actor: &Actor,
+    command: MetaCommand,
+) -> covey::Result<Rendered> {
     match command {
         MetaCommand::Submit(args) => {
             let prompt_text = args.prompt_text.or(args.prompt_file).ok_or_else(|| {
@@ -19,7 +23,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
                 }
             })?;
             let mut request = SubmitMetaTaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 prompt_text,
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("submit-meta-task")),
@@ -98,7 +102,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             let closure = MetaTaskClosure::from(args.closure);
             store.cancel_meta_task(
                 covey::CancelMetaTaskReq::try_from_raw_parts(
-                    args.session_token.clone(),
+                    actor.session_token(store, args.session, PLANNING)?,
                     meta_task_id.clone(),
                     args.idempotency_key
                         .unwrap_or_else(|| new_idempotency_key("cancel-meta-task")),
@@ -119,7 +123,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             let closure = MetaTaskClosure::from(args.closure);
             store.complete_meta_task(
                 CompleteMetaTaskReq::try_from_raw_parts(
-                    args.session_token.clone(),
+                    actor.session_token(store, args.session, PLANNING)?,
                     meta_task_id.clone(),
                     args.idempotency_key
                         .unwrap_or_else(|| new_idempotency_key("complete-meta-task")),
@@ -140,7 +144,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
             let change =
                 annotation_change(args.verdict, args.acked, args.tier, args.entity, args.clear)?;
             store.annotate_meta_task(AnnotateMetaTaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 meta_task_id.clone(),
                 change.clone(),
                 args.idempotency_key
@@ -170,7 +174,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
         MetaCommand::Update(args) => {
             let meta_task_id = resolve_meta_task_id(store, args.meta_task_id, args.handle)?;
             let mut request = UpdateMetaTaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 meta_task_id.clone(),
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("update-meta-task")),
@@ -195,7 +199,7 @@ pub(super) fn dispatch_meta(store: &Covey, command: MetaCommand) -> covey::Resul
         }
         MetaCommand::LinkSource(args) => {
             store.link_meta_task_source(LinkMetaTaskSourceReq::try_from_raw_parts(
-                args.session_token.clone(),
+                actor.session_token(store, args.session, PLANNING)?,
                 args.meta_task_id.clone(),
                 args.thread_id,
                 args.received_at,

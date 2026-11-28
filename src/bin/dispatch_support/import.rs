@@ -1,11 +1,15 @@
 use super::*;
 
-pub(super) fn dispatch_import(store: &Covey, command: ImportCommand) -> covey::Result<Rendered> {
+pub(super) fn dispatch_import(
+    store: &Covey,
+    actor: &Actor,
+    command: ImportCommand,
+) -> covey::Result<Rendered> {
     match command {
         ImportCommand::Bd(args) => {
             let result = store.import_bd_v1(
                 ImportBdV1Req::from_flat_selectors(
-                    args.session_token.clone(),
+                    actor.session_token(store, args.session, PLANNING)?,
                     args.beads_db,
                     args.meta_task_id,
                     args.prompt_text,
@@ -30,9 +34,16 @@ pub(super) fn dispatch_import(store: &Covey, command: ImportCommand) -> covey::R
             ))
         }
         ImportCommand::Openspec(args) => {
+            // A dry run names no session. Without `--as`, a write passes the
+            // token it was given and the library decides whether one is owed.
+            let session_token = if args.dry_run || actor.principal.is_none() {
+                args.session.session_token
+            } else {
+                Some(actor.session_token(store, args.session, PLANNING)?)
+            };
             let result = store.import_openspec(
                 ImportOpenSpecReq::from_flat_mode(
-                    args.session_token,
+                    session_token,
                     args.change,
                     args.project_root.to_string_lossy().to_string(),
                     args.dry_run,

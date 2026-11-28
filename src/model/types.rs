@@ -21,7 +21,9 @@ pub struct CoveyTypeValidationError {
 }
 
 impl CoveyTypeValidationError {
-    pub(crate) const fn new(field: &'static str, reason: &'static str) -> Self {
+    /// Builds the refusal of one named field or flag.
+    #[must_use]
+    pub const fn new(field: &'static str, reason: &'static str) -> Self {
         Self { field, reason }
     }
 

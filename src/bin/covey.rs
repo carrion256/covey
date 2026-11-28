@@ -25,7 +25,7 @@ mod dispatch_support;
 mod render_support;
 
 use cli::{Cli, Commands, DigestBlake3Args, DigestCommand, ProofApplyCommand, ProofCommand};
-use dispatch_support::dispatch;
+use dispatch_support::{Actor, dispatch};
 use render_support::{
     OutputError, OutputMode, Rendered, ReportableError, exit_code_for_clap_kind, help_payload,
     print_line, render_error, render_success, resolve_output_mode, short_help_payload,
@@ -61,7 +61,7 @@ covey <group> <command> [flags]
 groups: session meta subtask claim artifact review queue reservation repoops events conflict maint import digest
 digest: covey digest blake3 --file PATH | --text TEXT | --stdin
 proof: covey proof apply verify | verify-batch | print-contract
-global: --db PATH --json --config PATH --profile NAME --read-only
+global: --db PATH --json --config PATH --profile NAME --read-only --as PRINCIPAL --as-role ROLE
 examples:
   covey session register --agent-principal-id agent-a --agent-instance-id run-1 --role executor
   covey subtask claim-next --session-token session_123 --lease-duration-ms 30000
@@ -139,6 +139,15 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
             ));
         }
     };
+    if cli.as_role.is_some() && cli.as_principal.is_none() {
+        return Err(OutputError::new(
+            mode,
+            ReportableError::invalid_args(
+                "--as-role names a role for --as <PRINCIPAL>, which is missing",
+                vec!["Run `covey --help` for usage.".into()],
+            ),
+        ));
+    }
 
     if let Commands::Proof { command } = cli.command {
         return Ok(run_proof_command(command));
@@ -176,8 +185,13 @@ fn run(raw_args: Vec<OsString>) -> Result<ExitCode, OutputError> {
     }
     .map_err(|err| OutputError::from_covey(mode, err))?;
 
+    let actor = Actor {
+        principal: cli.as_principal,
+        role: cli.as_role.map(Into::into),
+        read_only: cli.read_only,
+    };
     let rendered =
-        dispatch(&store, cli.command).map_err(|err| OutputError::from_covey(mode, err))?;
+        dispatch(&store, &actor, cli.command).map_err(|err| OutputError::from_covey(mode, err))?;
     render_success(mode, &rendered);
     Ok(ExitCode::SUCCESS)
 }

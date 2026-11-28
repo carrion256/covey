@@ -53,6 +53,7 @@ enum TypedEventListItem {
 
 pub(super) fn dispatch_conflict(
     store: &Covey,
+    actor: &Actor,
     command: ConflictCommand,
 ) -> covey::Result<Rendered> {
     match command {
@@ -62,7 +63,7 @@ pub(super) fn dispatch_conflict(
         }
         ConflictCommand::Resolve(args) => {
             store.resolve_conflict(ResolveConflictReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.conflict_id.clone(),
                 args.resolution_state.into(),
                 args.idempotency_key

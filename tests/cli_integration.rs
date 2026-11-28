@@ -394,11 +394,11 @@ fn help_defaults_to_json_for_piped_output() {
 
 #[test]
 fn json_help_describes_the_named_command_and_the_global_flags() {
-    let output = run(&["subtask", "claim-next", "--help", "--json"]);
+    let output = run(&["subtask", "claim", "--help", "--json"]);
     assert!(output.status.success());
     let payload = parse_stdout_json(&output);
     let data = &payload["data"];
-    assert_eq!(data["target"]["name"], "claim-next");
+    assert_eq!(data["target"]["name"], "claim");
     let flags = data["target"]["flags"].as_array().expect("flags");
     let flag = |long: &str| {
         flags
@@ -406,8 +406,13 @@ fn json_help_describes_the_named_command_and_the_global_flags() {
             .find(|flag| flag["long"] == long)
             .unwrap_or_else(|| panic!("{long} is listed"))
     };
-    assert_eq!(flag("--session-token")["required"], true);
-    assert_eq!(flag("--session-token")["value_name"], "SESSION_TOKEN");
+    assert_eq!(flag("--subtask-id")["required"], true);
+    assert_eq!(flag("--subtask-id")["value_name"], "SUBTASK_ID");
+    assert_eq!(
+        flag("--session-token")["required"],
+        false,
+        "the session is named by the token or by the global --as"
+    );
     assert_eq!(flag("--start")["required"], false);
     assert!(
         flag("--start").get("value_name").is_none(),
@@ -428,7 +433,7 @@ fn json_help_describes_the_named_command_and_the_global_flags() {
         data["help_text"]
             .as_str()
             .expect("help text")
-            .contains("--session-token")
+            .contains("--subtask-id")
     );
 }
 

@@ -150,8 +150,8 @@ impl From<CoveyError> for ReportableError {
         };
 
         use CoveyError::{
-            MetaTaskAlreadySuperseded, MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks, StoreBusy,
-            StoreMigrationRequired, StoreNotFound, StoreReadOnly,
+            MetaTaskAlreadySuperseded, MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks,
+            NoActiveSession, StoreBusy, StoreMigrationRequired, StoreNotFound, StoreReadOnly,
         };
 
         let reason: &'static str = (&error).into();
@@ -175,6 +175,18 @@ impl From<CoveyError> for ReportableError {
                 reason,
                 message: error.to_string(),
                 suggestions: vec!["Check the referenced id or digest.".into()],
+            },
+            NoActiveSession { .. } => Self {
+                exit_code: 1,
+                code: "not_found",
+                reason,
+                message: error.to_string(),
+                suggestions: vec![
+                    "No session was registered: a command that continues held work, a \
+                     `session` command, and any command under --read-only only look the \
+                     session up. Start work first, or name the role with --as-role."
+                        .into(),
+                ],
             },
             InvalidLeaseDuration { .. }
             | InvalidPath { .. }

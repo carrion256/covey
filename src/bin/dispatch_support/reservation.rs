@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn dispatch_reservation(
     store: &Covey,
+    actor: &Actor,
     command: ReservationCommand,
 ) -> covey::Result<Rendered> {
     match command {
@@ -9,7 +10,7 @@ pub(super) fn dispatch_reservation(
             let owner_subtask_id = covey::SubtaskId::parse(args.owner_subtask_id)?;
             let lease_duration_ms = covey::LeaseDurationMs::parse(args.lease_duration_ms)?;
             let req = RequestReservationReq::try_from_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 owner_subtask_id,
                 args.scope_class.into(),
                 args.scope_key,
@@ -29,7 +30,7 @@ pub(super) fn dispatch_reservation(
         }
         ReservationCommand::Release(args) => {
             store.release_reservation(ReleaseReservationReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.reservation_id.clone(),
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("release-reservation")),
@@ -44,7 +45,7 @@ pub(super) fn dispatch_reservation(
         }
         ReservationCommand::Renew(args) => {
             let reservation = store.renew_reservation(RenewReservationReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.reservation_id,
                 args.extend_by_ms,
                 args.idempotency_key

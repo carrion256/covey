@@ -138,7 +138,11 @@ All library mutations and read workflows hang off `Covey`, but the implementatio
   group's arguments.
 - `src/bin/dispatch_support.rs`
   The dispatch router: one arm per parsed command group, each handing off to the
-  group's own module.
+  group's own module. It also resolves the session a command acts as: the token
+  the command names, or, for the global `--as` principal, that principal's
+  active session in the role the command needs. Commands that start work ensure
+  the session; commands that continue held work, the `session` commands, and
+  every command against a read-only store only look it up.
 - `src/bin/dispatch_support/`
   Per-group translation of parsed arguments into typed `Covey` requests and typed
   success acks, one file per related command group.

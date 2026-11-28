@@ -1,6 +1,8 @@
 use clap::{Args, Subcommand, ValueEnum};
 use covey::ScopeClass;
 
+use super::SessionArg;
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum ReservationCommand {
     Request(RequestReservationArgs),
@@ -10,8 +12,8 @@ pub(crate) enum ReservationCommand {
 }
 #[derive(Args, Debug)]
 pub(crate) struct RequestReservationArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) owner_subtask_id: String,
     #[arg(long)]
@@ -28,8 +30,8 @@ pub(crate) struct RequestReservationArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ReleaseReservationArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) reservation_id: String,
     #[arg(long)]
@@ -38,8 +40,8 @@ pub(crate) struct ReleaseReservationArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RenewReservationArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) reservation_id: String,
     #[arg(long)]

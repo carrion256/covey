@@ -6,6 +6,8 @@ use covey::{
     SessionRole,
 };
 
+use super::SessionArg;
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum SessionCommand {
     Register(RegisterSessionArgs),
@@ -64,8 +66,8 @@ pub(crate) struct ActiveSessionForPrincipalArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecordRuntimeAttestationArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) provider: String,
     #[arg(long)]
@@ -90,30 +92,30 @@ pub(crate) struct RecordRuntimeAttestationArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct HeartbeatArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct ExitSessionArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) idempotency_key: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct SessionStatusArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct SubmitMetaArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     /// Prompt text supplied on the command line.
     #[arg(
         long,
@@ -168,8 +170,8 @@ pub(crate) struct SubmitMetaArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct LinkSourceMetaArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) meta_task_id: String,
     #[arg(long)]
@@ -188,8 +190,8 @@ pub(crate) struct LinkSourceMetaArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct CancelMetaArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     /// Meta-task id to cancel.
     #[arg(long, conflicts_with_all = ["handle"], required_unless_present_any = ["handle"])]
     pub(crate) meta_task_id: Option<String>,
@@ -210,8 +212,8 @@ pub(crate) struct CancelMetaArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct CompleteMetaArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     /// Meta-task id to complete.
     #[arg(long, conflicts_with_all = ["handle"], required_unless_present_any = ["handle"])]
     pub(crate) meta_task_id: Option<String>,
@@ -232,8 +234,8 @@ pub(crate) struct CompleteMetaArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct AnnotateMetaArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     /// Meta-task id to annotate.
     #[arg(long, conflicts_with_all = ["handle"], required_unless_present_any = ["handle"])]
     pub(crate) meta_task_id: Option<String>,
@@ -297,8 +299,8 @@ pub(crate) struct AnnotateMetaArgs {
         .args(["title", "clear_title", "urgency", "clear_urgency", "due", "clear_due"])
 ))]
 pub(crate) struct UpdateMetaArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     /// Meta-task id to update.
     #[arg(long, conflicts_with_all = ["handle"], required_unless_present_any = ["handle"])]
     pub(crate) meta_task_id: Option<String>,

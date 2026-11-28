@@ -50,8 +50,27 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) read_only: bool,
 
+    /// Act as this principal instead of naming a session token. The command
+    /// runs as the principal's active session in the role it needs: a command
+    /// that starts work registers that session when there is none, and a
+    /// command that continues work a session holds only looks it up.
+    #[arg(long = "as", global = true, value_name = "PRINCIPAL")]
+    pub(crate) as_principal: Option<String>,
+
+    /// Role to act in with `--as`, in place of the command's usual role.
+    #[arg(long, global = true, value_enum, value_name = "ROLE")]
+    pub(crate) as_role: Option<SessionRoleArg>,
+
     #[command(subcommand)]
     pub(crate) command: Commands,
+}
+
+/// Names the session a command acts as.
+#[derive(Args, Debug)]
+pub(crate) struct SessionArg {
+    /// Token of the session to act as. Give either this or the global `--as`.
+    #[arg(long)]
+    pub(crate) session_token: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

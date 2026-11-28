@@ -1,6 +1,10 @@
 use super::*;
 
-pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey::Result<Rendered> {
+pub(super) fn dispatch_subtask(
+    store: &Covey,
+    actor: &Actor,
+    command: SubtaskCommand,
+) -> covey::Result<Rendered> {
     match command {
         SubtaskCommand::Create(args) => {
             if SubtaskKind::from(args.kind) != SubtaskKind::Work
@@ -14,7 +18,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 .unwrap_or_else(|| new_idempotency_key("create-subtask"));
             let base = store.workflow();
             let mut req = CreateWorkSubtaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.meta_task_id,
                 args.subtask_id,
                 args.title,
@@ -44,10 +48,11 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             let idempotency_key = args
                 .idempotency_key
                 .unwrap_or_else(|| new_idempotency_key("claim-next-subtask"));
+            let session_token = actor.session_token(store, args.session, TAKING_WORK)?;
             let claim = if let Some(routing_key) = args.routing_key {
                 store.claim_next_routed_subtask(
                     ClaimNextRoutedReq::try_from_raw_parts(
-                        args.session_token.clone(),
+                        session_token,
                         args.lease_duration_ms,
                         routing_key,
                         args.meta_task_id.clone(),
@@ -58,7 +63,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             } else {
                 store.claim_next_subtask(
                     ClaimNextReq::try_from_raw_parts_scoped(
-                        args.session_token.clone(),
+                        session_token,
                         args.lease_duration_ms,
                         args.meta_task_id.clone(),
                         idempotency_key,
@@ -75,9 +80,16 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
             ))
         }
         SubtaskCommand::Claim(args) => {
+            // With `--as` and no `--as-role`, the kind of the subtask decides
+            // which of the principal's sessions claims it.
+            let role = if actor.uses_command_role() {
+                claiming_role(store.subtask_status(&args.subtask_id)?.subtask().kind())
+            } else {
+                SessionRole::Executor
+            };
             let claim = store.claim_subtask(
                 ClaimSubtaskReq::try_from_raw_parts(
-                    args.session_token.clone(),
+                    actor.session_token(store, args.session, SessionNeed::Ensure(role))?,
                     args.subtask_id.clone(),
                     args.lease_duration_ms,
                     args.idempotency_key
@@ -89,7 +101,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
         }
         SubtaskCommand::Start(args) => {
             store.start_subtask(StartSubtaskReq::try_from_raw_parts(
-                args.session_token.clone(),
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id.clone(),
                 args.fence_seq,
                 args.idempotency_key.unwrap_or_else(|| {
@@ -110,7 +122,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 fenced_idempotency_key("finish-subtask", &args.claim_id, args.fence_seq)
             });
             let outcome = store.finish_subtask(FinishSubtaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id,
                 args.fence_seq,
                 args.evidence_digest,
@@ -127,7 +139,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 fenced_idempotency_key("retry-subtask", &args.claim_id, args.fence_seq)
             });
             let outcome = store.retry_subtask(RetrySubtaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id,
                 args.fence_seq,
                 args.evidence_digest,
@@ -145,7 +157,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
                 fenced_idempotency_key("fail-subtask", &args.claim_id, args.fence_seq)
             });
             let outcome = store.fail_subtask(FailSubtaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id,
                 args.fence_seq,
                 args.evidence_digest,
@@ -160,7 +172,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
         }
         SubtaskCommand::Abandon(args) => {
             store.abandon_subtask(AbandonSubtaskReq::try_from_raw_parts(
-                args.session_token.clone(),
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id.clone(),
                 args.fence_seq,
                 args.idempotency_key.unwrap_or_else(|| {
@@ -178,7 +190,7 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
         }
         SubtaskCommand::Retire(args) => {
             store.retire_subtask(RetireSubtaskReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.subtask_id.clone(),
                 args.idempotency_key
                     .unwrap_or_else(|| new_idempotency_key("retire-subtask")),
@@ -226,6 +238,15 @@ pub(super) fn dispatch_subtask(store: &Covey, command: SubtaskCommand) -> covey:
     }
 }
 
+/// The session role that claims a subtask of this kind.
+const fn claiming_role(kind: SubtaskKind) -> SessionRole {
+    match kind {
+        SubtaskKind::Work => SessionRole::Executor,
+        SubtaskKind::Review => SessionRole::Reviewer,
+        SubtaskKind::Cleanup => SessionRole::Orchestrator,
+    }
+}
+
 /// The human line of a claim ack; `started` says the subtask is in progress.
 fn claim_summary(claim: &covey::ClaimResult, started: bool) -> String {
     format!(
@@ -237,11 +258,15 @@ fn claim_summary(claim: &covey::ClaimResult, started: bool) -> String {
     )
 }
 
-pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Result<Rendered> {
+pub(super) fn dispatch_claim(
+    store: &Covey,
+    actor: &Actor,
+    command: ClaimCommand,
+) -> covey::Result<Rendered> {
     match command {
         ClaimCommand::Renew(args) => {
             let claim = store.renew_claim(RenewClaimReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id,
                 args.fence_seq,
                 args.extend_by_ms,
@@ -258,7 +283,7 @@ pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Res
         }
         ClaimCommand::Release(args) => {
             store.release_claim(ReleaseClaimReq::try_from_raw_parts(
-                args.session_token.clone(),
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id.clone(),
                 args.fence_seq,
                 args.idempotency_key.unwrap_or_else(|| {
@@ -283,6 +308,7 @@ pub(super) fn dispatch_claim(store: &Covey, command: ClaimCommand) -> covey::Res
 
 pub(super) fn dispatch_artifact(
     store: &Covey,
+    actor: &Actor,
     command: ArtifactCommand,
 ) -> covey::Result<Rendered> {
     match command {
@@ -296,7 +322,7 @@ pub(super) fn dispatch_artifact(
                 .get_name()
                 .to_owned();
             let req = PublishArtifactReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_WORK)?,
                 args.claim_id,
                 args.fence_seq,
                 artifact_digest.clone(),
@@ -322,11 +348,15 @@ pub(super) fn dispatch_artifact(
     }
 }
 
-pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::Result<Rendered> {
+pub(super) fn dispatch_review(
+    store: &Covey,
+    actor: &Actor,
+    command: ReviewCommand,
+) -> covey::Result<Rendered> {
     match command {
         ReviewCommand::Request(args) => {
             let req = RequestReviewReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, PLANNING)?,
                 args.subtask_id,
                 args.artifact_digest,
                 args.review_subtask_id,
@@ -352,7 +382,7 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
                 ReviewVerdictArg::Blocked => ReviewDecisionAckVerdict::Blocked,
             };
             let req = DecideReviewReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_REVIEW)?,
                 args.review_id,
                 args.claim_id,
                 args.fence_seq,
@@ -380,7 +410,7 @@ pub(super) fn dispatch_review(store: &Covey, command: ReviewCommand) -> covey::R
             let claim_id = args.claim_id.clone();
             let receipt_digest = args.receipt_digest.clone();
             let req = RecordPermissiveLandingReceiptReq::try_from_raw_parts(
-                args.session_token,
+                actor.session_token(store, args.session, HOLDING_REVIEW)?,
                 args.review_id,
                 args.claim_id,
                 args.fence_seq,
@@ -424,6 +454,7 @@ mod tests {
     fn workflow_dispatchers_cover_subtask_claim_artifact_and_review_paths() {
         let tempdir = tempfile::tempdir().expect("temp db dir");
         let store = Covey::open(tempdir.path().join("covey.sqlite")).expect("open covey store");
+        let actor = Actor::default();
         let orchestrator = register_session(&store, "orchestrator", SessionRole::Orchestrator);
         let executor_a = register_session(&store, "executor-a", SessionRole::Executor);
         let executor_b = register_session(&store, "executor-b", SessionRole::Executor);
@@ -445,8 +476,9 @@ mod tests {
         {
             let rendered = dispatch_subtask(
                 &store,
+                &actor,
                 SubtaskCommand::Create(CreateSubtaskArgs {
-                    session_token: orchestrator.clone(),
+                    session: token(orchestrator.clone()),
                     meta_task_id: meta_task_id.clone(),
                     title: title.to_owned(),
                     kind: SubtaskKindArg::Work,
@@ -466,8 +498,9 @@ mod tests {
         }
         let rendered = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Create(CreateSubtaskArgs {
-                session_token: orchestrator.clone(),
+                session: token(orchestrator.clone()),
                 meta_task_id: meta_task_id.clone(),
                 title: "reviewed work".to_owned(),
                 kind: SubtaskKindArg::Work,
@@ -487,6 +520,7 @@ mod tests {
 
         let status = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Status(SubtaskStatusArgs {
                 subtask_id: "work-a".to_owned(),
             }),
@@ -495,6 +529,7 @@ mod tests {
         assert_eq!(status.data["subtask"]["subtask_id"], "work-a");
         let availability = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Availability(SubtaskAvailabilityArgs {
                 meta_task_id: None,
                 routing_key: None,
@@ -505,6 +540,7 @@ mod tests {
         assert_eq!(availability.data["reviewer_claimable_count"], 0);
         let stuck = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Stuck(StuckSubtasksArgs {
                 older_than_ms: 0,
                 limit: 10,
@@ -515,8 +551,9 @@ mod tests {
 
         let claim_a = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::ClaimNext(ClaimNextArgs {
-                session_token: executor_a.clone(),
+                session: token(executor_a.clone()),
                 lease_duration_ms: 60_000,
                 meta_task_id: None,
                 idempotency_key: None,
@@ -530,8 +567,9 @@ mod tests {
         let claim_a_fence = claim_a.data["fence_seq"].as_i64().unwrap();
         dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Start(StartSubtaskArgs {
-                session_token: executor_a.clone(),
+                session: token(executor_a.clone()),
                 claim_id: claim_a_id.clone(),
                 fence_seq: claim_a_fence,
                 idempotency_key: None,
@@ -540,8 +578,9 @@ mod tests {
         .expect("start should render");
         dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Abandon(AbandonSubtaskArgs {
-                session_token: executor_a,
+                session: token(executor_a),
                 claim_id: claim_a_id,
                 fence_seq: claim_a_fence,
                 idempotency_key: None,
@@ -551,8 +590,9 @@ mod tests {
 
         let claim_b = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Claim(ClaimSubtaskArgs {
-                session_token: executor_b.clone(),
+                session: token(executor_b.clone()),
                 subtask_id: "work-b".to_owned(),
                 lease_duration_ms: 60_000,
                 idempotency_key: None,
@@ -564,8 +604,9 @@ mod tests {
         let claim_b_fence = claim_b.data["fence_seq"].as_i64().unwrap();
         let renewed = dispatch_claim(
             &store,
+            &actor,
             ClaimCommand::Renew(RenewClaimArgs {
-                session_token: executor_b.clone(),
+                session: token(executor_b.clone()),
                 claim_id: claim_b_id.clone(),
                 fence_seq: claim_b_fence,
                 extend_by_ms: 60_000,
@@ -576,6 +617,7 @@ mod tests {
         assert_eq!(renewed.data["claim_id"], claim_b_id);
         let expiring = dispatch_claim(
             &store,
+            &actor,
             ClaimCommand::Expiring(ExpiringClaimsArgs {
                 within_ms: 120_000,
                 limit: 10,
@@ -585,8 +627,9 @@ mod tests {
         assert!(expiring.data.is_array());
         dispatch_claim(
             &store,
+            &actor,
             ClaimCommand::Release(ReleaseClaimArgs {
-                session_token: executor_b,
+                session: token(executor_b),
                 claim_id: claim_b_id,
                 fence_seq: claim_b_fence,
                 idempotency_key: None,
@@ -596,8 +639,9 @@ mod tests {
 
         let claim_c = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Claim(ClaimSubtaskArgs {
-                session_token: executor_c.clone(),
+                session: token(executor_c.clone()),
                 subtask_id: "work-review".to_owned(),
                 lease_duration_ms: 60_000,
                 idempotency_key: None,
@@ -609,8 +653,9 @@ mod tests {
         let claim_c_fence = claim_c.data["fence_seq"].as_i64().unwrap();
         dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Start(StartSubtaskArgs {
-                session_token: executor_c.clone(),
+                session: token(executor_c.clone()),
                 claim_id: claim_c_id.clone(),
                 fence_seq: claim_c_fence,
                 idempotency_key: None,
@@ -619,8 +664,9 @@ mod tests {
         .expect("start artifact work");
         let artifact = dispatch_artifact(
             &store,
+            &actor,
             ArtifactCommand::Publish(PublishArtifactArgs {
-                session_token: executor_c,
+                session: token(executor_c),
                 claim_id: claim_c_id,
                 fence_seq: claim_c_fence,
                 artifact_digest: "blake3:artifact-digest-work-review".to_owned(),
@@ -639,8 +685,9 @@ mod tests {
 
         let review = dispatch_review(
             &store,
+            &actor,
             ReviewCommand::Request(RequestReviewArgs {
-                session_token: orchestrator,
+                session: token(orchestrator),
                 subtask_id: "work-review".to_owned(),
                 artifact_digest: "blake3:artifact-digest-work-review".to_owned(),
                 priority: 5,
@@ -652,8 +699,9 @@ mod tests {
         let review_id = review.data["review_id"].as_str().unwrap().to_owned();
         let review_claim = dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Claim(ClaimSubtaskArgs {
-                session_token: reviewer.clone(),
+                session: token(reviewer.clone()),
                 subtask_id: "review-work-review".to_owned(),
                 lease_duration_ms: 60_000,
                 idempotency_key: None,
@@ -665,8 +713,9 @@ mod tests {
         let review_fence = review_claim.data["fence_seq"].as_i64().unwrap();
         dispatch_subtask(
             &store,
+            &actor,
             SubtaskCommand::Start(StartSubtaskArgs {
-                session_token: reviewer.clone(),
+                session: token(reviewer.clone()),
                 claim_id: review_claim_id.clone(),
                 fence_seq: review_fence,
                 idempotency_key: None,
@@ -675,8 +724,9 @@ mod tests {
         .expect("start review subtask");
         let decision = dispatch_review(
             &store,
+            &actor,
             ReviewCommand::Decide(DecideReviewArgs {
-                session_token: reviewer,
+                session: token(reviewer),
                 review_id: review_id.clone(),
                 claim_id: review_claim_id,
                 fence_seq: review_fence,
@@ -704,5 +754,11 @@ mod tests {
             .expect("register session")
             .session_token
             .to_string()
+    }
+
+    fn token(session_token: String) -> SessionArg {
+        SessionArg {
+            session_token: Some(session_token),
+        }
     }
 }

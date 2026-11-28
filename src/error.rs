@@ -58,6 +58,14 @@ pub enum CoveyError {
         agent_principal_id: String,
         role: SessionRole,
     },
+    #[error(
+        "principal {agent_principal_id} has no active session{}",
+        .role.map(|role| format!(" in role {role}")).unwrap_or_default()
+    )]
+    NoActiveSession {
+        agent_principal_id: String,
+        role: Option<SessionRole>,
+    },
     #[error("session {session_token} is not active; current state is {state}")]
     SessionNotActive {
         session_token: SessionToken,
@@ -279,7 +287,7 @@ impl PartialEq for CoveyError {
             InvalidRuntimeAttestation, InvalidSessionToken, InvalidSourceSchema,
             InvalidSubtaskDependency, LeaseExpired, MetaTaskAlreadySuperseded,
             MetaTaskHandleNotFound, MetaTaskHasOpenSubtasks, MetaTaskNotFound, MetaTaskUnavailable,
-            MigrationError, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
+            MigrationError, NoActiveSession, NotClaimOwner, NotQueueClaimOwner, QueueItemNotFound,
             ReservationNotFound, ReviewAlreadyOpen, ReviewKindMismatch, ReviewNotFound,
             RuntimeAttestationMissing, SeparationOfDutiesViolation, SerializationError,
             SessionAlreadyActive, SessionAlreadyHasActiveSubtask, SessionNotActive,
@@ -331,6 +339,16 @@ impl PartialEq for CoveyError {
                     role: left_role,
                 },
                 SessionAlreadyActive {
+                    agent_principal_id: right_principal_id,
+                    role: right_role,
+                },
+            ) => left_principal_id == right_principal_id && left_role == right_role,
+            (
+                NoActiveSession {
+                    agent_principal_id: left_principal_id,
+                    role: left_role,
+                },
+                NoActiveSession {
                     agent_principal_id: right_principal_id,
                     role: right_role,
                 },

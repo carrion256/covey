@@ -492,29 +492,55 @@ covey subtask claim-next --help --json   # one command
 The tree is read from the parser's own definitions, so it names exactly the
 commands and flags the binary accepts.
 
-Default workflow (no configuration or governance flags):
+Default workflow (no configuration or governance flags), with the store named
+once in the environment:
 
 ```bash
-# Register the planner and worker once per run.
-covey session register --agent-principal-id orch --agent-instance-id orch-1 --role orchestrator
-covey session register --agent-principal-id worker --agent-instance-id worker-1 --role executor
+export COVEY_DB_PATH=./covey.db
 
-# Create work. kind=work and priority=100 are defaults.
-covey meta submit --session-token <orch-session> --prompt-text "ship feature"
-covey subtask create --session-token <orch-session> --meta-task-id <meta-task> --title "implement"
+# File a task with its first step. kind=work and priority=100 are defaults.
+covey --as me meta submit --prompt-text "ship feature" --subtask-title "implement"
 
-# Take and start work in one call. The default claim lease is 30000 ms.
-covey subtask claim-next --session-token <worker-session> --start
+# Take and start the work in one call. The default claim lease is 30000 ms.
+covey --as me subtask claim-next --start
 
 # Record the result. Evidence is optional unless the task requires it.
-covey subtask finish --session-token <worker-session> --claim-id <claim> \
-  --fence-seq <fence> --summary "implementation complete"
+covey --as me subtask finish --claim-id <claim> --fence-seq <fence> \
+  --summary "implementation complete"
 ```
+
+`--as PRINCIPAL` names who is acting instead of a session token; every command
+that takes `--session-token` takes exactly one of the two. The command runs as
+the principal's active session in the role it needs:
+
+- a command that starts work registers that session when the principal has
+  none in the role: the `meta` writes, `subtask create`, `retire`,
+  `claim-next` and `claim`, `review request`, the `reservation` writes,
+  `conflict resolve`, the `import` writes, and `queue enqueue`,
+  `reconcile-apply`, `claim-next`, `mark-in-flight`, `supersede`, and
+  `record-openspec-archive-status`
+- a command that continues work a session already holds only looks the
+  session up and answers `not_found` (reason `no_active_session`) when there
+  is none: `subtask start`, `finish`, `retry`, `fail`, `abandon`, `claim renew`
+  and `release`, `artifact publish`, `review decide` and `permissive-land`,
+  `repoops authority-snapshot`, and the remaining `queue` commands that take a
+  session
+- the `session` commands act on the principal's one active session and ask for
+  `--as-role` when it holds several
+- under `--read-only` no session is registered
+
+The role is the command's own: orchestrator to plan and file, executor to take
+and hold work, reviewer to decide a review, apply gate for the apply queue, and
+for `subtask claim` the role that claims that kind of subtask. `--as-role ROLE`
+replaces it, for example `--as me --as-role reviewer subtask claim-next` to
+take review work. The explicit form stays available: `session register` or
+`session ensure` returns a token, and each command takes it as
+`--session-token`.
 
 `subtask retry` and `subtask fail` take the same ownership fields, a summary,
 and a `--failure-code`. All three accept `--evidence-digest` when needed.
-Every call a worker makes with its session token also heartbeats the session
-and extends its claim, so only a worker that stays silent for longer than its
+Every call a worker makes as its session also heartbeats the session and
+extends its claim, so only a worker that stays silent for longer than its
 lease needs `session heartbeat` or `claim renew`. The workflow profile does not
 change ownership, expiry, or dependency rules.
 

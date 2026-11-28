@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 use covey::ObjectType;
 
+use super::SessionArg;
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum ImportCommand {
     Bd(ImportBdArgs),
@@ -12,8 +14,8 @@ pub(crate) enum ImportCommand {
 
 #[derive(Args, Debug)]
 pub(crate) struct ImportBdArgs {
-    #[arg(long)]
-    pub(crate) session_token: String,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) beads_db: String,
     #[arg(long)]
@@ -30,8 +32,8 @@ pub(crate) struct ImportOpenSpecArgs {
     pub(crate) change: String,
     #[arg(long)]
     pub(crate) project_root: PathBuf,
-    #[arg(long)]
-    pub(crate) session_token: Option<String>,
+    #[command(flatten)]
+    pub(crate) session: SessionArg,
     #[arg(long)]
     pub(crate) dry_run: bool,
 }
