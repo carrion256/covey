@@ -65,7 +65,9 @@ pub(crate) struct Cli {
     pub(crate) command: Commands,
 }
 
-/// Names the session a command acts as.
+// Names the session a command acts as. Deliberately not a doc comment: clap
+// reports the doc comment of a flattened struct as the description of every
+// command that flattens it.
 #[derive(Args, Debug)]
 pub(crate) struct SessionArg {
     /// Token of the session to act as. Give either this or the global `--as`.

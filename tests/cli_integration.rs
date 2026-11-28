@@ -437,6 +437,51 @@ fn json_help_describes_the_named_command_and_the_global_flags() {
     );
 }
 
+/// Records each command's description under its full path, walking the tree
+/// `--help --json` prints at the root.
+fn collect_descriptions(command: &Value, parent: &str, owners: &mut Vec<(String, String)>) {
+    let name = command["name"].as_str().expect("command name");
+    let path = if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent} {name}")
+    };
+    if let Some(about) = command["about"].as_str() {
+        owners.push((about.to_owned(), path.clone()));
+    }
+    for child in command["commands"].as_array().into_iter().flatten() {
+        collect_descriptions(child, &path, owners);
+    }
+}
+
+#[test]
+fn json_help_gives_each_description_to_one_command() {
+    let output = run(&["--help", "--json"]);
+    assert!(output.status.success());
+    let payload = parse_stdout_json(&output);
+    let mut owners = Vec::new();
+    collect_descriptions(&payload["data"]["target"], "", &mut owners);
+    assert!(
+        owners.iter().any(|(_, path)| path == "covey meta update"),
+        "a command that has a description reports it: {owners:?}"
+    );
+    owners.sort();
+    let shared: Vec<_> = owners
+        .windows(2)
+        .filter(|pair| pair[0].0 == pair[1].0)
+        .collect();
+    assert!(
+        shared.is_empty(),
+        "a description of flags that commands share is not the description of each command: {shared:?}"
+    );
+
+    let submit = parse_stdout_json(&run(&["meta", "submit", "--help", "--json"]));
+    assert!(
+        submit["data"]["target"].get("about").is_none(),
+        "a command without a description of its own reports none"
+    );
+}
+
 #[test]
 fn json_help_at_the_root_lists_every_group_with_its_commands() {
     let output = run(&["--help", "--json"]);
