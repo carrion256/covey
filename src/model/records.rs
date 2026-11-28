@@ -107,21 +107,6 @@ impl Session {
     }
 
     #[must_use]
-    pub fn agent_principal_id(&self) -> &str {
-        self.agent_principal_id.as_str()
-    }
-
-    #[must_use]
-    pub fn agent_instance_id(&self) -> &str {
-        self.agent_instance_id.as_str()
-    }
-
-    #[must_use]
-    pub const fn last_heartbeat_tick(&self) -> i64 {
-        self.last_heartbeat_tick.get()
-    }
-
-    #[must_use]
     pub const fn last_heartbeat_at(&self) -> TimestampMs {
         self.timestamps.last_heartbeat_at()
     }
@@ -217,13 +202,13 @@ impl From<&Session> for RawSession {
     fn from(session: &Session) -> Self {
         Self {
             session_token: session.session_token.clone(),
-            agent_principal_id: session.agent_principal_id().to_owned(),
-            agent_instance_id: session.agent_instance_id().to_owned(),
+            agent_principal_id: session.agent_principal_id.as_str().to_owned(),
+            agent_instance_id: session.agent_instance_id.as_str().to_owned(),
             role: session.role,
             state: session.state(),
             active_subtask_id: session.active_subtask_id().cloned(),
             last_heartbeat_at: session.last_heartbeat_at(),
-            last_heartbeat_tick: session.last_heartbeat_tick(),
+            last_heartbeat_tick: session.last_heartbeat_tick.get(),
             created_at: session.created_at(),
             updated_at: session.updated_at(),
         }
@@ -398,16 +383,6 @@ impl RuntimeAttestation {
     #[must_use]
     pub fn provider_run_id_issuer(&self) -> Option<&str> {
         self.provider_run_identity.provider_run_id_issuer()
-    }
-
-    #[must_use]
-    pub fn agent_principal_id(&self) -> &str {
-        self.agent_principal_id.as_str()
-    }
-
-    #[must_use]
-    pub fn agent_instance_id(&self) -> &str {
-        self.agent_instance_id.as_str()
     }
 
     /// Returns true for old migrated rows that predate provider run identity.
@@ -604,8 +579,8 @@ impl From<&RuntimeAttestation> for RawRuntimeAttestation {
     fn from(attestation: &RuntimeAttestation) -> Self {
         Self {
             session_token: attestation.session_token.clone(),
-            agent_principal_id: attestation.agent_principal_id().to_owned(),
-            agent_instance_id: attestation.agent_instance_id().to_owned(),
+            agent_principal_id: attestation.agent_principal_id.as_str().to_owned(),
+            agent_instance_id: attestation.agent_instance_id.as_str().to_owned(),
             role: attestation.role,
             provider: attestation.provider.clone(),
             model: attestation.model.clone(),
@@ -4252,26 +4227,6 @@ impl OpenSpecArchiveStatus {
             updated_at,
         })
     }
-
-    #[must_use]
-    pub fn queue_id(&self) -> &str {
-        self.queue_id.as_str()
-    }
-
-    #[must_use]
-    pub fn subtask_id(&self) -> &str {
-        self.subtask_id.as_str()
-    }
-
-    #[must_use]
-    pub fn artifact_digest(&self) -> &str {
-        self.artifact_digest.as_str()
-    }
-
-    #[must_use]
-    pub fn openspec_change_id(&self) -> &str {
-        self.openspec_change_id.as_str()
-    }
 }
 
 impl TryFrom<RawOpenSpecArchiveStatus> for OpenSpecArchiveStatus {
@@ -4302,10 +4257,10 @@ impl TryFrom<RawOpenSpecArchiveStatus> for OpenSpecArchiveStatus {
 impl From<&OpenSpecArchiveStatus> for RawOpenSpecArchiveStatus {
     fn from(status: &OpenSpecArchiveStatus) -> Self {
         Self {
-            queue_id: status.queue_id().to_owned(),
-            subtask_id: status.subtask_id().to_owned(),
-            artifact_digest: status.artifact_digest().to_owned(),
-            openspec_change_id: status.openspec_change_id().to_owned(),
+            queue_id: status.queue_id.as_str().to_owned(),
+            subtask_id: status.subtask_id.as_str().to_owned(),
+            artifact_digest: status.artifact_digest.as_str().to_owned(),
+            openspec_change_id: status.openspec_change_id.as_str().to_owned(),
             state: status.state,
             blocked_reason: status
                 .blocked_reason

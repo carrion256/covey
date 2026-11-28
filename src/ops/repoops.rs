@@ -60,7 +60,7 @@ impl Covey {
             let claim_fact = match repoops_claim_status_for_subtask(subtask.state()) {
                 RepoopsAuthorityClaimStatus::InProgress => RepoopsAuthorityClaimFact::in_progress(
                     claim.claim_id.clone(),
-                    session.agent_principal_id().to_owned(),
+                    session.agent_principal_id.as_str().to_owned(),
                     scope_in.clone(),
                     Vec::new(),
                     !scope_in.is_empty(),
@@ -68,7 +68,7 @@ impl Covey {
                 ),
                 RepoopsAuthorityClaimStatus::Open => RepoopsAuthorityClaimFact::open(
                     claim.claim_id.clone(),
-                    session.agent_principal_id().to_owned(),
+                    session.agent_principal_id.as_str().to_owned(),
                     scope_in.clone(),
                     Vec::new(),
                     !scope_in.is_empty(),
@@ -77,7 +77,7 @@ impl Covey {
             .map_err(|reason| crate::CoveyError::InvalidObservabilityRow { reason })?;
             let common = RepoopsAuthoritySnapshotCommon::new(
                 REPOOPS_AUTHORITY_SNAPSHOT_VERSION.to_owned(),
-                session.agent_principal_id().to_owned(),
+                session.agent_principal_id.as_str().to_owned(),
                 RepoopsAuthorityPolicyFact::enforce(),
                 scope,
                 locks,
@@ -445,7 +445,7 @@ fn lock_facts_for_prepared_paths(
             if reservation.owner_subtask_id == claim.subtask_id {
                 locks.push(RepoopsAuthorityLockFact::owned(
                     path.clone(),
-                    session.agent_principal_id().to_owned(),
+                    session.agent_principal_id.as_str().to_owned(),
                     repoops_claim_ref(claim.claim_id.as_str()),
                 )?);
             } else {
@@ -487,7 +487,7 @@ fn lock_facts_for_prepared_paths_nested(
             if reservation.owner_subtask_id == claim.subtask_id {
                 locks.push(RepoopsAuthorityLockFact::owned(
                     path.clone(),
-                    session.agent_principal_id().to_owned(),
+                    session.agent_principal_id.as_str().to_owned(),
                     repoops_claim_ref(claim.claim_id.as_str()),
                 )?);
             } else {

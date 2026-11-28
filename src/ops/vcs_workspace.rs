@@ -370,7 +370,7 @@ mod tests {
         let workspace = covey
             .record_vcs_workspace(
                 RecordVcsWorkspaceReq::try_from_raw_parts(
-                    session.session_token().to_owned(),
+                    session.session_token.to_string(),
                     "workspace-change-a-execution",
                     VcsWorkspaceKind::Execution,
                     "/data/tmp/mutai-worktrees/repo/change-a",

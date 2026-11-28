@@ -430,8 +430,8 @@ impl Covey {
                     let producer_session = load_session_tx(tx, &artifact.produced_by_session)?;
                     if producer_session.agent_principal_id == session.agent_principal_id {
                         return Err(CoveyError::SeparationOfDutiesViolation {
-                            reviewer_principal_id: session.agent_principal_id().to_owned(),
-                            producer_principal_id: producer_session.agent_principal_id().to_owned(),
+                            reviewer_principal_id: session.agent_principal_id.as_str().to_owned(),
+                            producer_principal_id: producer_session.agent_principal_id.as_str().to_owned(),
                         });
                     }
                     let work_subtask = load_subtask_tx(tx, review.subtask_id())?;
@@ -708,8 +708,8 @@ impl Covey {
                     let producer_session = load_session_tx(tx, &artifact.produced_by_session)?;
                     if producer_session.agent_principal_id == session.agent_principal_id {
                         return Err(CoveyError::SeparationOfDutiesViolation {
-                            reviewer_principal_id: session.agent_principal_id().to_owned(),
-                            producer_principal_id: producer_session.agent_principal_id().to_owned(),
+                            reviewer_principal_id: session.agent_principal_id.as_str().to_owned(),
+                            producer_principal_id: producer_session.agent_principal_id.as_str().to_owned(),
                         });
                     }
                     let work_subtask = load_subtask_tx(tx, review.subtask_id())?;

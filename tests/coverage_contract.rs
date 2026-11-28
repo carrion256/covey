@@ -408,10 +408,10 @@ fn mark_applied_creates_openspec_archive_blocker_for_imported_subtasks(rig: Rig)
         .expect("archive blockers");
     assert_eq!(blockers.len(), 1);
     let blocker = &blockers[0];
-    assert_eq!(blocker.queue_id(), queue_id);
-    assert_eq!(blocker.subtask_id(), item.subtask_id());
-    assert_eq!(blocker.artifact_digest(), item.artifact_digest());
-    assert_eq!(blocker.openspec_change_id(), "change-auto");
+    assert_eq!(blocker.queue_id.as_str(), queue_id);
+    assert_eq!(blocker.subtask_id.as_str(), item.subtask_id());
+    assert_eq!(blocker.artifact_digest.as_str(), item.artifact_digest());
+    assert_eq!(blocker.openspec_change_id.as_str(), "change-auto");
     assert_eq!(blocker.state, OpenSpecArchiveStatusState::Blocked);
     assert_eq!(
         blocker.blocked_reason.as_ref().map(AsRef::as_ref),

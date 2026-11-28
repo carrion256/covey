@@ -235,8 +235,7 @@ pub(super) fn dispatch_queue(
                 &status,
                 format!(
                     "openspec archive status recorded {} state={:?}",
-                    status.queue_id(),
-                    status.state
+                    status.queue_id, status.state
                 ),
             ))
         }

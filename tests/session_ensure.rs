@@ -147,14 +147,14 @@ fn ensure_registers_when_the_principal_has_no_active_session() {
 
     assert!(ensured.registered);
     assert_eq!(ensured.session.role, SessionRole::Orchestrator);
-    assert_eq!(ensured.session.agent_principal_id(), PRINCIPALS[0]);
-    assert_eq!(ensured.session.agent_instance_id(), "alpha-instance-1");
+    assert_eq!(ensured.session.agent_principal_id, PRINCIPALS[0]);
+    assert_eq!(ensured.session.agent_instance_id, "alpha-instance-1");
     assert_eq!(
         rig.registered_event_count(),
         before + 1,
         "the registration appends exactly one session_registered event"
     );
-    rig.heartbeat(ensured.session.session_token())
+    rig.heartbeat(ensured.session.session_token.as_str())
         .expect("the ensured token heartbeats");
 }
 
@@ -200,7 +200,7 @@ fn ensure_returns_an_active_session_from_another_instance_as_it_is() {
         second.session, first.session,
         "the active session is returned as it is"
     );
-    assert_eq!(second.session.agent_instance_id(), "alpha-instance-1");
+    assert_eq!(second.session.agent_instance_id, "alpha-instance-1");
 }
 
 #[rstest]
@@ -242,7 +242,7 @@ fn ensure_registers_a_second_session_for_another_role(
             "each role keeps its own active session"
         );
     }
-    rig.heartbeat(held.session.session_token())
+    rig.heartbeat(held.session.session_token.as_str())
         .expect("the first session stays usable");
 }
 
@@ -252,7 +252,7 @@ fn ensure_registers_a_new_session_after_the_active_one_exits() {
     let first = rig
         .ensure(PRINCIPALS[0], "alpha-instance-1", SessionRole::Executor)
         .expect("first ensure registers");
-    rig.exit(first.session.session_token())
+    rig.exit(first.session.session_token.as_str())
         .expect("exit the active session");
     assert_eq!(
         rig.active_session_count(PRINCIPALS[0], SessionRole::Executor),

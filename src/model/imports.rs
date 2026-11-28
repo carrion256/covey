@@ -143,12 +143,6 @@ impl ImportBdV1Req {
         })
     }
 
-    /// Returns the session token that authorizes this import.
-    #[must_use]
-    pub fn session_token(&self) -> &SessionToken {
-        &self.session_token
-    }
-
     /// Returns the existing meta-task selector, when this request uses one.
     #[must_use]
     pub fn meta_task_id(&self) -> Option<&str> {
@@ -631,12 +625,6 @@ impl ImportBdV1ItemResult {
                 .expect("skipped bd item source_issue_id must be valid"),
             outcome,
         }
-    }
-
-    /// Returns the source issue id that produced this import item.
-    #[must_use]
-    pub fn source_issue_id(&self) -> &str {
-        self.source_issue_id.as_str()
     }
 
     /// Returns the imported or duplicate-existing subtask id, when present.
@@ -1725,12 +1713,6 @@ impl ImportOpenSpecConflict {
         match &self.object {
             ImportOpenSpecConflictObject::Subtask { task_digest, .. } => task_digest.as_str(),
         }
-    }
-
-    /// Returns the typed conflict reason.
-    #[must_use]
-    pub const fn reason(&self) -> ImportOpenSpecConflictReason {
-        self.reason
     }
 }
 

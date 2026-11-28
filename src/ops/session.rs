@@ -52,7 +52,7 @@ impl Covey {
         let result = self.with_write_tx(|tx, now| register_session_in_tx(tx, &req, now));
         self.log_operation(
             "register_session",
-            req.agent_principal_id(),
+            req.agent_principal_id.as_str(),
             started_at,
             &result,
             |handle| vec![format!("session:{}", handle.session_token)],
@@ -80,7 +80,7 @@ impl Covey {
         )?;
         let started_at = Instant::now();
         let result = self.with_write_tx(|tx, now| {
-            match active_session_for_principal_tx(tx, req.agent_principal_id(), req.role)? {
+            match active_session_for_principal_tx(tx, req.agent_principal_id.as_str(), req.role)? {
                 Some(session) => Ok(SessionEnsured {
                     session,
                     registered: false,
@@ -93,7 +93,7 @@ impl Covey {
         });
         self.log_operation(
             "ensure_session",
-            req.agent_principal_id(),
+            req.agent_principal_id.as_str(),
             started_at,
             &result,
             |ensured| vec![format!("session:{}", ensured.session.session_token)],
@@ -375,15 +375,17 @@ fn register_session_in_tx(
     let lease_now = advance_lease_clock(tx, now)?;
     crate::store::with_idempotent_mutation(
         tx,
-        req.agent_principal_id(),
+        req.agent_principal_id.as_str(),
         "register_session",
         &req.idempotency_key,
         req,
         TimestampMs::parse(now)?,
         || {
-            if active_session_for_principal_tx(tx, req.agent_principal_id(), req.role)?.is_some() {
+            if active_session_for_principal_tx(tx, req.agent_principal_id.as_str(), req.role)?
+                .is_some()
+            {
                 return Err(CoveyError::SessionAlreadyActive {
-                    agent_principal_id: req.agent_principal_id().to_owned(),
+                    agent_principal_id: req.agent_principal_id.as_str().to_owned(),
                     role: req.role,
                 });
             }
@@ -407,16 +409,16 @@ fn register_session_in_tx(
             )?;
             let handle = SessionHandle::new(
                 session_token,
-                req.agent_principal_id().to_owned(),
-                req.agent_instance_id().to_owned(),
+                req.agent_principal_id.as_str().to_owned(),
+                req.agent_instance_id.as_str().to_owned(),
                 req.role,
             );
             append_session_event(
                 tx,
                 EventType::SessionRegistered,
                 ObjectType::Session,
-                handle.session_token(),
-                handle.session_token(),
+                handle.session_token.as_str(),
+                handle.session_token.as_str(),
                 &handle,
                 now,
             )?;

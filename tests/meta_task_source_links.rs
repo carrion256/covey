@@ -284,11 +284,12 @@ fn second_link_source_is_refused_and_leaves_the_original_link_intact() {
     let error = rig
         .link_source(&meta_task_id)
         .expect_err("a meta task holds exactly one source link");
-    assert_eq!(
-        error,
-        CoveyError::SourceLinkExists {
-            meta_task_id: meta_task_id.clone()
-        }
+    assert!(
+        matches!(
+            &error,
+            CoveyError::SourceLinkExists { meta_task_id: refused } if *refused == meta_task_id
+        ),
+        "{error:?}"
     );
     assert_eq!(
         error.to_string(),
@@ -303,11 +304,11 @@ fn second_link_source_is_refused_and_leaves_the_original_link_intact() {
 fn link_source_on_an_unknown_task_reports_the_existing_not_found_error() {
     let rig = Rig::new();
 
-    assert_eq!(
+    assert!(matches!(
         rig.link_source("meta-does-not-exist")
             .expect_err("unknown meta task"),
         CoveyError::MetaTaskNotFound
-    );
+    ));
 }
 
 #[rstest]
@@ -413,8 +414,11 @@ fn link_source_requires_the_authority_that_cancel_requires() {
         )
         .expect_err("an executor may not cancel");
 
-    assert_eq!(link_error, cancel_error);
-    assert!(matches!(link_error, CoveyError::WrongRole { .. }));
+    let refusal = |error: &CoveyError| match error {
+        CoveyError::WrongRole { expected, actual } => (expected.clone(), *actual),
+        other => panic!("expected a wrong-role refusal, got {other:?}"),
+    };
+    assert_eq!(refusal(&link_error), refusal(&cancel_error));
     assert_eq!(rig.link_row_count(&meta_task_id), 0);
 }
 

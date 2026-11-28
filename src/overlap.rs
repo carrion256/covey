@@ -770,18 +770,12 @@ mod tests {
         let absolute_path = normalize_scope_key(ScopeClass::ExactPath, "/tmp/file")
             .expect_err("absolute paths must be rejected");
 
-        assert_eq!(
-            empty_generated,
-            CoveyError::InvalidPath {
-                path: "   ".to_owned(),
-            }
-        );
-        assert_eq!(
-            absolute_path,
-            CoveyError::InvalidPath {
-                path: "/tmp/file".to_owned(),
-            }
-        );
+        for (error, refused) in [(&empty_generated, "   "), (&absolute_path, "/tmp/file")] {
+            assert!(
+                matches!(error, CoveyError::InvalidPath { path } if path == refused),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]
@@ -804,11 +798,9 @@ mod tests {
 
         let err = normalize_generated_members(&members).expect_err("escape paths must be rejected");
 
-        assert_eq!(
-            err,
-            CoveyError::InvalidPath {
-                path: "../secret.txt".to_owned(),
-            }
+        assert!(
+            matches!(&err, CoveyError::InvalidPath { path } if path == "../secret.txt"),
+            "{err:?}"
         );
     }
 

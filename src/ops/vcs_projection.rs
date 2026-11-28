@@ -480,7 +480,7 @@ mod tests {
         conn.execute(
             "INSERT INTO meta_tasks (meta_task_id, prompt_text, state, created_by, created_at, updated_at)
              VALUES ('openspec:vcs-projection-change', 'vcs projection fixture', 'active', ?1, 1, 1)",
-            params![session.session_token()],
+            params![session.session_token.as_str()],
         )
         .expect("insert meta task");
         conn.execute(
@@ -525,7 +525,7 @@ mod tests {
         )
         .expect("insert review");
 
-        session.session_token().to_owned()
+        session.session_token.to_string()
     }
 
     fn packet_stack_req(session_token: &str) -> RecordVcsPacketStackEntryReq {

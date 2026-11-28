@@ -630,6 +630,45 @@ mod tests {
         .expect("valid session fixture")
     }
 
+    fn assert_too_large(error: &CoveyError, field: &str, actual: usize, max: usize) {
+        assert!(
+            matches!(
+                error,
+                CoveyError::InputTooLarge { field: f, actual: a, max: m }
+                    if f == field && *a == actual && *m == max
+            ),
+            "{error:?}"
+        );
+    }
+
+    fn assert_wrong_role(error: &CoveyError, expected: &[SessionRole], actual: SessionRole) {
+        assert!(
+            matches!(
+                error,
+                CoveyError::WrongRole { expected: e, actual: a }
+                    if e.as_slice() == expected && *a == actual
+            ),
+            "{error:?}"
+        );
+    }
+
+    fn assert_illegal_transition(
+        error: &CoveyError,
+        from: impl Into<StateValue>,
+        to: impl Into<StateValue>,
+        object: ObjectType,
+    ) {
+        let (from, to) = (from.into(), to.into());
+        assert!(
+            matches!(
+                error,
+                CoveyError::IllegalTransition { from: f, to: t, object: o }
+                    if *f == from && *t == to && *o == object
+            ),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn validate_idempotency_key_accepts_non_empty_keys() {
         assert!(validate_idempotency_key("idem-123").is_ok());
@@ -642,19 +681,18 @@ mod tests {
         let oversized = validate_idempotency_key(&"x".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1))
             .expect_err("oversized idempotency key must be rejected");
 
-        assert_eq!(
-            blank,
-            CoveyError::InvalidIdempotencyKey {
-                idempotency_key: "   ".to_owned(),
-            }
+        assert!(
+            matches!(
+                &blank,
+                CoveyError::InvalidIdempotencyKey { idempotency_key } if idempotency_key == "   "
+            ),
+            "{blank:?}"
         );
-        assert_eq!(
-            oversized,
-            CoveyError::InputTooLarge {
-                field: "idempotency_key".to_owned(),
-                actual: MAX_IDEMPOTENCY_KEY_LEN + 1,
-                max: MAX_IDEMPOTENCY_KEY_LEN,
-            }
+        assert_too_large(
+            &oversized,
+            "idempotency_key",
+            MAX_IDEMPOTENCY_KEY_LEN + 1,
+            MAX_IDEMPOTENCY_KEY_LEN,
         );
     }
 
@@ -664,14 +702,7 @@ mod tests {
 
         let err = ensure_length("title", "abcd", 3).expect_err("overflow must fail");
 
-        assert_eq!(
-            err,
-            CoveyError::InputTooLarge {
-                field: "title".to_owned(),
-                actual: 4,
-                max: 3,
-            }
-        );
+        assert_too_large(&err, "title", 4, 3);
     }
 
     #[test]
@@ -681,13 +712,11 @@ mod tests {
         let err = ensure_generated_member_count(MAX_GENERATED_MEMBERS + 1)
             .expect_err("overflow must fail");
 
-        assert_eq!(
-            err,
-            CoveyError::InputTooLarge {
-                field: "generated_members".to_owned(),
-                actual: MAX_GENERATED_MEMBERS + 1,
-                max: MAX_GENERATED_MEMBERS,
-            }
+        assert_too_large(
+            &err,
+            "generated_members",
+            MAX_GENERATED_MEMBERS + 1,
+            MAX_GENERATED_MEMBERS,
         );
     }
 
@@ -700,20 +729,16 @@ mod tests {
         let negative = ensure_positive_lease_duration("lease_duration_ms", -1)
             .expect_err("negative lease duration must fail");
 
-        assert_eq!(
-            zero,
-            CoveyError::InvalidLeaseDuration {
-                field: "lease_duration_ms".to_owned(),
-                provided: 0,
-            }
-        );
-        assert_eq!(
-            negative,
-            CoveyError::InvalidLeaseDuration {
-                field: "lease_duration_ms".to_owned(),
-                provided: -1,
-            }
-        );
+        for (error, refused) in [(&zero, 0), (&negative, -1)] {
+            assert!(
+                matches!(
+                    error,
+                    CoveyError::InvalidLeaseDuration { field, provided }
+                        if field == "lease_duration_ms" && *provided == refused
+                ),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]
@@ -731,13 +756,7 @@ mod tests {
             require_session_can_claim_kind(&session(SessionRole::Reviewer), SubtaskKind::Work)
                 .expect_err("reviewers must not claim work subtasks");
 
-        assert_eq!(
-            err,
-            CoveyError::WrongRole {
-                expected: vec![SessionRole::Executor],
-                actual: SessionRole::Reviewer,
-            }
-        );
+        assert_wrong_role(&err, &[SessionRole::Executor], SessionRole::Reviewer);
     }
 
     #[test]
@@ -748,12 +767,10 @@ mod tests {
         let err = require_session_can_request_review(&session(SessionRole::Reviewer))
             .expect_err("reviewers must not request review");
 
-        assert_eq!(
-            err,
-            CoveyError::WrongRole {
-                expected: vec![SessionRole::Executor, SessionRole::Orchestrator],
-                actual: SessionRole::Reviewer,
-            }
+        assert_wrong_role(
+            &err,
+            &[SessionRole::Executor, SessionRole::Orchestrator],
+            SessionRole::Reviewer,
         );
     }
 
@@ -765,12 +782,10 @@ mod tests {
         let err = require_session_can_enqueue(&session(SessionRole::Executor))
             .expect_err("executors must not enqueue apply work");
 
-        assert_eq!(
-            err,
-            CoveyError::WrongRole {
-                expected: vec![SessionRole::Orchestrator, SessionRole::ApplyGate],
-                actual: SessionRole::Executor,
-            }
+        assert_wrong_role(
+            &err,
+            &[SessionRole::Orchestrator, SessionRole::ApplyGate],
+            SessionRole::Executor,
         );
     }
 
@@ -853,37 +868,29 @@ mod tests {
         )
         .expect_err("blocked artifacts require a new evidence item");
 
-        assert_eq!(
-            work_err,
-            CoveyError::IllegalTransition {
-                from: StateValue::Subtask(SubtaskState::Approved),
-                to: StateValue::Subtask(SubtaskState::Applied),
-                object: ObjectType::Subtask,
-            }
+        assert_illegal_transition(
+            &work_err,
+            SubtaskState::Approved,
+            SubtaskState::Applied,
+            ObjectType::Subtask,
         );
-        assert_eq!(
-            review_err,
-            CoveyError::IllegalTransition {
-                from: StateValue::Subtask(SubtaskState::Available),
-                to: StateValue::Subtask(SubtaskState::InProgress),
-                object: ObjectType::Subtask,
-            }
+        assert_illegal_transition(
+            &review_err,
+            SubtaskState::Available,
+            SubtaskState::InProgress,
+            ObjectType::Subtask,
         );
-        assert_eq!(
-            retry_err,
-            CoveyError::IllegalTransition {
-                from: StateValue::Subtask(SubtaskState::ChangesRequested),
-                to: StateValue::Subtask(SubtaskState::Claimed),
-                object: ObjectType::Subtask,
-            }
+        assert_illegal_transition(
+            &retry_err,
+            SubtaskState::ChangesRequested,
+            SubtaskState::Claimed,
+            ObjectType::Subtask,
         );
-        assert_eq!(
-            blocked_retry_err,
-            CoveyError::IllegalTransition {
-                from: StateValue::Subtask(SubtaskState::Blocked),
-                to: StateValue::Subtask(SubtaskState::Claimed),
-                object: ObjectType::Subtask,
-            }
+        assert_illegal_transition(
+            &blocked_retry_err,
+            SubtaskState::Blocked,
+            SubtaskState::Claimed,
+            ObjectType::Subtask,
         );
     }
 
@@ -933,37 +940,29 @@ mod tests {
         )
         .expect_err("resolved conflicts cannot be downgraded");
 
-        assert_eq!(
-            review_err,
-            CoveyError::IllegalTransition {
-                from: crate::model::ReviewState::Decided.into(),
-                to: crate::model::ReviewState::InProgress.into(),
-                object: ObjectType::Review,
-            }
+        assert_illegal_transition(
+            &review_err,
+            crate::model::ReviewState::Decided,
+            crate::model::ReviewState::InProgress,
+            ObjectType::Review,
         );
-        assert_eq!(
-            queue_err,
-            CoveyError::IllegalTransition {
-                from: ReadyQueueState::Applied.into(),
-                to: ReadyQueueState::Queued.into(),
-                object: ObjectType::ReadyQueue,
-            }
+        assert_illegal_transition(
+            &queue_err,
+            ReadyQueueState::Applied,
+            ReadyQueueState::Queued,
+            ObjectType::ReadyQueue,
         );
-        assert_eq!(
-            reservation_err,
-            CoveyError::IllegalTransition {
-                from: ReservationState::Released.into(),
-                to: ReservationState::Expired.into(),
-                object: ObjectType::Reservation,
-            }
+        assert_illegal_transition(
+            &reservation_err,
+            ReservationState::Released,
+            ReservationState::Expired,
+            ObjectType::Reservation,
         );
-        assert_eq!(
-            conflict_err,
-            CoveyError::IllegalTransition {
-                from: ConflictResolutionState::Resolved.into(),
-                to: ConflictResolutionState::Acknowledged.into(),
-                object: ObjectType::Conflict,
-            }
+        assert_illegal_transition(
+            &conflict_err,
+            ConflictResolutionState::Resolved,
+            ConflictResolutionState::Acknowledged,
+            ObjectType::Conflict,
         );
     }
 
@@ -977,13 +976,11 @@ mod tests {
         )
         .expect_err("disallowed edge must fail");
 
-        assert_eq!(
-            err,
-            CoveyError::IllegalTransition {
-                from: StateValue::Claim(ClaimState::Held),
-                to: StateValue::Claim(ClaimState::Revoked),
-                object: ObjectType::Claim,
-            }
+        assert_illegal_transition(
+            &err,
+            ClaimState::Held,
+            ClaimState::Revoked,
+            ObjectType::Claim,
         );
     }
 }

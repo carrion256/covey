@@ -1179,7 +1179,7 @@ impl Covey {
             &req.session_token,
             started_at,
             &result,
-            |status| vec![format!("queue:{}", status.queue_id())],
+            |status| vec![format!("queue:{}", status.queue_id)],
         );
         result
     }
@@ -1223,7 +1223,7 @@ impl Covey {
             |items| {
                 items
                     .iter()
-                    .map(|item| format!("queue:{}", item.queue_id()))
+                    .map(|item| format!("queue:{}", item.queue_id))
                     .collect()
             },
         );
@@ -1540,27 +1540,26 @@ impl Covey {
                     for blocker in &open_blockers {
                         let status_req = RecordOpenSpecArchiveStatusReq::try_from_raw_parts(
                             req.session_token.as_str(),
-                            blocker.queue_id().to_owned(),
-                            blocker.artifact_digest().to_owned(),
+                            blocker.queue_id.as_str().to_owned(),
+                            blocker.artifact_digest.as_str().to_owned(),
                             req.openspec_change_id.as_str().to_owned(),
                             OpenSpecArchiveStatusState::Archived,
                             None,
                             Some(req.archive_proof_digest.as_str().to_owned()),
                             format!(
                                 "finish-openspec-archive-cleanup:{}:{}",
-                                req.openspec_change_id,
-                                blocker.queue_id()
+                                req.openspec_change_id, blocker.queue_id
                             ),
                         )?;
                         update_openspec_archive_status_tx(
                             tx,
                             &status_req,
-                            blocker.subtask_id(),
+                            blocker.subtask_id.as_str(),
                             now,
                         )?;
                         mark_apply_worktrees_for_queue_tx(
                             tx,
-                            blocker.queue_id(),
+                            blocker.queue_id.as_str(),
                             ApplyWorktreeState::CleanupAllowed,
                             now,
                         )?;
@@ -1568,7 +1567,7 @@ impl Covey {
                             tx,
                             EventType::OpenSpecArchiveStatusRecorded,
                             ObjectType::ReadyQueue,
-                            blocker.queue_id(),
+                            blocker.queue_id.as_str(),
                             req.session_token.as_str(),
                             &status_req,
                             now,
@@ -3211,14 +3210,14 @@ fn require_live_apply_gate_evidence(
     }
     if apply_gate_session.agent_principal_id == evidence.producer_principal_id {
         return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
-            apply_gate_principal_id: apply_gate_session.agent_principal_id().to_owned(),
+            apply_gate_principal_id: apply_gate_session.agent_principal_id.as_str().to_owned(),
             conflicting_role: "producer".to_owned(),
             conflicting_principal_id: evidence.producer_principal_id,
         });
     }
     if apply_gate_session.agent_principal_id == evidence.reviewer_principal_id {
         return Err(CoveyError::ApplyGateSeparationOfDutiesViolation {
-            apply_gate_principal_id: apply_gate_session.agent_principal_id().to_owned(),
+            apply_gate_principal_id: apply_gate_session.agent_principal_id.as_str().to_owned(),
             conflicting_role: "reviewer".to_owned(),
             conflicting_principal_id: evidence.reviewer_principal_id,
         });

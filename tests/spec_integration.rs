@@ -798,7 +798,7 @@ fn session_lifecycle_and_stale_reap_follow_spec() {
         .active_session_for_principal("principal_a", SessionRole::Executor)
         .expect("active session lookup")
         .expect("active executor session");
-    assert_eq!(active.session_token(), sess_a);
+    assert_eq!(active.session_token.as_str(), sess_a);
     assert_eq!(
         covey
             .active_session_for_principal("principal_a", SessionRole::Reviewer)
@@ -867,7 +867,7 @@ fn store_time_does_not_follow_a_backward_wall_clock_step() {
         .active_session_for_principal("principal_clock", SessionRole::Executor)
         .expect("active session lookup")
         .expect("the session is still active");
-    assert_eq!(active.session_token(), session);
+    assert_eq!(active.session_token.as_str(), session);
 }
 
 #[test]

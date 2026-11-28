@@ -126,18 +126,6 @@ impl RegisterSessionReq {
             idempotency_key: parse_idempotency_key(idempotency_key)?,
         })
     }
-
-    /// Returns the validated stable agent principal identity.
-    #[must_use]
-    pub fn agent_principal_id(&self) -> &str {
-        self.agent_principal_id.as_str()
-    }
-
-    /// Returns the validated concrete agent process identity.
-    #[must_use]
-    pub fn agent_instance_id(&self) -> &str {
-        self.agent_instance_id.as_str()
-    }
 }
 
 /// Session identity returned after successful registration.
@@ -184,24 +172,6 @@ impl SessionHandle {
             agent_instance_id: AgentInstanceId::parse(agent_instance_id.into())?,
             role,
         })
-    }
-
-    /// Returns the validated session token.
-    #[must_use]
-    pub fn session_token(&self) -> &str {
-        self.session_token.as_str()
-    }
-
-    /// Returns the validated stable agent principal identity.
-    #[must_use]
-    pub fn agent_principal_id(&self) -> &str {
-        self.agent_principal_id.as_str()
-    }
-
-    /// Returns the validated concrete agent process identity.
-    #[must_use]
-    pub fn agent_instance_id(&self) -> &str {
-        self.agent_instance_id.as_str()
     }
 }
 

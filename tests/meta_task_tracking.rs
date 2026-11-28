@@ -848,7 +848,7 @@ fn superseding_an_unknown_task_is_refused_and_creates_nothing() {
         .covey
         .submit_meta_task_reporting(rig.request().with_supersedes([parsed_id("meta_unknown")]))
         .expect_err("an unknown replaced task is refused");
-    assert_eq!(error, CoveyError::MetaTaskNotFound);
+    assert!(matches!(error, CoveyError::MetaTaskNotFound), "{error:?}");
     assert_eq!(rig.table_count("meta_tasks"), tasks_before);
     assert_eq!(rig.table_count("meta_task_supersedes"), 0);
 }
@@ -1368,7 +1368,10 @@ fn handle_resolves_the_meta_task_and_unknown_handles_are_refused() {
         .covey
         .meta_task_id_for_handle(unknown)
         .expect_err("an unknown handle is refused");
-    assert_eq!(error, CoveyError::MetaTaskHandleNotFound { handle: 9999 });
+    assert!(
+        matches!(error, CoveyError::MetaTaskHandleNotFound { handle: 9999 }),
+        "{error:?}"
+    );
 }
 
 #[test]

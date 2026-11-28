@@ -1139,8 +1139,8 @@ fn register_session_request_rejects_invalid_agent_identity() {
         "idem-register",
     )
     .expect("valid registration request");
-    assert_eq!(req.agent_principal_id(), "principal-1");
-    assert_eq!(req.agent_instance_id(), "instance-1");
+    assert_eq!(req.agent_principal_id, "principal-1");
+    assert_eq!(req.agent_instance_id, "instance-1");
 
     let value = serde_json::to_value(&req).expect("registration request serializes");
     assert_eq!(value["agent_principal_id"], "principal-1");
@@ -3610,7 +3610,6 @@ fn import_bd_v1_result_derives_counts_from_items() {
 #[test]
 fn import_bd_v1_item_result_requires_typed_subtask_ids() {
     let valid_item = super::ImportBdV1ItemResult::imported("bd-1", "subtask-1");
-    assert_eq!(valid_item.source_issue_id(), "bd-1");
     assert_eq!(valid_item.source_issue_id, "bd-1");
 
     let item_with_invalid_source = serde_json::json!({
@@ -5592,7 +5591,7 @@ fn openspec_import_conflict_rejects_non_subtask_shapes() {
     assert_eq!(conflict.object_id(), "subtask-1");
     assert_eq!(conflict.openspec_task_id(), "1.1");
     assert_eq!(
-        conflict.reason(),
+        conflict.reason,
         ImportOpenSpecConflictReason::ActiveClaimChangedSource
     );
     assert_eq!(conflict.task_digest(), "blake3:task");
