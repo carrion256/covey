@@ -35,7 +35,8 @@ use super::{
 };
 
 /// Persisted session row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawSession")]
 pub struct Session {
     pub session_token: SessionToken,
     pub agent_principal_id: AgentPrincipalId,
@@ -187,17 +188,6 @@ impl Serialize for Session {
     }
 }
 
-impl<'de> Deserialize<'de> for Session {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawSession::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl From<&Session> for RawSession {
     fn from(session: &Session) -> Self {
         Self {
@@ -272,7 +262,8 @@ const MISSING_PROVIDER_RUN_ID: &str = "__covey_missing_provider_run_id__";
 const MISSING_PROVIDER_RUN_ID_ISSUER: &str = "__covey_missing_provider_run_id_issuer__";
 
 /// Runtime identity evidence bound to one Covey session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawRuntimeAttestation")]
 pub struct RuntimeAttestation {
     pub session_token: SessionToken,
     pub agent_principal_id: AgentPrincipalId,
@@ -561,17 +552,6 @@ impl Serialize for RuntimeAttestation {
         S: Serializer,
     {
         RawRuntimeAttestation::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RuntimeAttestation {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawRuntimeAttestation::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -892,7 +872,8 @@ mod runtime_attestation_tests {
 }
 
 /// Persisted meta-task row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawMetaTask")]
 pub struct MetaTask {
     pub meta_task_id: MetaTaskId,
     pub prompt_text: PromptText,
@@ -1099,17 +1080,6 @@ impl Serialize for MetaTask {
     }
 }
 
-impl<'de> Deserialize<'de> for MetaTask {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawMetaTask::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl TryFrom<RawMetaTask> for MetaTask {
     type Error = String;
 
@@ -1175,7 +1145,8 @@ impl MetaTaskTimestamps {
 /// Serialization remains the exact flat `subtasks` table shape, while the
 /// lifecycle columns are stored as [`SubtaskLifecycle`] so loaded rows cannot
 /// carry impossible `state`/claim/artifact combinations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawSubtaskRow")]
 pub(crate) struct SubtaskRow {
     pub subtask_id: SubtaskId,
     pub meta_task_id: MetaTaskId,
@@ -1432,17 +1403,6 @@ impl Serialize for SubtaskRow {
         S: Serializer,
     {
         RawSubtaskRow::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for SubtaskRow {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawSubtaskRow::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1857,7 +1817,8 @@ impl SubtaskTimestamps {
 
 /// Domain object for executable work.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawWorkSubtask")]
 pub struct WorkSubtask {
     subtask_id: SubtaskId,
     meta_task_id: MetaTaskId,
@@ -1873,7 +1834,8 @@ pub struct WorkSubtask {
 /// Domain object for review work bound to one artifact of one work subtask.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawReviewSubtask")]
 pub struct ReviewSubtask {
     subtask_id: SubtaskId,
     meta_task_id: MetaTaskId,
@@ -1886,7 +1848,8 @@ pub struct ReviewSubtask {
 
 /// Orchestrator-owned cleanup subtask that is not dispatchable to worker lanes.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawCleanupSubtask")]
 #[allow(clippy::too_many_arguments)]
 pub struct CleanupSubtask {
     subtask_id: SubtaskId,
@@ -2125,17 +2088,6 @@ impl Serialize for WorkSubtask {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkSubtask {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawWorkSubtask::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl TryFrom<RawReviewSubtask> for ReviewSubtask {
     type Error = rusqlite::Error;
 
@@ -2177,17 +2129,6 @@ impl Serialize for ReviewSubtask {
     }
 }
 
-impl<'de> Deserialize<'de> for ReviewSubtask {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawReviewSubtask::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl TryFrom<RawCleanupSubtask> for CleanupSubtask {
     type Error = rusqlite::Error;
 
@@ -2224,17 +2165,6 @@ impl Serialize for CleanupSubtask {
         S: Serializer,
     {
         RawCleanupSubtask::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CleanupSubtask {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawCleanupSubtask::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -2367,7 +2297,8 @@ pub(super) const fn default_evidence_policy() -> EvidencePolicy {
 }
 
 /// Persisted claim row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawClaim")]
 pub struct Claim {
     pub claim_id: ClaimId,
     pub subtask_id: SubtaskId,
@@ -2481,17 +2412,6 @@ impl Serialize for Claim {
     }
 }
 
-impl<'de> Deserialize<'de> for Claim {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawClaim::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl TryFrom<RawClaim> for Claim {
     type Error = String;
 
@@ -2546,7 +2466,8 @@ impl ClaimTimestamps {
 
 /// Immutable evidence recorded for one fenced execution attempt.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawAttemptOutcome")]
 pub struct AttemptOutcome {
     pub claim_id: ClaimId,
     pub subtask_id: SubtaskId,
@@ -2698,17 +2619,6 @@ impl Serialize for AttemptOutcome {
     }
 }
 
-impl<'de> Deserialize<'de> for AttemptOutcome {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawAttemptOutcome::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Persisted artifact row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
@@ -2765,7 +2675,8 @@ pub struct SupersededReview {
 /// The enum shape makes decision evidence state-dependent: decided reviews
 /// always carry a verdict and findings digest, while non-decided reviews cannot.
 /// Serialization remains the flat database/API row shape for compatibility.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawReview")]
 pub enum Review {
     Requested(RequestedReview),
     InProgress(InProgressReview),
@@ -2774,7 +2685,8 @@ pub enum Review {
 }
 
 /// Persisted reservation row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawReservation")]
 pub struct Reservation {
     pub reservation_id: ReservationId,
     pub owner_subtask_id: SubtaskId,
@@ -3194,17 +3106,6 @@ impl Serialize for Reservation {
     }
 }
 
-impl<'de> Deserialize<'de> for Reservation {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawReservation::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl From<&Reservation> for RawReservation {
     fn from(reservation: &Reservation) -> Self {
         Self {
@@ -3321,7 +3222,8 @@ pub struct CancelledReadyQueueItem {
 /// The enum shape prevents an in-flight item without active claim fields, and
 /// prevents queued/cancelled/superseded rows from carrying an active claimant or
 /// lease deadline. Serialization remains the flat database/API row shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawReadyQueueItem")]
 pub enum ReadyQueueItem {
     Queued(QueuedReadyQueueItem),
     InFlight(InFlightReadyQueueItem),
@@ -3632,17 +3534,6 @@ impl Serialize for Review {
         S: Serializer,
     {
         RawReview::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Review {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawReview::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -4055,17 +3946,6 @@ impl Serialize for ReadyQueueItem {
     }
 }
 
-impl<'de> Deserialize<'de> for ReadyQueueItem {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawReadyQueueItem::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Covey-owned registry row for an apply-gate-created worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyWorktree {
@@ -4143,7 +4023,8 @@ pub struct VcsPrPublication {
 }
 
 /// Durable cleanup status for an applied OpenSpec-imported queue item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawOpenSpecArchiveStatus")]
 pub struct OpenSpecArchiveStatus {
     pub queue_id: QueueId,
     pub subtask_id: SubtaskId,
@@ -4286,19 +4167,9 @@ impl Serialize for OpenSpecArchiveStatus {
     }
 }
 
-impl<'de> Deserialize<'de> for OpenSpecArchiveStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawOpenSpecArchiveStatus::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Durable explicit operator blocker for one OpenSpec current-work target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawOperatorBlocker")]
 pub struct OperatorBlocker {
     pub blocker_id: OperatorBlockerId,
     pub openspec_change_id: OpenSpecChangeId,
@@ -4505,17 +4376,6 @@ impl Serialize for OperatorBlocker {
         S: Serializer,
     {
         RawOperatorBlocker::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for OperatorBlocker {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawOperatorBlocker::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -5317,7 +5177,8 @@ impl ConflictPayload {
 const MUTATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 const MUTATION_REQUEST_HASH_HEX_BYTES: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawMutationIdempotencyRecord")]
 pub(crate) struct MutationIdempotencyRecord {
     actor_key: MutationActorKey,
     operation: MutationOperation,
@@ -5501,17 +5362,6 @@ impl Serialize for MutationIdempotencyRecord {
     }
 }
 
-impl<'de> Deserialize<'de> for MutationIdempotencyRecord {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawMutationIdempotencyRecord::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 impl From<&MutationIdempotencyRecord> for RawMutationIdempotencyRecord {
     fn from(record: &MutationIdempotencyRecord) -> Self {
         Self {
@@ -5666,7 +5516,8 @@ mod mutation_idempotency_record_tests {
 /// The flat stored shape is preserved for conflict JSON, but the Rust value
 /// carries validated reservation/subtask identifiers and scope variants instead
 /// of raw `ScopeClass` plus arbitrary key pairs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawReservationOverlapConflictPayload")]
 pub struct ReservationOverlapConflictPayload {
     reservation_id: ReservationId,
     overlapping_reservation_id: ReservationId,
@@ -5882,18 +5733,8 @@ impl Serialize for ReservationOverlapConflictPayload {
     }
 }
 
-impl<'de> Deserialize<'de> for ReservationOverlapConflictPayload {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawReservationOverlapConflictPayload::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawOverlapCandidate")]
 pub(crate) struct OverlapCandidate {
     scope: ReservationScope,
 }
@@ -5948,17 +5789,6 @@ impl Serialize for OverlapCandidate {
         S: Serializer,
     {
         RawOverlapCandidate::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for OverlapCandidate {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawOverlapCandidate::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 

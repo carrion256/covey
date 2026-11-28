@@ -2908,7 +2908,8 @@ impl SupersedeQueueItemReq {
 }
 
 /// Request to create an advisory reservation for a subtask.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawRequestReservationReq")]
 pub struct RequestReservationReq {
     pub session_token: SessionToken,
     pub owner_subtask_id: SubtaskId,
@@ -3050,17 +3051,6 @@ impl Serialize for RequestReservationReq {
     }
 }
 
-impl<'de> Deserialize<'de> for RequestReservationReq {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawRequestReservationReq::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Request to release an existing reservation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseReservationReq {
@@ -3120,7 +3110,8 @@ impl RenewReservationReq {
 }
 
 /// Query for overlapping active reservations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawOverlapQueryReq")]
 pub struct OverlapQueryReq {
     scope: ReservationScope,
 }
@@ -3195,17 +3186,6 @@ impl Serialize for OverlapQueryReq {
         S: Serializer,
     {
         RawOverlapQueryReq::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for OverlapQueryReq {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawOverlapQueryReq::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -3329,7 +3309,8 @@ impl<'de> Deserialize<'de> for RepoopsAuthoritySnapshotReq {
 }
 
 /// Request to update the resolution state of a surfaced conflict.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawResolveConflictReq")]
 pub struct ResolveConflictReq {
     session_token: SessionToken,
     conflict_id: ConflictId,
@@ -3426,17 +3407,6 @@ impl Serialize for ResolveConflictReq {
         S: serde::Serializer,
     {
         RawResolveConflictReq::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ResolveConflictReq {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        RawResolveConflictReq::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 

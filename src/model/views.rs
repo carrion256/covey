@@ -1,9 +1,7 @@
 use std::{collections::HashSet, num::NonZeroUsize};
 
 use derive_new::new;
-use serde::{
-    Deserialize, Deserializer, Serialize, Serializer, de::Error as DeError, ser::SerializeStruct,
-};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
 use strum::{Display, EnumString};
 
 use super::{
@@ -24,7 +22,8 @@ use super::{
 /// Read model for CLI and API responses that expose subtask lifecycle state.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawSubtaskView")]
 pub struct SubtaskView {
     pub subtask_id: SubtaskId,
     pub meta_task_id: MetaTaskId,
@@ -303,17 +302,6 @@ impl Serialize for SubtaskView {
     }
 }
 
-impl<'de> Deserialize<'de> for SubtaskView {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawSubtaskView::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
-    }
-}
-
 fn invalid_subtask_view(reason: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
@@ -394,7 +382,8 @@ impl SubtaskViewTimestamps {
 
 /// Snapshot view of a session and its currently active subtask, if any.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawSessionStatus")]
 pub struct SessionStatus {
     state: SessionStatusState,
 }
@@ -492,17 +481,6 @@ impl Serialize for SessionStatus {
     }
 }
 
-impl<'de> Deserialize<'de> for SessionStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawSessionStatus::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
-    }
-}
-
 impl From<&SessionStatus> for RawSessionStatus {
     fn from(status: &SessionStatus) -> Self {
         Self {
@@ -522,7 +500,8 @@ impl TryFrom<RawSessionStatus> for SessionStatus {
 
 /// Snapshot view of a subtask and its attached stateful records.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawSubtaskStatus")]
 pub struct SubtaskStatus {
     subtask: SubtaskView,
     attachments: SubtaskStatusAttachments,
@@ -844,17 +823,6 @@ impl Serialize for SubtaskStatus {
     }
 }
 
-impl<'de> Deserialize<'de> for SubtaskStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawSubtaskStatus::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
-    }
-}
-
 impl From<&SubtaskStatus> for RawSubtaskStatus {
     fn from(status: &SubtaskStatus) -> Self {
         Self {
@@ -894,7 +862,8 @@ impl TryFrom<RawSubtaskStatus> for SubtaskStatus {
 /// (`origin` `backfilled`, method required). The session that attached it is
 /// stored but never rendered, like the creator token of a meta task.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawMetaTaskSourceLink")]
 pub struct MetaTaskSourceLink {
     thread_id: String,
     url: Option<String>,
@@ -1044,17 +1013,6 @@ impl Serialize for MetaTaskSourceLink {
     }
 }
 
-impl<'de> Deserialize<'de> for MetaTaskSourceLink {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawMetaTaskSourceLink::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
-    }
-}
-
 /// Annotations recorded against a meta task.
 ///
 /// Each field mirrors one closed annotation key: a key that was never set is
@@ -1074,7 +1032,8 @@ pub struct MetaTaskAnnotations {
 
 /// Snapshot view of a meta-task and all of its subtasks.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawMetaTaskStatus")]
 pub struct MetaTaskStatus {
     meta_task: MetaTask,
     subtasks: Vec<SubtaskView>,
@@ -1170,17 +1129,6 @@ impl Serialize for MetaTaskStatus {
         S: Serializer,
     {
         RawMetaTaskStatus::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for MetaTaskStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawMetaTaskStatus::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
     }
 }
 
@@ -3167,7 +3115,8 @@ fn current_work_artifact_digests(
 
 /// Observability row for a subtask that has not moved recently enough to merit attention.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawStuckSubtask")]
 pub struct StuckSubtask {
     subtask: SubtaskView,
     attachment: StuckSubtaskAttachment,
@@ -3191,7 +3140,8 @@ struct RawStuckSubtask {
 
 /// Observability row for a held claim whose lease deadline is approaching.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawExpiringClaim")]
 pub struct ExpiringClaim {
     claim: Claim,
     subtask: SubtaskView,
@@ -3354,17 +3304,6 @@ impl Serialize for StuckSubtask {
     }
 }
 
-impl<'de> Deserialize<'de> for StuckSubtask {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawStuckSubtask::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
-    }
-}
-
 impl From<&StuckSubtask> for RawStuckSubtask {
     fn from(row: &StuckSubtask) -> Self {
         Self {
@@ -3515,17 +3454,6 @@ impl Serialize for ExpiringClaim {
         S: Serializer,
     {
         RawExpiringClaim::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ExpiringClaim {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawExpiringClaim::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
     }
 }
 
@@ -4779,7 +4707,8 @@ fn validate_repoops_scope_pattern(value: &str) -> Result<(), String> {
 
 /// Path ownership fact passed through to mutAI repoops preflight.
 #[must_use]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "RawRepoopsAuthorityLockFact")]
 pub struct RepoopsAuthorityLockFact {
     fact: RepoopsAuthorityLock,
 }
@@ -4934,17 +4863,6 @@ impl Serialize for RepoopsAuthorityLockFact {
         S: Serializer,
     {
         RawRepoopsAuthorityLockFact::from(self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RepoopsAuthorityLockFact {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        RawRepoopsAuthorityLockFact::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
     }
 }
 
